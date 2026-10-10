@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve official SDK bytes and the documented SHA-256 hashes.
+static/vendor/star-webprnt/*.js -text
