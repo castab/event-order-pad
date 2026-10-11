@@ -1,4 +1,11 @@
-import { sampleTicket, type OrderTicket } from '../tickets/ticket';
+import type { OrderTicket } from '../tickets/ticket';
+import {
+  draftTicket,
+  newDraft,
+  parseDraft,
+  prepareDraftForPrint,
+  type OrderDraft,
+} from '../tickets/order';
 import type { TicketStore } from '../storage/ticket-store';
 import type {
   PrintAttempt,
@@ -12,6 +19,7 @@ export interface SessionState {
     'loading' | 'ready' | 'saving' | 'printing' | 'handoff' | 'blocked';
   readonly handoffUrl?: string;
   readonly ticket?: OrderTicket;
+  readonly draft?: OrderDraft;
   readonly attempts: readonly PrintAttempt[];
   readonly notice?: string;
 }
@@ -20,6 +28,7 @@ export interface SessionState {
 export class PrintSession {
   state: SessionState = { phase: 'loading', attempts: [] };
   private busy = false;
+  private draftWrites: Promise<void> = Promise.resolve();
   constructor(
     private store: TicketStore,
     private changed: (state: SessionState) => void,
@@ -37,8 +46,7 @@ export class PrintSession {
   async initialize(returned?: PrintReturn): Promise<void> {
     try {
       const saved = await this.store.load();
-      const ticket = saved?.ticket ?? sampleTicket(this.id(), this.now());
-      await this.store.saveTicket(ticket);
+      const ticket = saved?.ticket;
       const attempts: PrintAttempt[] = [];
       for (const attempt of saved?.attempts ?? []) {
         if (attempt.result) {
@@ -62,7 +70,23 @@ export class PrintSession {
         await this.store.finishAttempt(recovered);
         attempts.push(recovered);
       }
-      this.update({ phase: 'ready', ticket, attempts });
+      let draft = (await this.store.loadDraft()) ?? newDraft(ticket?.reference);
+      // No attempt means no send occurred. A crash while saving the order can
+      // safely restore its editable draft; pending attempts always stay locked.
+      if (
+        draft.submittedTicketId &&
+        (draft.submittedTicketId !== ticket?.id || !attempts.length)
+      ) {
+        draft = parseDraft({ ...draft, submittedTicketId: undefined });
+      }
+      if (
+        draft.submittedTicketId === ticket?.id &&
+        attempts.at(-1)?.result?.status === 'accepted'
+      ) {
+        draft = newDraft(draft.reference);
+      }
+      await this.store.saveDraft(draft);
+      this.update({ phase: 'ready', ticket, attempts, draft });
     } catch {
       this.update({
         phase: 'blocked',
@@ -73,13 +97,116 @@ export class PrintSession {
     }
   }
 
-  async print(printer: TicketPrinter, reprint: boolean): Promise<void> {
+  /** Serialize draft writes so fast input cannot restore an older snapshot. */
+  updateDraft(value: OrderDraft): void {
+    if (
+      this.busy ||
+      this.state.phase !== 'ready' ||
+      this.state.draft?.submittedTicketId
+    )
+      return;
+    const draft = parseDraft(value);
+    this.update({ ...this.state, draft });
+    this.draftWrites = this.draftWrites.then(async () => {
+      if (this.state.phase === 'blocked') return;
+      try {
+        await this.store.saveDraft(draft);
+      } catch {
+        this.update({
+          ...this.state,
+          phase: 'blocked',
+          notice:
+            'Could not save the order draft. Printing is blocked. Reopen the page to recover the last saved draft.',
+        });
+      }
+    });
+  }
+
+  private requiresConfirmation(): boolean {
+    return this.state.attempts.at(-1)?.result?.status === 'outcome-unknown';
+  }
+
+  async newOrder(confirmed = false): Promise<void> {
+    if (
+      this.busy ||
+      this.state.phase !== 'ready' ||
+      (this.requiresConfirmation() && !confirmed)
+    )
+      return;
+    this.busy = true;
+    await this.draftWrites;
+    if (this.state.notice) {
+      this.busy = false;
+      return;
+    }
+    const draft = newDraft(
+      this.state.draft?.reference ?? this.state.ticket?.reference,
+    );
+    this.update({ ...this.state, phase: 'saving' });
+    try {
+      await this.store.saveDraft(draft);
+      this.update({ ...this.state, phase: 'ready', draft });
+    } catch {
+      this.update({
+        ...this.state,
+        phase: 'blocked',
+        notice:
+          'Could not save the new order. No data was sent. Reopen the page to recover local storage.',
+      });
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async submit(printer: TicketPrinter, confirmed = false): Promise<void> {
+    if (
+      this.busy ||
+      this.state.phase !== 'ready' ||
+      !this.state.draft ||
+      this.state.draft.submittedTicketId ||
+      (this.requiresConfirmation() && !confirmed)
+    )
+      return;
+    const prepared = prepareDraftForPrint(this.state.draft);
+    const ticket = draftTicket(prepared, this.id(), this.now());
+    await this.send(
+      printer,
+      ticket,
+      false,
+      parseDraft({ ...prepared, submittedTicketId: ticket.id }),
+    );
+  }
+
+  async print(
+    printer: TicketPrinter,
+    reprint: boolean,
+    confirmed = false,
+  ): Promise<void> {
     if (this.busy || this.state.phase !== 'ready' || !this.state.ticket) return;
     if (!reprint && this.state.attempts.length > 0) return;
-    if (reprint && this.state.attempts.length === 0) return;
+    if (
+      reprint &&
+      (!this.state.attempts.length ||
+        (this.requiresConfirmation() && !confirmed))
+    )
+      return;
+    await this.send(printer, this.state.ticket, reprint, this.state.draft);
+  }
+
+  private async send(
+    printer: TicketPrinter,
+    ticket: OrderTicket,
+    reprint: boolean,
+    draft?: OrderDraft,
+  ): Promise<void> {
     this.busy = true;
-    const ticket = this.state.ticket;
-    const previous = this.state.attempts;
+    await this.draftWrites;
+    if (this.state.notice) {
+      this.busy = false;
+      return;
+    }
+    const previous =
+      ticket.id === this.state.ticket?.id ? this.state.attempts : [];
     const attempt: PrintAttempt = {
       id: this.id(),
       ticketId: ticket.id,
@@ -87,15 +214,25 @@ export class PrintSession {
       mode: printer.mode,
       reprint,
     };
-    this.update({ phase: 'saving', ticket, attempts: previous });
+    this.update({ phase: 'saving', ticket, attempts: previous, draft });
     try {
-      await this.store.saveTicket(ticket);
-      await this.store.startAttempt(attempt);
+      if (
+        !reprint &&
+        draft?.submittedTicketId === ticket.id &&
+        !previous.length
+      ) {
+        await this.store.startOrder(ticket, draft, attempt);
+      } else {
+        await this.store.saveTicket(ticket);
+        if (draft) await this.store.saveDraft(draft);
+        await this.store.startAttempt(attempt);
+      }
     } catch {
       this.busy = false;
       this.update({
         phase: 'blocked',
         ticket,
+        draft,
         attempts: previous,
         notice:
           'Could not save print intent. No data was sent. Printing is blocked until storage is recovered.',
@@ -105,6 +242,7 @@ export class PrintSession {
     this.update({
       phase: 'printing',
       ticket,
+      draft,
       attempts: [...previous, attempt],
     });
     let result: PrintAttemptResult;
@@ -117,6 +255,7 @@ export class PrintSession {
         this.update({
           phase: 'handoff',
           ticket,
+          draft,
           attempts: [...previous, attempt],
           handoffUrl: response.url,
         });
@@ -134,17 +273,23 @@ export class PrintSession {
       };
     }
     const completed = { ...attempt, result, completedAt: this.now() };
+    const nextDraft =
+      result.status === 'accepted' && draft?.submittedTicketId === ticket.id
+        ? newDraft(draft.reference)
+        : undefined;
     try {
-      await this.store.finishAttempt(completed);
+      await this.store.finishAttempt(completed, nextDraft);
       this.update({
         phase: 'ready',
         ticket,
+        draft: nextDraft ?? draft,
         attempts: [...previous, completed],
       });
     } catch {
       this.update({
         phase: 'blocked',
         ticket,
+        draft,
         attempts: [...previous, completed],
         notice:
           'The send finished but its outcome could not be saved. Printing is blocked. On reload this attempt will be recovered as unknown; check the physical ticket.',

@@ -1,5 +1,6 @@
 import { parseTicket, type OrderTicket } from '../tickets/ticket';
 import type { PrintAttempt } from '../printing/port';
+import { parseDraft, type OrderDraft } from '../tickets/order';
 
 export interface SavedSession {
   readonly ticket: OrderTicket;
@@ -9,7 +10,14 @@ export interface TicketStore {
   load(): Promise<SavedSession | undefined>;
   saveTicket(ticket: OrderTicket): Promise<void>;
   startAttempt(attempt: PrintAttempt): Promise<void>;
-  finishAttempt(attempt: PrintAttempt): Promise<void>;
+  finishAttempt(attempt: PrintAttempt, nextDraft?: OrderDraft): Promise<void>;
+  loadDraft(): Promise<OrderDraft | undefined>;
+  saveDraft(draft: OrderDraft): Promise<void>;
+  startOrder(
+    ticket: OrderTicket,
+    draft: OrderDraft,
+    attempt: PrintAttempt,
+  ): Promise<void>;
 }
 
 /** One latest ticket, with append-only attempt IDs and individual final outcomes. */
@@ -108,6 +116,55 @@ export class IndexedDbTicketStore implements TicketStore {
     );
   }
 
+  async loadDraft(): Promise<OrderDraft | undefined> {
+    return this.transaction(['settings'], 'readonly', (tx, done) => {
+      const request = tx.objectStore('settings').get('draft');
+      request.onsuccess = () => {
+        try {
+          done(request.result ? parseDraft(request.result) : undefined);
+        } catch {
+          tx.abort();
+        }
+      };
+    });
+  }
+
+  async saveDraft(draft: OrderDraft): Promise<void> {
+    const valid = parseDraft(draft);
+    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
+      tx.objectStore('settings').put(valid, 'draft');
+      done(undefined);
+    });
+  }
+
+  /** Commit a new order, its locked draft and first intent together. */
+  async startOrder(
+    ticket: OrderTicket,
+    draft: OrderDraft,
+    attempt: PrintAttempt,
+  ): Promise<void> {
+    const valid = parseTicket(ticket);
+    const locked = parseDraft(draft);
+    if (
+      attempt.ticketId !== valid.id ||
+      locked.submittedTicketId !== valid.id ||
+      attempt.reprint ||
+      attempt.result
+    )
+      throw new Error('Invalid first order attempt.');
+    await this.transaction<void>(
+      ['tickets', 'settings', 'attempts'],
+      'readwrite',
+      (tx, done) => {
+        tx.objectStore('tickets').add(valid);
+        tx.objectStore('settings').put(valid.id, 'latest');
+        tx.objectStore('settings').put(locked, 'draft');
+        tx.objectStore('attempts').add(attempt);
+        done(undefined);
+      },
+    );
+  }
+
   async saveTicket(ticket: OrderTicket): Promise<void> {
     const valid = parseTicket(ticket);
     await this.transaction<void>(
@@ -152,27 +209,54 @@ export class IndexedDbTicketStore implements TicketStore {
     );
   }
 
-  async finishAttempt(attempt: PrintAttempt): Promise<void> {
-    await this.transaction<void>(['attempts'], 'readwrite', (tx, done) => {
-      const store = tx.objectStore('attempts');
-      const existing = store.get(attempt.id);
-      existing.onsuccess = () => {
-        const before = existing.result as PrintAttempt | undefined;
-        if (
-          !before ||
-          before.result ||
-          !attempt.result ||
-          before.ticketId !== attempt.ticketId ||
-          before.startedAt !== attempt.startedAt ||
-          before.reprint !== attempt.reprint ||
-          before.mode !== attempt.mode
-        ) {
-          tx.abort();
-          return;
-        }
-        store.put(attempt);
-        done(undefined);
-      };
-    });
+  async finishAttempt(
+    attempt: PrintAttempt,
+    nextDraft?: OrderDraft,
+  ): Promise<void> {
+    const next = nextDraft ? parseDraft(nextDraft) : undefined;
+    if (
+      next &&
+      (next.submittedTicketId || attempt.result?.status !== 'accepted')
+    )
+      throw new Error('Only an accepted attempt can advance to a new draft.');
+    await this.transaction<void>(
+      next ? ['attempts', 'settings'] : ['attempts'],
+      'readwrite',
+      (tx, done) => {
+        const store = tx.objectStore('attempts');
+        const existing = store.get(attempt.id);
+        existing.onsuccess = () => {
+          const before = existing.result as PrintAttempt | undefined;
+          if (
+            !before ||
+            before.result ||
+            !attempt.result ||
+            before.ticketId !== attempt.ticketId ||
+            before.startedAt !== attempt.startedAt ||
+            before.reprint !== attempt.reprint ||
+            before.mode !== attempt.mode
+          ) {
+            tx.abort();
+            return;
+          }
+          if (next) {
+            const settings = tx.objectStore('settings');
+            const current = settings.get('draft');
+            current.onsuccess = () => {
+              if (current.result?.submittedTicketId !== attempt.ticketId) {
+                tx.abort();
+                return;
+              }
+              store.put(attempt);
+              settings.put(next, 'draft');
+              done(undefined);
+            };
+          } else {
+            store.put(attempt);
+            done(undefined);
+          }
+        };
+      },
+    );
   }
 }

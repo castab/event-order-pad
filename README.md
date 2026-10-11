@@ -1,10 +1,10 @@
-# Order Pad — Milestone 1
+# Order Pad
 
-A static SvelteKit/TypeScript preparation-ticket proof of concept: one fake sample (#0042), simulation, a documented USB route and durable local recovery. No order builder or payment workflow.
+A touch-friendly SvelteKit/TypeScript ice cream order builder with preparation receipts, simulation, USB printing and durable local recovery. Orders contain separately configured servings; there are no prices or payments.
 
-The actual target is **Star TSP143IIIU / TSP100IIIU**, with **Galaxy S10e, Android 12** as the browser device. These owner-confirmed details replace the original specification's IV assumption. Real modes are **Star PassPRNT / Android USB-B** and **Linux CUPS / USB-B**. The owner reports PassPRNT output and a successful CUPS test receipt on **Mint 22.3 Cinnamon 64-bit**. Detailed hardware acceptance is incomplete.
+The station uses a **Star TSP143IIIU / TSP100IIIU USB printer attached to the Linux server**, with phones, tablets, or the server itself acting as browser clients. The server sends every order to its single configured local CUPS queue. There is no printer selector or simulation/PassPRNT mode in the ordering interface.
 
-For direct printing without opening another app, follow [Linux USB setup](docs/linux-printing.md). The Mint machine hosts the same static app and an implemented same-origin printing service. Application-generated Linux receipts still need hardware testing. No Order Pad APK has been built.
+The owner has confirmed building an order and printing its receipt. Follow [Linux USB setup](docs/linux-printing.md) for server configuration and the updated workflow’s physical acceptance checklist.
 
 ## Run and check
 
@@ -15,7 +15,21 @@ npm ci
 npm run dev
 ```
 
-Select Simulated printer and Print Test Ticket. Choose failed/unknown scenarios to exercise recovery. Reload recovers the same ticket/history. Later attempts use Reprint Last Ticket, preserve its ID and include REPRINT. Unknown outcomes require checking output and confirming a deliberate repeat.
+Choose a flavor and container, then select any toppings. Flavor and container have no defaults. For a single serving, tap **Print order** directly; it includes the serving currently being configured. For multiple servings, use **Add serving** for each earlier serving, then print the last one directly. Editing a serving and pressing Print saves that replacement without duplicating it. **Save serving**, **Remove**, and **Cancel serving** remain available.
+
+The menu is:
+
+- Flavors: Chocolate, Vanilla, Strawberry, Chocolate Chip.
+- Containers: Cup, Cake Cone, Sugar Cone.
+- Toppings: Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries.
+
+Enter an optional name (up to 80 printable characters). Blank names use a stable two-word ice cream label such as **Sundae Sprinkle**. Each serving has its own preparation block, including **No toppings** when appropriate. Orders support up to 30 servings, subject to receipt-length limits. Incomplete selections must be completed or canceled before printing.
+
+The **Order** tab contains the builder, summary, and always-visible print action. Receipt previews and print attempts are collapsed by default. The **Printer settings** tab shows the server’s configured USB queue, live readiness checks, and setup instructions. Switching tabs preserves the order. Readiness is checked automatically on startup; no recurring setup acknowledgment is required. A static-only host cannot print.
+
+After the server accepts a submission, the accepted result and a fresh empty draft save together. The screen is ready for the next customer, while **Reprint last order** preserves the previous receipt’s ID, label, timestamp, and REPRINT marker. Reprinting while building another order does not change that draft. **New order** explicitly clears a draft.
+
+Failed or unknown submissions remain locked for deliberate recovery and do not advance automatically. Unknown outcomes require inspecting physical output/pending jobs and acknowledging before continuing. No automatic resend occurs. Drafts, unfinished selections, and the latest submitted ticket/attempts recover after reload. An older accepted locked draft advances on reload without another send. Storage failure blocks printing; browser cleanup and changing origin/profile can remove recovery data.
 
 ```sh
 npm run check
@@ -30,37 +44,27 @@ npm run preview
 
 The lockfile pins dependencies; the cookie override resolves an upstream SvelteKit 2 advisory. CI runs equivalent checks on Node 24. Browser checks are desktop Chromium, not Android hardware acceptance.
 
-## Real USB setup
+## USB station setup
 
-1. Install Star Quick Setup Utility and Star PassPRNT on the S10e. Android 12 meets the documented Android 9+ baseline. Update Chrome/WebView; test ordinary Chrome as the default HTTPS browser first.
-2. Connect **phone USB-C host/OTG → printer USB-B** using an adapter/data cable or compatible C-to-B data cable. Power the printer from mains; USB-B does not charge the phone. Printer USB-A only charges Android. Keep one USB printer connected.
-3. Grant each Star app USB permission. Prove a Quick Setup Utility sample print, then configure IIIU / USB in PassPRNT.
-4. Serve the contents of **build/** at a static HTTPS root origin and open in Chrome. Subdirectory hosting requires manifest/service-worker changes. Select **Star TSP143IIIU — USB-B / PassPRNT** and acknowledge setup.
-5. Print Test Ticket saves intent and prepares the request. A separate **Open PassPRNT and print** tap provides a fresh user gesture after storage commits. Self-contained HTML is rasterized by PassPRNT; partial cut is requested, retry pop-ups and peripherals are disabled.
-6. Keep PassPRNT in the foreground until its callback returns. If a new tab opens, close the original pending tab and retain one station tab. Different browsers/profiles cannot recover the originating IndexedDB data.
-7. If launch/return fails, close PassPRNT and inspect output, then Recover without resending. The attempt becomes unknown; no automatic retry occurs.
-
-**The owner reports PassPRNT output; detailed acceptance remains incomplete.** Setup acknowledgment and opening a link do not prove a particular job printed. Complete [hardware acceptance](docs/hardware-test.md); [compatibility notes](docs/printing-compatibility.md) contain official sources.
+Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, set `ORDER_PAD_QUEUE` to its name, and run the same-origin Linux service. The verified station uses `Star_TSP143`. Printer configuration is managed on the server; browser clients use that destination automatically. See [Linux USB setup](docs/linux-printing.md) for the exact commands, driver options, HTTPS setup, restart instructions, and physical checks.
 
 ## Boundaries and reliability
 
-- `src/lib/tickets/`: immutable tickets and pure layout; no SDK, DOM, prices or transport.
+- `src/lib/tickets/`: fixed menu, validated drafts, immutable tickets and shared receipt layout; no SDK, DOM, prices or transport.
 - `src/lib/printing/port.ts`: printer-neutral port, attempt IDs, handoff and accepted/failed/unknown results.
-- `src/lib/printing/adapters/`: explicit simulator, PassPRNT protocol/HTML adapter and Linux same-origin adapter.
+- `src/lib/printing/adapters/`: Linux same-origin adapter used by the UI; simulation and PassPRNT adapters retained for unit tests and historical transport compatibility.
 - `printer-service/`: optional Linux host; receipt PDF, CUPS submission, durable attempt journal and static serving. The domain remains printer-neutral.
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
-- `src/lib/storage/`: IndexedDB; immutable tickets/separate attempts; unavailable storage blocks sends.
-- `src/routes/+page.svelte`: setup, preview, deliberate actions and history, wired through the adapter selector.
+- `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Existing database version and records are preserved.
+- `src/routes/+page.svelte`: Order and Printer settings tabs, serving editor, summary, collapsed receipts/attempts, and direct USB submissions/reprints.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
-Accepted means simulator/PassPRNT reported success or CUPS accepted a queue submission, not physical verification. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. Historical IV attempts stay readable.
+In the current UI, accepted means CUPS accepted a queue submission, not physical verification. Historical simulator/PassPRNT results remain readable. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. Historical IV attempts stay readable.
 
-Every reload defaults to simulation; real mode never falls back. Keep one station tab. There is no application background queue, cloud backup or exactly-once guarantee. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
+Every new submission and reprint uses the server USB route; there is no transport fallback. Keep one station tab. There is no application background queue, cloud backup or exactly-once guarantee. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
 
-## Offline and next step
+## Offline and acceptance
 
-After an online load, the production service worker caches the shell and supports callback query navigation offline. PassPRNT receives embedded HTML, avoiding receipt downloads. Serve service-worker.js with revalidation.
+After an online load, the production service worker caches the app shell. Drafts can be recovered while offline, but printer API requests remain live and uncached; printing requires reaching the server. Serve service-worker.js with revalidation.
 
-**S10e offline reopening, USB permission, launch/return, raster output and cutting still require device tests.** Test an installed PWA separately from a Chrome tab. Record failures as blockers before event use.
-
-Keep the full order workflow deferred. After hardware acceptance, the next milestone can add minimal touch order entry using the existing domain/port. See [verification](docs/verification.md).
+Automated checks use mocked printer commands/API responses. Complete the [Linux acceptance checklist](docs/linux-printing.md) on the station to verify the updated interaction flow, physical receipt layout, and cutting. Drafts and history are local to one browser/origin; shared history and cross-device synchronization remain deferred.

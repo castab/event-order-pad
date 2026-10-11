@@ -34,7 +34,7 @@ export function parseTicket(value: unknown): OrderTicket {
   if (!value || typeof value !== 'object') throw new Error('Invalid ticket.');
   const v = value as Record<string, unknown>;
   const id = text(v.id, 'Ticket ID', 100)!;
-  const reference = text(v.reference, 'Order reference', 20)!;
+  const reference = text(v.reference, 'Order reference', 80)!;
   const createdAt = text(v.createdAt, 'Timestamp', 40)!;
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(createdAt) ||

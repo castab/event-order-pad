@@ -105,11 +105,13 @@ export class Printing {
     try {
       let pdf: Buffer;
       let media: string;
+      let jobOptions: string[];
       try {
         const paper = await this.cups.prepare(
           receiptLayout(request.ticket, request.reprint).heightMm,
         );
         media = paper.media;
+        jobOptions = paper.jobOptions;
         pdf = await this.render(
           request.ticket,
           request.reprint,
@@ -129,7 +131,12 @@ export class Printing {
       }
       let result: PrintAttemptResult;
       try {
-        const job = await this.cups.submit(pdf, media, request.attemptId);
+        const job = await this.cups.submit(
+          pdf,
+          media,
+          request.attemptId,
+          jobOptions,
+        );
         result = {
           status: 'accepted',
           simulated: false,
