@@ -25,7 +25,7 @@ export type PrintAttemptResult =
     };
 
 export interface TicketPrinter {
-  readonly mode: 'simulated' | 'star-passprnt';
+  readonly mode: 'simulated' | 'star-passprnt' | 'linux-cups';
   readonly label: string;
   print(
     ticket: OrderTicket,

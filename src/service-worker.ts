@@ -21,6 +21,8 @@ worker.addEventListener('activate', (event) => {
 });
 worker.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
+  // Printer status/outcomes must remain live even for navigation requests.
+  if (url.pathname.startsWith('/api/')) return;
   // Only app assets: external printer/app traffic is never intercepted/cached.
   if (event.request.method !== 'GET' || url.origin !== worker.location.origin)
     return;

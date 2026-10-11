@@ -1,5 +1,123 @@
 import { expect, test } from '@playwright/test';
 
+test('Linux printing stays in the page, saves intent, recovers and explicitly reprints', async ({
+  page,
+}) => {
+  await page.route('**/api/printer', (route) =>
+    route.fulfill({
+      json: {
+        ready: true,
+        message: 'CUPS USB queue configured; physical status unverified.',
+      },
+    }),
+  );
+  const submitted: {
+    ticket: { id: string };
+    attemptId: string;
+    reprint: boolean;
+  }[] = [];
+  await page.route('**/api/print', async (route) => {
+    const body = route.request().postDataJSON();
+    submitted.push(body);
+    const intentSaved = await page.evaluate(async (attemptId) => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open('order-pad-v1');
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      try {
+        return await new Promise<boolean>((resolve, reject) => {
+          const req = db
+            .transaction('attempts')
+            .objectStore('attempts')
+            .get(attemptId);
+          req.onsuccess = () => resolve(!!req.result && !req.result.result);
+          req.onerror = () => reject(req.error);
+        });
+      } finally {
+        db.close();
+      }
+    }, body.attemptId);
+    expect(intentSaved).toBe(true);
+    await route.fulfill({
+      json: {
+        attemptId: body.attemptId,
+        result: {
+          status: 'accepted',
+          simulated: false,
+          message: 'CUPS accepted job OrderPad-42. Queue submission only.',
+        },
+      },
+    });
+  });
+  await page.goto('/');
+  await page.getByLabel('Printer mode').selectOption('linux-cups');
+  await expect(
+    page.getByText('Linux queue configured', { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel('I verified a CUPS test print on the Linux machine.')
+    .check();
+  await page
+    .getByRole('button', { name: 'Print Test Ticket', exact: true })
+    .click();
+  await expect(page.getByRole('status')).toContainText('LINUX CUPS');
+  await expect(page.getByRole('status')).toContainText('Queue submission only');
+  await expect(
+    page.getByRole('link', { name: 'Open PassPRNT and print' }),
+  ).toHaveCount(0);
+  await page.reload();
+  await page.getByLabel('Printer mode').selectOption('linux-cups');
+  await page
+    .getByLabel('I verified a CUPS test print on the Linux machine.')
+    .check();
+  await page
+    .getByRole('button', { name: 'Reprint Last Ticket', exact: true })
+    .click();
+  await expect(page.locator('.attempts > li')).toHaveCount(2);
+  expect(submitted[1].ticket.id).toBe(submitted[0].ticket.id);
+  expect(submitted[1].attemptId).not.toBe(submitted[0].attemptId);
+  expect(submitted[1].reprint).toBe(true);
+  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+    'REPRINT',
+  );
+});
+
+test('Linux mode blocks unavailable service and never retries a lost response', async ({
+  page,
+}) => {
+  await page.route('**/api/printer', (route) =>
+    route.fulfill({ json: { ready: false, message: 'Service unavailable.' } }),
+  );
+  await page.goto('/');
+  await page.getByLabel('Printer mode').selectOption('linux-cups');
+  await expect(
+    page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
+  ).toBeDisabled();
+  await page.route('**/api/printer', (route) =>
+    route.fulfill({ json: { ready: true, message: 'Configured.' } }),
+  );
+  await page.getByRole('button', { name: 'Check Linux service' }).click();
+  await page
+    .getByLabel('I verified a CUPS test print on the Linux machine.')
+    .check();
+  let sends = 0;
+  await page.route('**/api/print', (route) => {
+    sends++;
+    return route.abort();
+  });
+  await page
+    .getByRole('button', { name: 'Print Test Ticket', exact: true })
+    .click();
+  await expect(page.getByRole('status')).toContainText('Outcome unknown');
+  await expect(
+    page.getByRole('button', { name: 'Reprint Last Ticket', exact: true }),
+  ).toBeDisabled();
+  await page.reload();
+  await expect(page.getByRole('status')).toContainText('Outcome unknown');
+  expect(sends).toBe(1);
+});
+
 test('PassPRNT link follows saved intent; correlated callback survives offline and cannot rewrite history', async ({
   browser,
 }, testInfo) => {
@@ -14,7 +132,7 @@ test('PassPRNT link follows saved intent; correlated callback survives offline a
   await context.route('https://order-pad.test/**', async (route) => {
     const path = new URL(route.request().url());
     const response = await route.fetch({
-      url: `http://127.0.0.1:4173${path.pathname}${path.search}`,
+      url: `http://127.0.0.1:4175${path.pathname}${path.search}`,
     });
     await route.fulfill({ response });
   });
@@ -92,7 +210,7 @@ test('missing PassPRNT return recovers unknown without offering another launch',
     const path = new URL(route.request().url());
     await route.fulfill({
       response: await route.fetch({
-        url: `http://127.0.0.1:4173${path.pathname}${path.search}`,
+        url: `http://127.0.0.1:4175${path.pathname}${path.search}`,
       }),
     });
   });

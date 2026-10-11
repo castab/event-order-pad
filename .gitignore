@@ -1,6 +1,8 @@
 node_modules/
 .svelte-kit/
 build/
+build-printer/
+.print-data/
 test-results/
 playwright-report/
 *.local

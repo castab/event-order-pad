@@ -2,7 +2,9 @@
 
 A static SvelteKit/TypeScript preparation-ticket proof of concept: one fake sample (#0042), simulation, a documented USB route and durable local recovery. No order builder or payment workflow.
 
-The actual target is **Star TSP143IIIU / TSP100IIIU**, tested next with **Galaxy S10e, Android 12**. These owner-confirmed details replace the original specification's IV assumption. Real printing now uses **Star PassPRNT and printer USB-B**; the IV USB-A/AOA/webPRNT adapter was removed.
+The actual target is **Star TSP143IIIU / TSP100IIIU**, with **Galaxy S10e, Android 12** as the browser device. These owner-confirmed details replace the original specification's IV assumption. Real modes are **Star PassPRNT / Android USB-B** and **Linux CUPS / USB-B**. The owner reports PassPRNT output and a successful CUPS test receipt on **Mint 22.3 Cinnamon 64-bit**. Detailed hardware acceptance is incomplete.
+
+For direct printing without opening another app, follow [Linux USB setup](docs/linux-printing.md). The Mint machine hosts the same static app and an implemented same-origin printing service. Application-generated Linux receipts still need hardware testing. No Order Pad APK has been built.
 
 ## Run and check
 
@@ -20,6 +22,7 @@ npm run check
 npm run lint
 npm test
 npm run build
+npm run build:printer
 npx playwright install chromium
 npm run test:e2e
 npm run preview
@@ -37,21 +40,22 @@ The lockfile pins dependencies; the cookie override resolves an upstream SvelteK
 6. Keep PassPRNT in the foreground until its callback returns. If a new tab opens, close the original pending tab and retain one station tab. Different browsers/profiles cannot recover the originating IndexedDB data.
 7. If launch/return fails, close PassPRNT and inspect output, then Recover without resending. The attempt becomes unknown; no automatic retry occurs.
 
-**Physical acceptance has not been performed.** Setup acknowledgment and preparing/opening a link do not prove connection or printing. Complete [hardware acceptance](docs/hardware-test.md); [compatibility notes](docs/printing-compatibility.md) contain official sources.
+**The owner reports PassPRNT output; detailed acceptance remains incomplete.** Setup acknowledgment and opening a link do not prove a particular job printed. Complete [hardware acceptance](docs/hardware-test.md); [compatibility notes](docs/printing-compatibility.md) contain official sources.
 
 ## Boundaries and reliability
 
 - `src/lib/tickets/`: immutable tickets and pure layout; no SDK, DOM, prices or transport.
 - `src/lib/printing/port.ts`: printer-neutral port, attempt IDs, handoff and accepted/failed/unknown results.
-- `src/lib/printing/adapters/`: explicit simulator and PassPRNT protocol/HTML adapter; no remote receipt assets or vendor downloads.
+- `src/lib/printing/adapters/`: explicit simulator, PassPRNT protocol/HTML adapter and Linux same-origin adapter.
+- `printer-service/`: optional Linux host; receipt PDF, CUPS submission, durable attempt journal and static serving. The domain remains printer-neutral.
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
 - `src/lib/storage/`: IndexedDB; immutable tickets/separate attempts; unavailable storage blocks sends.
 - `src/routes/+page.svelte`: setup, preview, deliberate actions and history, wired through the adapter selector.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
-Accepted means the simulator or PassPRNT reported success, not physical verification. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. Historical IV attempts stay readable.
+Accepted means simulator/PassPRNT reported success or CUPS accepted a queue submission, not physical verification. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. Historical IV attempts stay readable.
 
-Every reload defaults to simulation; real mode never falls back. Keep one station tab. There is no queue, cloud backup or exactly-once guarantee. Browser cleanup, origin/profile changes and eviction can remove local data.
+Every reload defaults to simulation; real mode never falls back. Keep one station tab. There is no application background queue, cloud backup or exactly-once guarantee. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
 
 ## Offline and next step
 

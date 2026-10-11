@@ -1,6 +1,8 @@
 # Galaxy S10e / TSP143IIIU hardware acceptance
 
-**Status: NOT RUN.** The owner has the printer and supplied the model/phone details. Desktop checks do not establish hardware compatibility.
+**Status: PARTIAL, OWNER-REPORTED.** The owner reports PassPRNT output and, on 2026-10-11, a successful CUPS test page/receipt on Mint 22.3 Cinnamon 64-bit with direct USB. Exact driver version, output/cut details, reprint, error and offline checks remain unrecorded. The implementation agent has no physical printer access.
+
+For Linux app printing, follow [Linux setup and acceptance](linux-printing.md). Its application-generated receipt has not yet been hardware-tested. The Android checklist below remains applicable to PassPRNT.
 
 ## Device evidence
 
@@ -48,15 +50,15 @@
 5. Test an installed Chrome PWA separately, especially callback routing. A regular-tab result does not prove standalone behavior.
 6. If offline launch/return/reopening fails, mark hardware offline acceptance failed with versions/symptoms.
 
-| Acceptance area                        | Result               |
-| -------------------------------------- | -------------------- |
-| USB-B host connection / permission     | Not tested           |
-| Utility / PassPRNT sample print        | Not tested           |
-| App launch / callback / tab routing    | Not tested on device |
-| Physical ticket / glyphs / partial cut | Not tested           |
-| Reprint / stable ID                    | Not tested on device |
-| Hardware errors / interruption         | Not tested           |
-| Chrome offline reopen / return         | Not tested on device |
-| Installed PWA offline return           | Not tested           |
+| Acceptance area                        | Result                                               |
+| -------------------------------------- | ---------------------------------------------------- |
+| USB-B host connection / permission     | Basic output reported; permission details unrecorded |
+| Utility / PassPRNT sample print        | PassPRNT output reported; utility test unrecorded    |
+| App launch / callback / tab routing    | Not tested on device                                 |
+| Physical ticket / glyphs / partial cut | Not tested                                           |
+| Reprint / stable ID                    | Not tested on device                                 |
+| Hardware errors / interruption         | Not tested                                           |
+| Chrome offline reopen / return         | Not tested on device                                 |
+| Installed PWA offline return           | Not tested                                           |
 
 Keep the order builder deferred until hardware acceptance. See [printing-compatibility.md](printing-compatibility.md) for official sources.

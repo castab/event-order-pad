@@ -7,6 +7,10 @@
   import type { SimulationScenario } from '$lib/printing/adapters/simulated';
   import { IndexedDbTicketStore } from '$lib/storage/ticket-store';
   import {
+    linuxPrinterStatus,
+    type LinuxPrinterStatus,
+  } from '$lib/printing/adapters/linux-cups';
+  import {
     passPrntReturn,
     cleanPassPrntReturn,
   } from '$lib/printing/adapters/passprnt';
@@ -21,6 +25,11 @@
   let online = $state(true);
   let offlineStatus = $state('Checking offline availability…');
   let handoffLaunched = $state(false);
+  let linuxStatus = $state<LinuxPrinterStatus>({
+    ready: false,
+    message: 'Check the Linux printing service before printing.',
+  });
+  let checkingLinux = $state(false);
   const last = $derived(viewState.attempts[viewState.attempts.length - 1]);
   const preview = $derived(
     viewState.ticket
@@ -29,7 +38,10 @@
   );
   const ready = $derived(
     viewState.phase === 'ready' &&
-      (mode === 'simulated' || (!unsupported && setupConfirmed)),
+      (mode === 'simulated' ||
+        (mode === 'linux-cups'
+          ? linuxStatus.ready && setupConfirmed
+          : !unsupported && setupConfirmed)),
   );
   const needsConfirmation = $derived(
     last?.result?.status === 'outcome-unknown',
@@ -101,13 +113,20 @@
     handoffLaunched = false;
     await session.print(selectPrinter(mode, scenario), reprint);
   }
+
+  async function checkLinux() {
+    checkingLinux = true;
+    setupConfirmed = false;
+    linuxStatus = await linuxPrinterStatus();
+    checkingLinux = false;
+  }
 </script>
 
 <svelte:head>
   <title>Order Pad · Ticket Test</title>
   <meta
     name="description"
-    content="A preparation ticket printer test with explicit simulation and Star Android USB modes."
+    content="A preparation ticket printer test with simulation, Linux CUPS, and Star Android USB modes."
   />
 </svelte:head>
 
@@ -126,7 +145,7 @@
         <h1>Test a preparation ticket.</h1>
         <p>One sample order. One clear printer boundary. No checkout.</p>
       </div>
-      <span class:real={mode === 'star-passprnt'} class="mode-badge"
+      <span class:real={mode !== 'simulated'} class="mode-badge"
         >{mode === 'simulated'
           ? 'SIMULATED · NO PHYSICAL PRINT'
           : 'REAL USB · DEVICE TEST REQUIRED'}</span
@@ -150,12 +169,14 @@
           onchange={() => {
             setupConfirmed = false;
             reprintConfirmed = false;
+            if (mode === 'linux-cups') void checkLinux();
           }}
         >
           <option value="simulated">Simulated printer — no hardware</option>
           <option value="star-passprnt"
             >Star TSP143IIIU — USB-B / PassPRNT</option
           >
+          <option value="linux-cups">Star TSP143IIIU — Linux USB / CUPS</option>
         </select>
         {#if mode === 'simulated'}
           <div class="status good">
@@ -174,6 +195,51 @@
               >Failed · paper out</option
             ><option value="outcome-unknown">Unknown · response missing</option>
           </select>
+        {:else if mode === 'linux-cups'}
+          <div
+            class="status"
+            class:good={linuxStatus.ready}
+            class:caution={!linuxStatus.ready}
+          >
+            <span class="dot"></span>
+            <div>
+              <strong
+                >{linuxStatus.ready
+                  ? 'Linux queue configured'
+                  : 'Linux service needs attention'}</strong
+              >
+              <p>{linuxStatus.message}</p>
+            </div>
+          </div>
+          <button
+            class="secondary"
+            onclick={checkLinux}
+            disabled={working || checkingLinux}
+            >{checkingLinux
+              ? 'Checking service…'
+              : 'Check Linux service'}</button
+          >
+          <div class="setup">
+            <h3>Linux USB setup</h3>
+            <p>
+              Connect the printer to the Mint machine’s USB port. Start its
+              Order Pad printing service, then open that machine’s HTTPS address
+              on this phone.
+            </p>
+            <label class="checkbox"
+              ><input
+                type="checkbox"
+                bind:checked={setupConfirmed}
+                disabled={!linuxStatus.ready || working || checkingLinux}
+              /><span>I verified a CUPS test print on the Linux machine.</span
+              ></label
+            >
+            <p class="small">
+              Print submits directly through the Linux service. CUPS may hold a
+              job until the printer is ready. Inspect pending jobs before
+              reprinting; queue acceptance does not confirm physical output.
+            </p>
+          </div>
         {:else}
           <div class="status caution">
             <span class="dot"></span>
@@ -315,7 +381,7 @@
           {:else if viewState.phase === 'printing'}<strong
               >Attempt saved · awaiting response</strong
             >
-            <p>Keep the printing application in the foreground.</p>
+            <p>Keep this page open while awaiting the print result.</p>
           {:else if viewState.phase === 'handoff'}<strong
               >Attempt saved · awaiting PassPRNT result</strong
             >
@@ -329,7 +395,9 @@
                   ? 'Failed'
                   : 'Outcome unknown'}{last.result.simulated
                 ? ' · SIMULATED'
-                : ' · STAR USB'}</strong
+                : last.mode === 'linux-cups'
+                  ? ' · LINUX CUPS'
+                  : ' · STAR USB'}</strong
             >
             <p>{last.result.message}</p>
           {:else}<p>Ticket saved locally. Ready for its first test.</p>{/if}
@@ -389,7 +457,9 @@
                     ? 'Simulation'
                     : attempt.mode === 'star-usb'
                       ? 'Previous IV adapter'
-                      : 'Star PassPRNT USB'} · {new Date(
+                      : attempt.mode === 'linux-cups'
+                        ? 'Linux CUPS USB'
+                        : 'Star PassPRNT USB'} · {new Date(
                     attempt.startedAt,
                   ).toLocaleString()}</span
                 >
@@ -410,9 +480,9 @@
           : 'Device offline'}</span
       ><span>{offlineStatus}</span>
       <p>
-        Chrome offline reopening and PassPRNT’s return must be tested on the
-        Galaxy S10e. Local data can be removed by browser storage cleanup; this
-        milestone has no cloud backup.
+        Offline reopening must be tested on your device. Linux printing needs a
+        connection to the host; Android USB uses PassPRNT. Local data can be
+        removed by browser storage cleanup; this milestone has no cloud backup.
       </p>
     </footer>
   </main>
