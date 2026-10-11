@@ -25,19 +25,32 @@ export type PrintAttemptResult =
     };
 
 export interface TicketPrinter {
-  readonly mode: 'simulated' | 'star-usb';
+  readonly mode: 'simulated' | 'star-passprnt';
   readonly label: string;
   print(
     ticket: OrderTicket,
-    options: { readonly reprint: boolean },
-  ): Promise<PrintAttemptResult>;
+    options: { readonly reprint: boolean; readonly attemptId: string },
+  ): Promise<PrintAttemptResult | PrintHandoff>;
+}
+
+/** External app launch is pending intent, never a successful print result. */
+export interface PrintHandoff {
+  readonly status: 'handoff';
+  readonly url: string;
+}
+
+export interface PrintReturn {
+  readonly attemptId: string;
+  readonly mode: TicketPrinter['mode'];
+  readonly result: PrintAttemptResult;
 }
 
 export interface PrintAttempt {
   readonly id: string;
   readonly ticketId: string;
   readonly startedAt: string;
-  readonly mode: TicketPrinter['mode'];
+  // Keep the original IV adapter identifier readable in existing histories.
+  readonly mode: TicketPrinter['mode'] | 'star-usb';
   readonly reprint: boolean;
   readonly result?: PrintAttemptResult;
   readonly completedAt?: string;

@@ -6,6 +6,10 @@
   import type { TicketPrinter } from '$lib/printing/port';
   import type { SimulationScenario } from '$lib/printing/adapters/simulated';
   import { IndexedDbTicketStore } from '$lib/storage/ticket-store';
+  import {
+    passPrntReturn,
+    cleanPassPrntReturn,
+  } from '$lib/printing/adapters/passprnt';
 
   let viewState = $state<SessionState>({ phase: 'loading', attempts: [] });
   let session: PrintSession;
@@ -16,7 +20,7 @@
   let reprintConfirmed = $state(false);
   let online = $state(true);
   let offlineStatus = $state('Checking offline availability…');
-  let launchUrl = $state('');
+  let handoffLaunched = $state(false);
   const last = $derived(viewState.attempts[viewState.attempts.length - 1]);
   const preview = $derived(
     viewState.ticket
@@ -31,12 +35,13 @@
     last?.result?.status === 'outcome-unknown',
   );
   const working = $derived(
-    viewState.phase === 'saving' || viewState.phase === 'printing',
+    viewState.phase === 'saving' ||
+      viewState.phase === 'printing' ||
+      viewState.phase === 'handoff',
   );
 
   onMount(() => {
     unsupported = realPrinterSupport();
-    launchUrl = `webprnt://starmicronics.com/open?url=${encodeURIComponent(location.href)}`;
     const updateOnline = () => {
       online = navigator.onLine;
     };
@@ -47,7 +52,15 @@
       session = new PrintSession(new IndexedDbTicketStore(), (next) => {
         viewState = next;
       });
-      void session.initialize();
+      const returned = passPrntReturn(location.href);
+      void session.initialize(returned).then(() => {
+        if (viewState.phase !== 'blocked')
+          history.replaceState(
+            history.state,
+            '',
+            cleanPassPrntReturn(location.href),
+          );
+      });
     } catch {
       viewState = {
         phase: 'blocked',
@@ -85,6 +98,7 @@
   async function print(reprint: boolean) {
     if (!ready || (reprint && needsConfirmation && !reprintConfirmed)) return;
     reprintConfirmed = false;
+    handoffLaunched = false;
     await session.print(selectPrinter(mode, scenario), reprint);
   }
 </script>
@@ -112,7 +126,7 @@
         <h1>Test a preparation ticket.</h1>
         <p>One sample order. One clear printer boundary. No checkout.</p>
       </div>
-      <span class:real={mode === 'star-usb'} class="mode-badge"
+      <span class:real={mode === 'star-passprnt'} class="mode-badge"
         >{mode === 'simulated'
           ? 'SIMULATED · NO PHYSICAL PRINT'
           : 'REAL USB · DEVICE TEST REQUIRED'}</span
@@ -139,7 +153,9 @@
           }}
         >
           <option value="simulated">Simulated printer — no hardware</option>
-          <option value="star-usb">Star TSP143IV-UE — Android USB-A/AOA</option>
+          <option value="star-passprnt"
+            >Star TSP143IIIU — USB-B / PassPRNT</option
+          >
         </select>
         {#if mode === 'simulated'}
           <div class="status good">
@@ -165,31 +181,37 @@
               <strong
                 >{unsupported
                   ? 'Unsupported runtime'
-                  : 'Browser eligible · connection unverified'}</strong
+                  : 'Android eligible · connection unverified'}</strong
               >
               <p>
                 {unsupported ??
-                  'Printer selection and Android USB permission are managed in Star webPRNT Browser. No device has been verified by this page.'}
+                  'Star PassPRNT handles USB permission and printing. Installation and device connection have not been verified by this page.'}
               </p>
             </div>
           </div>
           <div class="setup">
             <h3>USB setup</h3>
             <ol>
-              <li>Install Star webPRNT Browser on Android.</li>
               <li>
-                Connect the printer’s <strong>Android USB-A</strong> port to the tablet
-                with a data cable; then power on the printer.
+                Install Star Quick Setup Utility and Star PassPRNT on the Galaxy
+                S10e (Android 12).
               </li>
               <li>
-                Allow Android USB access. In Star’s browser settings, select
-                TSP100IV / TSP143IV-UE and the connected USB printer.
+                Connect the phone’s <strong>USB-C</strong> port through a USB
+                host/OTG adapter and data cable to the printer’s
+                <strong>USB-B</strong> port. Power the printer from mains.
               </li>
-              <li>Set HOME PAGE to this app’s HTTPS URL, then return here.</li>
+              <li>
+                Grant Android USB access to Star’s apps. Verify a sample print
+                in Quick Setup Utility, then select TSP100IIIU / USB in
+                PassPRNT. Keep only this printer connected.
+              </li>
+              <li>
+                Open this app’s HTTPS URL in Chrome. Save an attempt here, then
+                tap the PassPRNT launch link once. Return to the same browser
+                and origin for the result.
+              </li>
             </ol>
-            {#if launchUrl && unsupported}<a class="launch" href={launchUrl}
-                >Open this page in Star webPRNT Browser ↗</a
-              >{/if}
             <label class="checkbox"
               ><input
                 type="checkbox"
@@ -200,13 +222,46 @@
             >
             <p class="small">
               If access was denied, reconnect and grant permission in
-              Android/Star browser. AOA needs accessory support; an OTG adapter
-              is not the USB-A route.
+              Android/PassPRNT. The printer’s USB-A port only charges Android
+              devices; USB-B does not charge the phone. Hardware and offline
+              return still need testing.
             </p>
           </div>
         {/if}
 
         <div class="actions">
+          {#if viewState.phase === 'handoff'}
+            <div class="warning">
+              <strong>Attempt saved · PassPRNT launch pending</strong>
+              <p>
+                Tap once to send this ticket through PassPRNT. Keep PassPRNT in
+                the foreground until it returns. Error retry pop-ups are
+                disabled.
+              </p>
+              {#if !handoffLaunched}
+                <a
+                  class="launch"
+                  href={viewState.handoffUrl}
+                  onclick={() => {
+                    handoffLaunched = true;
+                  }}>Open PassPRNT and print ↗</a
+                >
+              {:else}
+                <p>
+                  Launch requested. This page cannot confirm that PassPRNT
+                  opened or printed.
+                </p>
+              {/if}
+              <p>
+                If no result returns, close PassPRNT and inspect the printer
+                first. Recovering records an unknown outcome and never sends
+                another ticket.
+              </p>
+              <button class="secondary" onclick={() => location.reload()}
+                >Recover without resending</button
+              >
+            </div>
+          {/if}
           <button
             class="primary"
             onclick={() => print(false)}
@@ -214,7 +269,9 @@
             >{working
               ? viewState.phase === 'saving'
                 ? 'Saving print attempt…'
-                : 'Sending test ticket…'
+                : viewState.phase === 'handoff'
+                  ? 'Waiting for PassPRNT…'
+                  : 'Sending test ticket…'
               : 'Print Test Ticket'}</button
           >
           {#if needsConfirmation}<div class="warning">
@@ -258,7 +315,13 @@
           {:else if viewState.phase === 'printing'}<strong
               >Attempt saved · awaiting response</strong
             >
-            <p>Keep this page and Star’s browser in the foreground.</p>
+            <p>Keep the printing application in the foreground.</p>
+          {:else if viewState.phase === 'handoff'}<strong
+              >Attempt saved · awaiting PassPRNT result</strong
+            >
+            <p>
+              No successful print is claimed by preparing or opening the link.
+            </p>
           {:else if last?.result}<strong
               >{last.result.status === 'accepted'
                 ? 'Accepted'
@@ -283,7 +346,7 @@
         </div>
         <div class="paper">
           <div class="paper-caption">
-            {last?.mode === 'star-usb'
+            {last && last.mode !== 'simulated'
               ? 'TEXT PREVIEW · CHECK PHYSICAL OUTPUT'
               : 'SIMULATED PREVIEW · NOTHING PRINTED'}
           </div>
@@ -322,7 +385,11 @@
                   >{attempt.reprint ? 'REPRINT' : 'TEST TICKET'} · #{viewState
                     .ticket?.reference}</strong
                 ><span
-                  >{attempt.mode === 'simulated' ? 'Simulation' : 'Star USB'} · {new Date(
+                  >{attempt.mode === 'simulated'
+                    ? 'Simulation'
+                    : attempt.mode === 'star-usb'
+                      ? 'Previous IV adapter'
+                      : 'Star PassPRNT USB'} · {new Date(
                     attempt.startedAt,
                   ).toLocaleString()}</span
                 >
@@ -343,9 +410,9 @@
           : 'Device offline'}</span
       ><span>{offlineStatus}</span>
       <p>
-        Star webPRNT Browser offline reopening must be tested separately. Local
-        data can be removed by browser storage cleanup; this milestone has no
-        cloud backup.
+        Chrome offline reopening and PassPRNT’s return must be tested on the
+        Galaxy S10e. Local data can be removed by browser storage cleanup; this
+        milestone has no cloud backup.
       </p>
     </footer>
   </main>

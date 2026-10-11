@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { IndexedDbTicketStore } from '../storage/ticket-store';
 import { PrintSession } from './session';
 import { SimulatedPrinter } from './adapters/simulated';
+import { passPrntReturn } from './adapters/passprnt';
 import type { PrintAttemptResult, TicketPrinter } from './port';
 
 function fixture() {
@@ -18,6 +19,76 @@ function fixture() {
 }
 
 describe('durable print state', () => {
+  it('keeps external launch pending until a matching callback and never prepares two launches', async () => {
+    const { store, session } = fixture();
+    await session.initialize();
+    const print = vi.fn(async (_ticket, options) => {
+      expect((await store.load())?.attempts[0].id).toBe(options.attemptId);
+      return { status: 'handoff' as const, url: 'starpassprnt://prepared' };
+    });
+    const printer: TicketPrinter = {
+      mode: 'star-passprnt',
+      label: 'stub',
+      print,
+    };
+    await session.print(printer, false);
+    expect(session.state.phase).toBe('handoff');
+    expect(session.state.attempts[0].result).toBeUndefined();
+    await session.print(printer, true);
+    expect(print).toHaveBeenCalledTimes(1);
+    const attemptId = session.state.attempts[0].id;
+    const returned = passPrntReturn(
+      `https://pad.example/?order_pad_attempt=${attemptId}&passprnt_code=0`,
+    );
+    const reload = new PrintSession(store, () => {});
+    await reload.initialize(returned);
+    expect(reload.state.attempts[0].result?.status).toBe('accepted');
+    expect((await store.load())?.attempts[0].result?.status).toBe('accepted');
+    // A repeated or contradictory callback cannot rewrite a final result.
+    const repeated = new PrintSession(store, () => {});
+    await repeated.initialize({
+      ...returned!,
+      result: {
+        status: 'outcome-unknown',
+        code: 'transport',
+        simulated: false,
+        message: 'late',
+      },
+    });
+    expect(repeated.state.attempts[0].result?.status).toBe('accepted');
+  });
+  it.each(['mismatched-id', 'wrong-mode', 'no-return'] as const)(
+    'recovers handoff as unknown on %s without treating it as success',
+    async (reason) => {
+      const { store, session } = fixture();
+      await session.initialize();
+      const printer: TicketPrinter = {
+        mode: 'star-passprnt',
+        label: 'stub',
+        print: async () => ({
+          status: 'handoff',
+          url: 'starpassprnt://prepared',
+        }),
+      };
+      await session.print(printer, false);
+      const returned = {
+        attemptId:
+          reason === 'mismatched-id' ? 'wrong' : session.state.attempts[0].id,
+        mode:
+          reason === 'wrong-mode'
+            ? ('simulated' as const)
+            : ('star-passprnt' as const),
+        result: {
+          status: 'accepted' as const,
+          simulated: false,
+          message: 'stub',
+        },
+      };
+      const reload = new PrintSession(store, () => {});
+      await reload.initialize(reason === 'no-return' ? undefined : returned);
+      expect(reload.state.attempts[0].result?.status).toBe('outcome-unknown');
+    },
+  );
   it.each(['accepted', 'failed', 'outcome-unknown'] as const)(
     'records %s and recovers after reload without retry',
     async (scenario) => {
@@ -127,7 +198,7 @@ describe('durable print state', () => {
     await session.initialize();
     await session.print(
       {
-        mode: 'star-usb',
+        mode: 'star-passprnt',
         label: 'stub',
         print: async () => {
           throw new Error('interrupted');

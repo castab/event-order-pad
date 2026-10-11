@@ -1,61 +1,62 @@
-# Android / TSP143IV-UE hardware acceptance
+# Galaxy S10e / TSP143IIIU hardware acceptance
 
-**Status: NOT RUN. No printer or Android tablet was available during implementation.** Desktop browser and unit tests do not satisfy this checklist.
+**Status: NOT RUN.** The owner has the printer and supplied the model/phone details. Desktop checks do not establish hardware compatibility.
 
-## Record the device
+## Device evidence
 
-| Evidence                                             | Actual value |
-| ---------------------------------------------------- | ------------ |
-| Test date / operator                                 | Not recorded |
-| Exact model (must distinguish UE from UEWB) / serial | Not recorded |
-| Printer firmware / self-test printout                | Not recorded |
-| Paper width (this adapter assumes 80 mm)             | Not recorded |
-| Tablet manufacturer/model / Android version          | Not recorded |
-| Star webPRNT Browser version / WebView version       | Not recorded |
-| Chrome version (comparison only)                     | Not recorded |
-| App HTTPS origin / build revision                    | Not recorded |
-| Printer port / tablet port / cable type              | Not recorded |
-| Android USB permission prompt and response           | Not recorded |
-| Actual MODEL / USB printer selection labels          | Not recorded |
+| Evidence                                 | Actual value                               |
+| ---------------------------------------- | ------------------------------------------ |
+| Printer label                            | TSP143IIIU (owner confirmed)               |
+| Phone / Android                          | Galaxy S10e / Android 12 (owner confirmed) |
+| Test date / operator                     | Not recorded                               |
+| Printer serial / firmware / self-test    | Not recorded                               |
+| Paper width                              | Adapter assumes 80 mm; verify              |
+| PassPRNT / Quick Setup Utility versions  | Not recorded                               |
+| Chrome / WebView versions                | Not recorded                               |
+| App HTTPS origin / Git revision          | Not recorded                               |
+| USB-C host adapter / USB-B data cable    | Not recorded                               |
+| USB permission / selected printer labels | Not recorded                               |
+| Default HTTPS browser / callback tabs    | Not recorded                               |
 
-## Connect and print
+## First print
 
-1. Check printer self-test for exact model and firmware; load 80 mm thermal paper. Start the Android tablet and install Star webPRNT Browser.
-2. With the printer off, connect **printer Android USB-A → tablet USB-C** using the supplied A-C data cable, or an A-micro-B data cable for a micro-B tablet. Then turn on the printer. Do not substitute a charge-only cable. The selected AOA route does not use a tablet-host OTG adapter; printer USB-C is a different path.
-3. Grant Android USB/accessory access. Open Star's browser settings and select TSP100IV / TSP143IV-UE and the attached USB printer. Record actual labels and discovery behavior. If the model/device cannot be selected, stop and record the compatibility blocker; do not treat charging as connection evidence.
-4. Serve `build/` at a static **HTTPS** root origin, enter it as HOME PAGE in Star's browser, and open it. A local HTTPS host is acceptable if reachable and its certificate is trusted. Ordinary LAN HTTP and `file://` are not the hardware acceptance route. Verify browser eligibility, IndexedDB availability and setup acknowledgment.
-5. Select real USB mode. Press **Print Test Ticket** once. Keep Star's browser in the foreground. Record the app outcome and check the actual ticket: preparation heading, prominent #0042, `2 x` / `1 x`, both illustrative ice-cream items, indented modifiers, special instructions, whole-ticket note, stable ticket ID, end marker and partial cut. Verify no clipping and sensible feed length.
-6. Press **Reprint Last Ticket**. Confirm prominent **REPRINT**, unchanged original ticket ID/reference/timestamp, and a separately recorded attempt.
-7. Test longer printable notes and any required accented characters using a local test fixture if necessary. Record legibility/font coverage and paper alignment. Do not assume a text preview proves device glyph rendering.
+1. Load 80 mm paper, inspect the printer self-test and install current **Star Quick Setup Utility** and **Star PassPRNT**. Update Chrome/WebView. Use ordinary Chrome and set Chrome as the default HTTPS browser for the first test.
+2. Power the printer from mains. Connect **S10e USB-C → host/OTG adapter → A-to-B data cable → printer USB-B**, or use a compatible C-to-B data cable. Keep only one USB printer connected. Printer USB-A only charges Android; USB-B does not charge the phone. Record the cable that actually works.
+3. Grant Quick Setup Utility USB access and print its sample. Configure TSP100IIIU / USB in PassPRNT and grant its own USB permission. Record actual labels/versions. If either app cannot discover/print, record a blocker.
+4. Serve `build/` at a static HTTPS root origin. Open in Chrome; confirm local storage and cache indication. Select **Star TSP143IIIU — USB-B / PassPRNT** and acknowledge setup.
+5. Press **Print Test Ticket** once. Confirm saved intent appears before the launch link. Tap **Open PassPRNT and print** once. Keep PassPRNT in the foreground until it returns. Link disappearance is not printing evidence.
+6. Record the callback code, browser and tab routing. Matching success should yield one accepted saved attempt. If another tab opens, close the original pending tab. A different browser/profile or missing attempt ID is a compatibility blocker.
+7. Inspect #0042, quantities, both items, indented modifiers, instructions, note, stable ID, end marker and partial cut/feed. Check clipping, raster legibility and excessive wrapping.
+8. Explicitly reprint using the new launch link. Confirm prominent REPRINT, original ID/reference/timestamp and separate attempt. Test longer notes/required accented characters with a local fixture.
 
 ## Error and recovery checks
 
-- **Rapid taps:** repeatedly tap once printing starts; only one request/attempt should be active, controls disabled. No extra physical ticket should appear.
-- **USB denied:** deny permission after clearing the relevant permission through Android/Star settings, then try the real mode. Record setup/discovery failure or transport outcome. Allow access and explicitly reprint after inspecting output. The SDK may not identify permission denial separately from a missing device.
-- **Disconnected/powered off:** disconnect before the test. Check honest error/unknown feedback and absence of simulated fallback. Reconnect and use a deliberate reprint.
-- **Cover open / paper out:** test separately. Expect status-specific guidance when returned. A post-send fault remains unknown because partial output is possible. Resolve the problem, inspect output and explicitly reprint.
-- **Mid-send interruption:** where safe, interrupt the cable or foreground application during a test. Do not power-cycle firmware maintenance. Confirm unknown outcome, no automatic retry, and a visible duplicate warning. A deliberate repeat must include REPRINT.
-- **Close/reload during send:** reopen the same origin in the same browser. An unfinished saved attempt becomes unknown. Original ticket and all previous attempts must remain. No automatic send occurs on reopen.
-- **Ordinary reload:** confirm accepted/failed/unknown history and stable ticket ID survive. Confirm real mode requires intentional selection again. Keep one tab per station.
+- Rapid taps: one attempt/link; launch link disappears after tapping. No extra ticket.
+- Denied permission / disconnected / power off: record actual code and feedback; no simulated fallback or guessed unique permission diagnosis.
+- Cover / paper: test before send and during print. Retry pop-up disabled. Pre-send code 5 is failed; end-check code 7 is unknown. Inspect output before a deliberate repeat.
+- Missing launch/return: close PassPRNT and inspect output, then **Recover without resending**. One saved attempt becomes unknown; reprint requires duplicate acknowledgment.
+- Mid-send cancellation/disconnection: check unknown outcome and no automatic retry. Never interrupt firmware maintenance. Close active PassPRNT jobs before another attempt.
+- Late/repeated callback: final outcome must stay unchanged. Late success after unknown recovery remains unknown.
+- Reload: same ticket/history, simulation default, intentional real-mode selection. Historical IV attempts stay readable.
 
-## Offline acceptance — test browsers separately
+## Offline acceptance
 
-1. Load the production app online and wait for the cache indication. Close/reopen once online; verify recovery. Install as a PWA if that browser offers installation.
-2. Disable internet access on the tablet while leaving USB attached. Fully close and reopen the app in **Star webPRNT Browser** at the same HTTPS URL, not just an already displayed page. Confirm UI/assets/local SDK load, IndexedDB ticket recovery, and a deliberate real reprint.
-3. Repeat with device reboot if practical. Record whether cached offline navigation, service workers and persistence survive.
-4. Separately run the simulator offline in Chrome / Chrome's installed PWA. This does not prove AOA printing in Chrome or offline support in Star's browser. Note separate browser storage and any differences.
-5. If Star's browser cannot reopen offline, mark **offline hardware acceptance failed** and record its browser/WebView version and symptoms. Keep simulation functional; do not claim event readiness based on the Chrome result.
+1. Load production online, wait for cache indication and verify recovery after reopening.
+2. Leave USB attached, disable internet and fully close/reopen the same HTTPS origin in Chrome. Verify assets and local records.
+3. Deliberately reprint through PassPRNT offline. Verify embedded HTML renders without download, callback reaches cached Chrome content and physical ticket/cut matches the saved result.
+4. Repeat after reboot if practical; record cache and USB permission persistence.
+5. Test an installed Chrome PWA separately, especially callback routing. A regular-tab result does not prove standalone behavior.
+6. If offline launch/return/reopening fails, mark hardware offline acceptance failed with versions/symptoms.
 
-## Outcome
+| Acceptance area                        | Result               |
+| -------------------------------------- | -------------------- |
+| USB-B host connection / permission     | Not tested           |
+| Utility / PassPRNT sample print        | Not tested           |
+| App launch / callback / tab routing    | Not tested on device |
+| Physical ticket / glyphs / partial cut | Not tested           |
+| Reprint / stable ID                    | Not tested on device |
+| Hardware errors / interruption         | Not tested           |
+| Chrome offline reopen / return         | Not tested on device |
+| Installed PWA offline return           | Not tested           |
 
-| Acceptance area                                           | Result / evidence                              |
-| --------------------------------------------------------- | ---------------------------------------------- |
-| USB-A/AOA discovery and permission                        | Not tested                                     |
-| Physical ticket content, glyphs and partial cut           | Not tested                                     |
-| Explicit reprint / stable ID                              | Not tested                                     |
-| Disconnect, denied permission, cover, paper, interruption | Not tested                                     |
-| Reload recovery / no automatic resend                     | Not tested on device                           |
-| Star browser offline reopen and USB printing              | Not tested                                     |
-| Chrome offline simulator comparison                       | Desktop automated checks only; no Android test |
-
-When all device smoke tests pass, proceed to the smallest order-entry milestone using the existing domain/port. Resolve compatibility/offline blockers first. See [printing-compatibility.md](printing-compatibility.md) for official references and the deferred network-printing documentation conflict.
+Keep the order builder deferred until hardware acceptance. See [printing-compatibility.md](printing-compatibility.md) for official sources.

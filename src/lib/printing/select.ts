@@ -2,7 +2,7 @@ import {
   SimulatedPrinter,
   type SimulationScenario,
 } from './adapters/simulated';
-import { StarUsbPrinter, starSupport } from './adapters/star-usb';
+import { PassPrntPrinter, passPrntSupport } from './adapters/passprnt';
 import type { TicketPrinter } from './port';
 
 export function selectPrinter(
@@ -11,9 +11,9 @@ export function selectPrinter(
 ): TicketPrinter {
   return mode === 'simulated'
     ? new SimulatedPrinter(scenario)
-    : new StarUsbPrinter();
+    : new PassPrntPrinter(() => location.href, realPrinterSupport);
 }
 
 export function realPrinterSupport(): string | undefined {
-  return starSupport(navigator.userAgent, location.protocol);
+  return passPrntSupport(navigator.userAgent, location.protocol);
 }

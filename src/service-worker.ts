@@ -21,7 +21,7 @@ worker.addEventListener('activate', (event) => {
 });
 worker.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Printer POSTs and localhost bridge traffic must never be intercepted/cached.
+  // Only app assets: external printer/app traffic is never intercepted/cached.
   if (event.request.method !== 'GET' || url.origin !== worker.location.origin)
     return;
   if (!assets.includes(url.pathname) && event.request.mode !== 'navigate')

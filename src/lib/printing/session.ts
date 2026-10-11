@@ -1,9 +1,16 @@
 import { sampleTicket, type OrderTicket } from '../tickets/ticket';
 import type { TicketStore } from '../storage/ticket-store';
-import type { PrintAttempt, PrintAttemptResult, TicketPrinter } from './port';
+import type {
+  PrintAttempt,
+  PrintAttemptResult,
+  PrintReturn,
+  TicketPrinter,
+} from './port';
 
 export interface SessionState {
-  readonly phase: 'loading' | 'ready' | 'saving' | 'printing' | 'blocked';
+  readonly phase:
+    'loading' | 'ready' | 'saving' | 'printing' | 'handoff' | 'blocked';
+  readonly handoffUrl?: string;
   readonly ticket?: OrderTicket;
   readonly attempts: readonly PrintAttempt[];
   readonly notice?: string;
@@ -27,7 +34,7 @@ export class PrintSession {
     this.changed(state);
   }
 
-  async initialize(): Promise<void> {
+  async initialize(returned?: PrintReturn): Promise<void> {
     try {
       const saved = await this.store.load();
       const ticket = saved?.ticket ?? sampleTicket(this.id(), this.now());
@@ -41,13 +48,16 @@ export class PrintSession {
         const recovered: PrintAttempt = {
           ...attempt,
           completedAt: this.now(),
-          result: {
-            status: 'outcome-unknown',
-            code: 'transport',
-            simulated: attempt.mode === 'simulated',
-            message:
-              'Page closed before the outcome was saved. Inspect the printer before deliberately reprinting.',
-          },
+          result:
+            returned?.attemptId === attempt.id && returned.mode === attempt.mode
+              ? returned.result
+              : {
+                  status: 'outcome-unknown',
+                  code: 'transport',
+                  simulated: attempt.mode === 'simulated',
+                  message:
+                    'Page closed before the outcome was saved. Inspect the printer before deliberately reprinting.',
+                },
         };
         await this.store.finishAttempt(recovered);
         attempts.push(recovered);
@@ -99,7 +109,21 @@ export class PrintSession {
     });
     let result: PrintAttemptResult;
     try {
-      result = await printer.print(ticket, { reprint });
+      const response = await printer.print(ticket, {
+        reprint,
+        attemptId: attempt.id,
+      });
+      if (response.status === 'handoff') {
+        this.update({
+          phase: 'handoff',
+          ticket,
+          attempts: [...previous, attempt],
+          handoffUrl: response.url,
+        });
+        this.busy = false;
+        return;
+      }
+      result = response;
     } catch {
       result = {
         status: 'outcome-unknown',
