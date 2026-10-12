@@ -220,7 +220,23 @@ Structure:
 See `screens/build-queue.dc.html`.
 
 - **Header:** logo, "BUILD QUEUE", and counts: open orders, servings to build, oldest wait.
-- **Grid of open orders**, oldest first, three columns on a landscape tablet. Each card shows:
+- **Packed columns of open orders**, oldest first, with no gaps under short cards. A plain CSS
+  grid leaves holes because each row is as tall as its tallest card. Instead:
+  - Render N column stacks (flex column, 20 px gap), with N from the container width: 1 below
+    640 px, 2 below 1000 px, 3 below 1500 px, otherwise 4. Three on a landscape tablet.
+  - Place cards in age order. Each card goes into the currently shortest column, leftmost on
+    ties, so the first row reads oldest → newer left to right and older orders sit higher.
+  - Use real card heights (Svelte `bind:clientHeight` or a `ResizeObserver`). The design file
+    estimates heights only because it can't measure.
+  - Re-pack only when the set of open orders or the column count changes, not on the 30-second
+    age refresh. Expect cards to shift when one is marked done; that's fine.
+  - Don't use CSS multi-column (`columns: 3`): it fills top-to-bottom, so the oldest orders
+    would all stack in the first column. Don't rely on `grid-template-rows: masonry`; browser
+    support is too thin.
+  - Keep DOM order = age order for keyboard and screen readers (visually-hidden ordered list,
+    or `aria-posinset`/`aria-setsize` on each card).
+
+  Each card shows:
   - order number, display name, time placed;
   - a wait badge that names the time and is tinted by age (moss under 5 min, olive 5–10, rust
     10+);
