@@ -69,7 +69,8 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `src/routes/+page.svelte`: token-styled serving builder, toast and recovery feedback, collapsed Order tools, and direct USB submissions/reprints.
 - `src/lib/orders/` and `printer-service/orders.ts`: shared order records, disk persistence, live SSE snapshots, and a durable publication outbox; order retries cannot resend printing.
 - `src/routes/queue/`: oldest-first build cards, age badges, completion and Undo.
-- `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
+- `src/service-worker.ts`: versioned same-origin shell caching (network-first pages with a cached offline fallback); no USB send/result caching or forced mid-job updates.
+- `src/lib/app-update.ts`: checks for a new deployment and applies it at a safe moment.
 
 In the current UI, accepted means CUPS accepted a queue submission, not physical verification. The attempt model still supports simulator/PassPRNT results. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. It also retains the IV adapter identifier; v1 browser history receives the one-time reset below.
 
@@ -187,5 +188,7 @@ physical layout and cutting verification on the printer.
 ## Offline and acceptance
 
 After an online load, the production service worker caches the app shell. Drafts can be recovered while offline, but printer API requests remain live and uncached; printing requires reaching the server. Serve service-worker.js with revalidation.
+
+An open tab updates itself after a deployment: the page checks for a new service worker on load, on return to the tab, when back online and every five minutes. A downloaded update is applied, with an automatic reload, when the tab is hidden, was just loaded, or has had no input for a minute. It is never applied while a print is sending, an outcome awaits acknowledgment, or the draft is still loading; the draft and queue are recovered after the reload. Pages are fetched network-first (3 s timeout), so a manual reload online also shows the newest version.
 
 Automated checks use mocked printer commands/API responses. Complete the [Linux acceptance checklist](docs/linux-printing.md) on the station to verify the updated interaction flow, physical receipt layout, and cutting. Drafts and print-attempt history stay local to one browser/origin. Build orders synchronize through the Linux service; shared reference allocation remains deferred.

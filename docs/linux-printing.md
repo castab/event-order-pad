@@ -120,7 +120,7 @@ before changing proxy configuration. A dropped connection retains the last view,
 shows a warning and reconnects automatically. Mark done/Undo still use the same
 POST APIs and never resend a print.
 
-On the phone, close all Order Pad tabs and reopen the same Mint HTTPS URL to activate the updated cached shell. If the old printer-test screen remains, close/reopen once more after the new service worker has installed. Preserve browser storage and `.print-data/`; clearing either is unnecessary.
+On the phone, reload or reopen the same Mint HTTPS URL. Pages load network-first, and an open tab applies the new service worker itself (reloading when hidden or idle, never during a send), so closing every tab is no longer needed. Preserve browser storage and `.print-data/`; clearing either is unnecessary.
 
 For physical acceptance of the simplified workflow:
 

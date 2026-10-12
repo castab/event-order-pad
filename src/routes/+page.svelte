@@ -22,6 +22,7 @@
     type OrderDraft,
     type ServingEditor,
   } from '$lib/tickets/order';
+  import { holdUpdates } from '$lib/app-update';
   import { PrintSession, type SessionState } from '$lib/printing/session';
   import { IndexedDbTicketStore } from '$lib/storage/ticket-store';
   import {
@@ -64,6 +65,16 @@
   const working = $derived(
     sending || ['saving', 'printing', 'handoff'].includes(viewState.phase),
   );
+  // A send or unacknowledged outcome must never be interrupted by an update reload.
+  $effect(() => {
+    if (
+      working ||
+      needsConfirmation ||
+      viewState.phase === 'loading' ||
+      viewState.phase === 'blocked'
+    )
+      return holdUpdates();
+  });
   const editable = $derived(
     viewState.phase === 'ready' &&
       !working &&
