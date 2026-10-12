@@ -29,7 +29,7 @@ For Linux app printing, follow [Linux setup and acceptance](linux-printing.md). 
 5. Build an order (add each serving, with optional name) and press **Print order** once. Confirm saved intent appears before the launch link. Tap **Open PassPRNT and print** once. Keep PassPRNT in the foreground until it returns. Link disappearance is not printing evidence.
 6. Record the callback code, browser and tab routing. Matching success should yield one accepted saved attempt. If another tab opens, close the original pending tab. A different browser/profile or missing attempt ID is a compatibility blocker.
 7. Inspect the name or two-word label, each serving and its container/toppings, stable ID, end marker and partial cut/feed. Check clipping, raster legibility and excessive wrapping.
-8. Explicitly reprint using the new launch link. Confirm prominent REPRINT, original ID/reference/timestamp and separate attempt. Test longer notes/required accented characters with a local fixture.
+8. Explicitly reprint using the new launch link. Confirm prominent REPRINT, original ID/reference/timestamp and separate attempt. Test long customer names, mixed flavors, all toppings, and required accented characters with a local fixture.
 
 ## Error and recovery checks
 
@@ -39,7 +39,7 @@ For Linux app printing, follow [Linux setup and acceptance](linux-printing.md). 
 - Missing launch/return: close PassPRNT and inspect output, then **Recover without resending**. One saved attempt becomes unknown; reprint requires duplicate acknowledgment.
 - Mid-send cancellation/disconnection: check unknown outcome and no automatic retry. Never interrupt firmware maintenance. Close active PassPRNT jobs before another attempt.
 - Late/repeated callback: final outcome must stay unchanged. Late success after unknown recovery remains unknown.
-- Reload: same ticket/history, simulation default, intentional real-mode selection. Historical IV attempts stay readable.
+- Reload: same ticket/history, simulation default, intentional real-mode selection. The attempt model still supports the IV identifier; phase 1 resets v1 browser history once (see README).
 
 ## Offline acceptance
 

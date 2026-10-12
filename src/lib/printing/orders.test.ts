@@ -19,7 +19,7 @@ function fixture() {
   return { store, session };
 }
 const serving = {
-  flavors: [{ flavor: 'Vanilla' as const, scoops: 1 }],
+  flavors: [{ flavor: 'Vanilla' as const, count: 1 }],
   container: 'Cup' as const,
   toppings: [],
 };
@@ -45,8 +45,8 @@ describe('successive orders and draft recovery', () => {
       editor: {
         ...emptyEditor(),
         flavors: [
-          { flavor: 'Chocolate Chip', scoops: 2 },
-          { flavor: 'Strawberry', scoops: 1 },
+          { flavor: 'Chocolate Chip', count: 2 },
+          { flavor: 'Strawberry', count: 1 },
         ],
         toppings: ['Gummy Bears'],
       },
@@ -59,8 +59,8 @@ describe('successive orders and draft recovery', () => {
     expect(reload.state.draft).toEqual(session.state.draft);
     expect(reload.state.draft?.editor.container).toBe('');
     expect(reload.state.draft?.editor.flavors).toEqual([
-      { flavor: 'Strawberry', scoops: 1 },
-      { flavor: 'Chocolate Chip', scoops: 2 },
+      { flavor: 'Strawberry', count: 1 },
+      { flavor: 'Chocolate Chip', count: 2 },
     ]);
   });
 
@@ -75,7 +75,7 @@ describe('successive orders and draft recovery', () => {
       expect((await store.load())?.attempts.at(-1)?.result).toBeUndefined();
       expect((await store.loadDraft())?.submittedTicketId).toBe(ticket.id);
       expect((await store.loadDraft())?.editor).toEqual(emptyEditor());
-      expect(ticket.items).toHaveLength(1);
+      expect(ticket.servings).toHaveLength(1);
       return { status: 'accepted', simulated: false, message: 'Test only' };
     });
     const printer: TicketPrinter = { mode: 'linux-cups', label: 'Test', print };
@@ -87,7 +87,7 @@ describe('successive orders and draft recovery', () => {
       session.state.attempts[0],
       session.state.draft,
     );
-    expect(session.state.ticket?.reference).toBe('Pat');
+    expect(session.state.ticket?.displayName).toBe('Pat');
     expect(session.state.draft?.name).toBe('');
     expect(session.state.draft?.servings).toEqual([]);
     expect(session.state.draft?.editor).toEqual(emptyEditor());
@@ -108,21 +108,23 @@ describe('successive orders and draft recovery', () => {
       editor: {
         ...serving,
         flavors: [
-          { flavor: 'Chocolate Chip', scoops: 2 },
-          { flavor: 'Strawberry', scoops: 1 },
+          { flavor: 'Chocolate Chip', count: 2 },
+          { flavor: 'Strawberry', count: 1 },
         ],
         toppings: ['Gummy Bears'],
       },
     });
     await session.submit(accepted());
     const original = session.state.ticket!;
-    expect(original.items).toHaveLength(1);
-    expect(original.items[0].name).toBe('Ice cream (3 scoops)');
-    expect(original.items[0].modifiers).toEqual([
-      'Cup',
-      '1 scoop Strawberry',
-      '2 scoops Chocolate Chip',
-      'Gummy Bears',
+    expect(original.servings).toEqual([
+      {
+        container: 'Cup',
+        flavors: [
+          { flavor: 'Strawberry', count: 1 },
+          { flavor: 'Chocolate Chip', count: 2 },
+        ],
+        toppings: ['Gummy Bears'],
+      },
     ]);
     configure(session, {
       name: 'Next',
@@ -137,7 +139,7 @@ describe('successive orders and draft recovery', () => {
     configure(session, { name: 'Next', editor: emptyEditor() });
     await session.submit(accepted());
     expect(session.state.ticket?.id).not.toBe(original.id);
-    expect(session.state.ticket?.reference).toBe('Next');
+    expect(session.state.ticket?.displayName).toBe('Next');
     expect(session.state.attempts).toHaveLength(1);
   });
 
@@ -147,15 +149,13 @@ describe('successive orders and draft recovery', () => {
     configure(session, {
       editor: {
         ...emptyEditor(),
-        flavors: [{ flavor: 'Chocolate', scoops: 1 }],
+        flavors: [{ flavor: 'Chocolate', count: 1 }],
       },
     });
     const draft = session.state.draft;
     const printer = accepted();
     const send = vi.spyOn(printer, 'print');
-    await expect(session.submit(printer)).rejects.toThrow(
-      'at least one scoop and choose a container',
-    );
+    await expect(session.submit(printer)).rejects.toThrow('choose a container');
     expect(send).not.toHaveBeenCalled();
     expect(session.state.draft).toEqual(draft);
   });
@@ -243,7 +243,7 @@ describe('successive orders and draft recovery', () => {
     expect(reload.state.phase).toBe('blocked');
   });
 
-  it('preserves legacy sample tickets and recovers interrupted new orders without advancing', async () => {
+  it('preserves existing structured tickets and recovers interrupted new orders without advancing', async () => {
     const { store, session } = fixture();
     const legacy = sampleTicket('old', '2026-10-09T20:00:00.000Z');
     await store.saveTicket(legacy);

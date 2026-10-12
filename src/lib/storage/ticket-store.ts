@@ -1,6 +1,6 @@
 import { parseTicket, type OrderTicket } from '../tickets/ticket';
 import type { PrintAttempt } from '../printing/port';
-import { parseDraft, type OrderDraft } from '../tickets/order';
+import { newDraft, parseDraft, type OrderDraft } from '../tickets/order';
 
 export interface SavedSession {
   readonly ticket: OrderTicket;
@@ -30,11 +30,21 @@ export class IndexedDbTicketStore implements TicketStore {
 
   private open(): Promise<IDBDatabase> {
     this.database ??= new Promise((resolve, reject) => {
-      const request = this.factory.open(this.name, 1);
-      request.onupgradeneeded = () => {
-        request.result.createObjectStore('tickets', { keyPath: 'id' });
-        request.result.createObjectStore('attempts', { keyPath: 'id' });
-        request.result.createObjectStore('settings');
+      const request = this.factory.open(this.name, 2);
+      request.onupgradeneeded = (event) => {
+        if (event.oldVersion === 0) {
+          request.result.createObjectStore('tickets', { keyPath: 'id' });
+          request.result.createObjectStore('attempts', { keyPath: 'id' });
+          request.result.createObjectStore('settings');
+        } else {
+          // Authorized one-time reset: v1 items cannot describe structured servings.
+          request.transaction!.objectStore('tickets').clear();
+          request.transaction!.objectStore('attempts').clear();
+          const settings = request.transaction!.objectStore('settings');
+          settings.delete('latest');
+          settings.delete('draft');
+        }
+        request.transaction!.objectStore('settings').put(0, 'referenceCounter');
       };
       request.onsuccess = () => {
         request.result.onversionchange = () => {
@@ -121,7 +131,21 @@ export class IndexedDbTicketStore implements TicketStore {
       const request = tx.objectStore('settings').get('draft');
       request.onsuccess = () => {
         try {
-          done(request.result ? parseDraft(request.result) : undefined);
+          if (request.result) done(parseDraft(request.result));
+          else {
+            const counter = tx.objectStore('settings').get('referenceCounter');
+            counter.onsuccess = () => {
+              try {
+                if (!Number.isSafeInteger(counter.result) || counter.result < 0)
+                  throw new Error('Invalid reference counter.');
+                done(
+                  counter.result ? newDraft(String(counter.result)) : undefined,
+                );
+              } catch {
+                tx.abort();
+              }
+            };
+          }
         } catch {
           tx.abort();
         }
@@ -129,10 +153,27 @@ export class IndexedDbTicketStore implements TicketStore {
     });
   }
 
+  /** High-water counter commits in the same transaction as each draft/ticket. */
+  private recordReference(tx: IDBTransaction, reference: string): void {
+    const settings = tx.objectStore('settings');
+    const counter = settings.get('referenceCounter');
+    counter.onsuccess = () => {
+      if (!Number.isSafeInteger(counter.result) || counter.result < 0) {
+        tx.abort();
+        return;
+      }
+      settings.put(
+        Math.max(counter.result, Number(reference)),
+        'referenceCounter',
+      );
+    };
+  }
+
   async saveDraft(draft: OrderDraft): Promise<void> {
     const valid = parseDraft(draft);
     await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
       tx.objectStore('settings').put(valid, 'draft');
+      this.recordReference(tx, valid.reference);
       done(undefined);
     });
   }
@@ -159,6 +200,7 @@ export class IndexedDbTicketStore implements TicketStore {
         tx.objectStore('tickets').add(valid);
         tx.objectStore('settings').put(valid.id, 'latest');
         tx.objectStore('settings').put(locked, 'draft');
+        this.recordReference(tx, valid.reference);
         tx.objectStore('attempts').add(attempt);
         done(undefined);
       },
@@ -185,6 +227,7 @@ export class IndexedDbTicketStore implements TicketStore {
           }
           store.put(valid);
           tx.objectStore('settings').put(valid.id, 'latest');
+          this.recordReference(tx, valid.reference);
           done(undefined);
         };
       },
@@ -249,6 +292,7 @@ export class IndexedDbTicketStore implements TicketStore {
               }
               store.put(attempt);
               settings.put(next, 'draft');
+              this.recordReference(tx, next.reference);
               done(undefined);
             };
           } else {

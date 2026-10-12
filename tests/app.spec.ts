@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { OrderTicket } from '../src/lib/tickets/ticket';
+import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
 import type { OrderDraft } from '../src/lib/tickets/order';
 
 type PrintRequest = {
@@ -132,7 +132,7 @@ test('USB is automatic, Print includes the current serving, and the next order i
   await expect(
     page.getByRole('radio', { name: 'Cup', exact: true }),
   ).not.toBeChecked();
-  await page.getByLabel('Name (optional)').fill('  María & Pat  ');
+  await page.getByLabel('Name (optional)').pressSequentially('  María & Pat  ');
   await chooseServing(page, 'Chocolate Chip', 'Sugar Cone', [
     'Gummy Bears',
     'Caramel Sauce',
@@ -144,10 +144,10 @@ test('USB is automatic, Print includes the current serving, and the next order i
   await expect(page.getByLabel('Preparation ticket preview')).toBeHidden();
   await page.getByText('Ticket preview', { exact: true }).click();
   await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'ORDER: María & Pat',
+    'MARÍA & PAT',
   );
   await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'Sugar Cone',
+    'SUGAR CONE',
   );
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText(
@@ -164,21 +164,19 @@ test('USB is automatic, Print includes the current serving, and the next order i
   ).toHaveText('0');
   await expect(printButton(page)).toBeDisabled();
   expect(submitted).toHaveLength(1);
-  expect(submitted[0].ticket.items).toEqual([
+  expect(submitted[0].ticket.reference).toBe('0001');
+  expect(submitted[0].ticket.displayName).toBe('María & Pat');
+  expect(submitted[0].ticket.servings).toEqual([
     {
-      name: 'Ice cream (1 scoop)',
-      quantity: 1,
-      modifiers: [
-        'Sugar Cone',
-        '1 scoop Chocolate Chip',
-        'Gummy Bears',
-        'Caramel Sauce',
-      ],
+      container: 'Sugar Cone',
+      flavors: [{ flavor: 'Chocolate Chip', count: 1 }],
+      toppings: ['Gummy Bears', 'Caramel Sauce'],
     },
   ]);
+
   await page.getByText('View last receipt', { exact: true }).click();
   await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
-    'ORDER: María & Pat',
+    'MARÍA & PAT',
   );
   await expect(
     page.getByText('Print attempts (1)', { exact: true }),
@@ -219,20 +217,18 @@ test('prints 3 mixed scoops as one serving and reprints the exact original distr
   );
   await page.getByText('Ticket preview', { exact: true }).click();
   await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'Ice cream (3 scoops)',
+    '3 SCOOPS - CUP',
   );
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
-  expect(submitted[0].ticket.items).toEqual([
+  expect(submitted[0].ticket.servings).toEqual([
     {
-      name: 'Ice cream (3 scoops)',
-      quantity: 1,
-      modifiers: [
-        'Cup',
-        '1 scoop Strawberry',
-        '2 scoops Chocolate Chip',
-        'Gummy Bears',
+      container: 'Cup',
+      flavors: [
+        { flavor: 'Strawberry', count: 1 },
+        { flavor: 'Chocolate Chip', count: 2 },
       ],
+      toppings: ['Gummy Bears'],
     },
   ]);
   await expect(
@@ -252,7 +248,7 @@ test('prints 3 mixed scoops as one serving and reprints the exact original distr
   ).toHaveText('2');
   await page.getByText('View last receipt', { exact: true }).click();
   await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
-    '2 scoops Chocolate Chip',
+    '2 x Chocolate Chip',
   );
   await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
     'REPRINT',
@@ -308,7 +304,7 @@ test('five-scoop total applies across flavors, removing scoops frees capacity, a
       async () =>
         (await readDraft(page)).editor.flavors.find(
           (f) => f.flavor === 'Strawberry',
-        )?.scoops,
+        )?.count,
     )
     .toBe(1);
   await page.reload();
@@ -324,14 +320,16 @@ test('five-scoop total applies across flavors, removing scoops frees capacity, a
   await expect(page.getByText('4 of 5 scoops', { exact: true })).toBeVisible();
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
-  expect(submitted[0].ticket.items).toHaveLength(1);
-  expect(submitted[0].ticket.items[0].name).toBe('Ice cream (4 scoops)');
-  expect(submitted[0].ticket.items[0].modifiers).toEqual([
-    'Cake Cone',
-    '1 scoop Chocolate',
-    '1 scoop Strawberry',
-    '2 scoops Chocolate Chip',
-    'No toppings',
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Cake Cone',
+      flavors: [
+        { flavor: 'Chocolate', count: 1 },
+        { flavor: 'Strawberry', count: 1 },
+        { flavor: 'Chocolate Chip', count: 2 },
+      ],
+      toppings: [],
+    },
   ]);
 });
 
@@ -355,60 +353,56 @@ test('removing the last scoop blocks printing without dropping the selected cont
   await expect(printButton(page)).toBeEnabled();
 });
 
-test('previous single-flavor drafts recover as one-scoop servings', async ({
+test('v1 browser tickets, attempts and drafts reset once before a new structured order', async ({
   page,
 }) => {
   const { submitted } = await mockUsb(page);
+  await page.addInitScript(async () => {
+    if (sessionStorage.getItem('seeded-v1')) return;
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('order-pad-v1', 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('tickets', { keyPath: 'id' });
+        req.result.createObjectStore('attempts', { keyPath: 'id' });
+        req.result.createObjectStore('settings');
+        const tx = req.transaction!;
+        tx.objectStore('tickets').put({ id: 'old-ticket', items: [] });
+        tx.objectStore('attempts').put({
+          id: 'old-attempt',
+          ticketId: 'old-ticket',
+        });
+        tx.objectStore('settings').put('old-ticket', 'latest');
+        tx.objectStore('settings').put(
+          { name: 'Legacy draft', reference: 'Sundae Sprinkle' },
+          'draft',
+        );
+      };
+      req.onsuccess = () => {
+        req.result.close();
+        sessionStorage.setItem('seeded-v1', 'yes');
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
   await page.goto('/');
   await expect(page.getByLabel('Name (optional)')).toBeEnabled();
-  await page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const req = indexedDB.open('order-pad-v1');
-      req.onsuccess = () => resolve(req.result);
-    });
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction('settings', 'readwrite');
-      tx.objectStore('settings').put(
-        {
-          name: 'Legacy draft',
-          reference: 'Sundae Sprinkle',
-          servings: [
-            {
-              flavor: 'Chocolate Chip',
-              container: 'Cup',
-              toppings: ['Gummy Bears'],
-            },
-          ],
-          editor: {
-            flavor: 'Strawberry',
-            container: 'Sugar Cone',
-            toppings: [],
-          },
-        },
-        'draft',
-      );
-      tx.oncomplete = () => resolve();
-    });
-    db.close();
-  });
-  await page.reload();
-  await expect(page.getByLabel('Name (optional)')).toHaveValue('Legacy draft');
+  await expect(page.getByLabel('Name (optional)')).toHaveValue('');
   await expect(
-    page.getByLabel('Strawberry scoop count', { exact: true }),
-  ).toHaveText('1');
-  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(2);
-  await expect(page.getByLabel('Order servings')).toContainText(
-    '1 scoop Chocolate Chip',
-  );
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeDisabled();
+  expect((await readDraft(page)).reference).toBe('0001');
+  await chooseServing(page);
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
-  expect(submitted[0].ticket.items).toHaveLength(2);
-  expect(submitted[0].ticket.items[0].modifiers).toContain(
-    '1 scoop Chocolate Chip',
-  );
-  expect(submitted[0].ticket.items[1].modifiers).toContain(
-    '1 scoop Strawberry',
-  );
+  expect(submitted[0].ticket.schema).toBe(2);
+  expect(submitted[0].ticket.reference).toBe('0001');
+  await page.reload();
+  await expect(page.getByLabel('Name (optional)')).toBeEnabled();
+  expect((await readDraft(page)).reference).toBe('0002');
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeEnabled();
 });
 
 test('settings preserve the draft, display the server queue, and support keyboard tab navigation', async ({
@@ -475,7 +469,7 @@ test('multi-serving edits replace rather than duplicate, and incomplete servings
     .click();
   await expect(printButton(page)).toBeDisabled();
   await expect(page.getByRole('status')).toContainText(
-    'Add at least one scoop and choose a container',
+    'To finish this serving: choose a container.',
   );
   await page
     .getByRole('button', { name: 'Cancel serving', exact: true })
@@ -495,14 +489,17 @@ test('multi-serving edits replace rather than duplicate, and incomplete servings
   await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(2);
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
-  expect(submitted[0].ticket.items.map((item) => item.name)).toEqual([
-    'Ice cream (1 scoop)',
-    'Ice cream (1 scoop)',
-  ]);
-  expect(submitted[0].ticket.items[1].modifiers).toEqual([
-    'Cake Cone',
-    '1 scoop Chocolate Chip',
-    'Gummy Bears',
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Cup',
+      flavors: [{ flavor: 'Vanilla', count: 1 }],
+      toppings: [],
+    },
+    {
+      container: 'Cake Cone',
+      flavors: [{ flavor: 'Chocolate Chip', count: 1 }],
+      toppings: ['Gummy Bears'],
+    },
   ]);
 });
 
@@ -570,7 +567,7 @@ test('reprints preserve original identity while a different incomplete draft is 
     'REPRINT',
   );
   await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
-    'First customer',
+    'FIRST CUSTOMER',
   );
   await page.reload();
   await expect(page.getByLabel('Name (optional)')).toHaveValue('Next customer');
@@ -612,7 +609,7 @@ test('incomplete drafts reload, and blank-name fallback stays stable through sub
   await page.getByRole('radio', { name: 'Cup', exact: true }).check();
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText(
-    `Order submitted — ${reference}`,
+    `Order submitted — ${blankNameLabel(Number(reference))}`,
   );
   await page
     .getByRole('button', { name: 'Reprint last order', exact: true })
@@ -691,7 +688,7 @@ test('failed submissions retain their receipt until a deliberate successful repr
   await expect(page.getByRole('status')).toContainText('Reprint submitted');
   await expect(page.getByLabel('Name (optional)')).toHaveValue('');
   expect(submitted[0].reprint).toBe(true);
-  expect(submitted[0].ticket.reference).toBe('Keep this order');
+  expect(submitted[0].ticket.displayName).toBe('Keep this order');
 });
 
 test('lost responses never retry, remain unknown on reload and require acknowledgment', async ({
@@ -823,6 +820,67 @@ test('older accepted locked drafts advance on reload without resubmission', asyn
   expect(submitted).toHaveLength(1);
 });
 
+test('overlength orders block printing with a clear message and recover after removing servings', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await expect(page.getByLabel('Name (optional)')).toBeEnabled();
+  const current = await readDraft(page);
+  await page.evaluate(async (draft) => {
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const request = indexedDB.open('order-pad-v1');
+      request.onsuccess = () => resolve(request.result);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('settings', 'readwrite');
+        tx.objectStore('settings').put(
+          {
+            ...draft,
+            servings: Array(30).fill({
+              flavors: [
+                'Chocolate',
+                'Vanilla',
+                'Strawberry',
+                'Chocolate Chip',
+              ].map((flavor) => ({ flavor, count: 1 })),
+              container: 'Cup',
+              toppings: [
+                'Whipped cream',
+                'Gummy Bears',
+                'Caramel Sauce',
+                'Chocolate Sauce',
+                'Sliced Almonds',
+                'Maraschino Cherries',
+              ],
+            }),
+          },
+          'draft',
+        );
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }, current);
+  await page.reload();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(30);
+  await expect(printButton(page)).toBeDisabled();
+  await expect(page.getByRole('status')).toContainText('length limit');
+  expect(submitted).toHaveLength(0);
+  for (let n = 30; n > 20; n--)
+    await page
+      .getByRole('button', { name: `Remove serving ${n}`, exact: true })
+      .click();
+  await expect(printButton(page)).toBeEnabled();
+  await printButton(page).click();
+  await expect(page.getByRole('status')).toContainText('Order submitted');
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0].ticket.servings).toHaveLength(20);
+});
+
 test('cached app reopens offline with recovered draft but cannot print without its host', async ({
   page,
   context,
@@ -903,7 +961,7 @@ for (const viewport of [
     });
     await page.getByText('Ticket preview', { exact: true }).click();
     await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-      'ORDER: Alex',
+      'ALEX',
     );
     await page
       .getByRole('tab', { name: 'Printer settings', exact: true })

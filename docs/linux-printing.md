@@ -66,7 +66,7 @@ The Mint URL is a different storage origin from the Windows URL. Old browser tic
 - Lost/malformed response, interrupted submission or failed outcome persistence is unknown. Reprinting requires an explicit new attempt marked REPRINT with the original ticket ID. Other applications using CUPS are outside the station lock.
 - Preserve `.print-data/` on local persistent storage; it contains tickets/attempts and is Git-ignored. Do not delete it to resolve an ambiguous print.
 - Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
-- The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Historical simulation/PassPRNT adapters and stored records remain compatible.
+- The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Simulation/PassPRNT adapters remain available for compatibility tests. Phase 1 resets v1 browser records once, as documented in README; the printer-service journal is unchanged.
 
 Optional variables: `ORDER_PAD_PORT` (4174), `ORDER_PAD_DATA` (`.print-data` relative to repository), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). Keep paths/environment stable across restarts.
 

@@ -103,7 +103,7 @@ describe('durable print state', () => {
       await session.print(printer, false);
       expect(session.state.phase).toBe('ready');
       expect(session.state.attempts[0].result?.status).toBe(scenario);
-      expect(printer.preview).toContain('ORDER: 0042');
+      expect(printer.preview).toContain('ORDER #0043');
       const reloaded = new PrintSession(store, () => {});
       await reloaded.initialize();
       expect(reloaded.state.ticket?.id).toBe(session.state.ticket?.id);

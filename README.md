@@ -23,7 +23,17 @@ The menu is:
 - Containers: Cup, Cake Cone, Sugar Cone.
 - Toppings: Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries.
 
-Enter an optional name (up to 80 printable characters). Blank names use a stable two-word ice cream label such as **Sundae Sprinkle**. Each serving has its own preparation block with its total and per-flavor scoop counts, container, and toppings, including **No toppings** when appropriate. For example, one cup with 2 Chocolate Chip + 1 Strawberry prints **Ice cream (3 scoops)** with **2 scoops Chocolate Chip** and **1 scoop Strawberry** underneath; it remains one serving. Orders support up to 30 servings, subject to receipt-length limits. At least one scoop and a container are required before printing. Incomplete selections must be completed or canceled. Existing single-flavor drafts recover as one-scoop servings; already submitted tickets remain unchanged for reprinting.
+Enter an optional name (up to 80 printable characters). Blank names use a stable
+adjective and ice cream noun derived from the numeric order reference, such as
+**Sunny Caramel** for #0043. Each serving has its own preparation block with its
+total and per-flavor scoop counts, container, and toppings, including **No
+toppings** when appropriate. For example, one cup with 2 Chocolate Chip + 1
+Strawberry prints **3 SCOOPS - CUP**, then **1 x Strawberry** and **2 x Chocolate
+Chip** in menu order; it remains one serving. Orders support up to 30 servings,
+subject to receipt-length limits. At least one scoop and a container are required
+before printing. Incomplete selections must be completed or canceled. Schema 2
+tickets remain immutable for reprinting; old browser records receive the one-time
+reset described below.
 
 The **Order** tab contains the builder, summary, and always-visible print action. Receipt previews and print attempts are collapsed by default. The **Printer settings** tab shows the server’s configured USB queue, live readiness checks, and setup instructions. Switching tabs preserves the order. Readiness is checked automatically on startup; no recurring setup acknowledgment is required. A static-only host cannot print.
 
@@ -55,13 +65,39 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `src/lib/printing/adapters/`: Linux same-origin adapter used by the UI; simulation and PassPRNT adapters retained for unit tests and historical transport compatibility.
 - `printer-service/`: optional Linux host; receipt PDF, CUPS submission, durable attempt journal and static serving. The domain remains printer-neutral.
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
-- `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Existing database version and records are preserved.
+- `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Structured tickets use schema 2 and IndexedDB version 2; the one-time v1 reset is described below.
 - `src/routes/+page.svelte`: Order and Printer settings tabs, serving editor, summary, collapsed receipts/attempts, and direct USB submissions/reprints.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
-In the current UI, accepted means CUPS accepted a queue submission, not physical verification. Historical simulator/PassPRNT results remain readable. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. Historical IV attempts stay readable.
+In the current UI, accepted means CUPS accepted a queue submission, not physical verification. The attempt model still supports simulator/PassPRNT results. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. It also retains the IV adapter identifier; v1 browser history receives the one-time reset below.
 
 Every new submission and reprint uses the server USB route; there is no transport fallback. Keep one station tab. There is no application background queue, cloud backup or exactly-once guarantee. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
+
+## Phase 1 storage upgrade
+
+Before opening the updated app on a station with old browser data, inspect any
+unfinished physical output and pending CUPS jobs. The first open upgrades the
+existing `order-pad-v1` IndexedDB database to version 2 and **automatically deletes
+v1 tickets, print attempts (including unfinished attempts), and order drafts**.
+These generic `items` records cannot safely represent structured servings. The
+reset is atomic and happens once; subsequent opens preserve schema 2 tickets,
+attempts, and drafts. Close other station tabs if the upgrade is blocked.
+
+The printer service's durable `.print-data` journal and CUPS jobs are not reset,
+and the upgrade never sends or retries a print. Browser order numbers restart at
+`#0001`, increase as new drafts are saved, and survive reloads. Reprints retain the
+original number, display name, timestamp, servings, and ticket ID. Abandoned
+orders can leave gaps. Keep one station tab; shared allocation across phones is
+deferred to the shared-store phase.
+
+Prep tickets calculate scoop totals from their servings (the pictured #0043 order
+contains six scoops). Names are optional, sanitized, and limited to 80 printable
+characters. Blank names resolve once to a stable label such as “Sunny Caramel” for
+#0043. The fixed menu permits 1–5 scoops per serving, one container, and optional
+toppings. Orders permit up to 30 servings, subject to a 240-line / 2000 mm receipt
+limit with space reserved for the reprint warning. PassPRNT keeps its existing
+128 KiB encoded-intent limit. Receipts use station-local date/time and require
+physical layout and cutting verification on the printer.
 
 ## Offline and acceptance
 

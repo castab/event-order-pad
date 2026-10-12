@@ -22,7 +22,7 @@ Responsive checks at 360×780, 390×844, 768×1024, and 1024×768 report no hori
 
 ## USB-only ordering UX — 2026-10-11
 
-Implemented Order and Printer settings tabs, automatic use of the server’s local USB queue, live startup/readiness checks, and read-only queue details. Printer selection, simulation controls, recurring setup acknowledgment, and PassPRNT launching are removed from the ordering interface. Historical adapters and stored records remain supported.
+Implemented Order and Printer settings tabs, automatic use of the server’s local USB queue, live startup/readiness checks, and read-only queue details. Printer selection, simulation controls, recurring setup acknowledgment, and PassPRNT launching are removed from the ordering interface. Historical adapters remain available. The later phase 1 domain upgrade resets v1 browser records once, as documented in README.
 
 Print includes a complete pending serving or edit; incomplete selections block submission without dropping them. An accepted result and the next empty draft save in one IndexedDB transaction. Older accepted locked drafts advance safely on reload. Failed/unknown outcomes remain locked for deliberate recovery. Reprinting the previous ticket preserves another active draft. Flavor and container remain unselected by default.
 
@@ -79,7 +79,7 @@ Updated **2026-10-11** for **TSP143IIIU / Galaxy S10e / Android 12**, adding the
 | npm audit             | 0 vulnerabilities                                     |
 | git diff --check      | Passed                                                |
 
-Unit checks cover immutable tickets, modifiers/instructions, long notes, URI/HTML escaping, USB parameters, partial cut, disabled retry pop-up, unsupported runtimes, structured callback outcomes, intent before handoff, overlap prevention, callback correlation, immutable final outcomes, storage failures and unknown recovery without resend. The old IV adapter and SDK tests were replaced by IIIU PassPRNT coverage; historical IV attempts remain readable.
+Unit checks cover immutable structured servings, menu validation, canonical ordering, sanitized names, numeric references, printable-length limits, the v1 browser-data reset, URI/HTML escaping, USB parameters, partial cut, disabled retry pop-up, unsupported runtimes, structured callback outcomes, intent before handoff, overlap prevention, callback correlation, immutable final outcomes, storage failures and unknown recovery without resend. The old IV adapter and SDK tests were replaced by IIIU PassPRNT coverage; the attempt model retains IV identifiers, while the phase 1 upgrade resets v1 browser history once.
 
 Browser checks cover simulation, reload/reprint, offline shell reopening, duplicate acknowledgment, unsupported real mode, missing IndexedDB, interrupted sends, and no horizontal overflow at 1024×768, 768×1024 and 390×844. New checks cover a pending PassPRNT link after saved intent, matching callback completion through an offline cached shell, repeated callback protection and missing-return recovery. The HTTPS test uses Android user-agent metadata and maps static assets to local production output; it does not open PassPRNT or send USB data.
 

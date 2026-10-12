@@ -14,7 +14,7 @@ The [IIIU USB manual](https://www.star-m.jp/products/s_print/tsp100iiiu/manual/e
 
 [PassPRNT's Android table](https://www.star-m.jp/products/s_print/sdk/passprnt/manual/android/en/functions.html) lists TSP100IIIU USB, firmware 1.0+, empty settings, and Android 9+ for PassPRNT 2.8+. Android 12 meets the OS baseline but does not prove the installed apps, USB permission or cable work. Manual 1.9.0 describes Android app 2.11.0; record the installed version.
 
-The [supported devices PDF, TSP100IIIU table (page 21)](https://star-m.jp/wp-content/uploads/supported_peripheral_devices_en.pdf) marks PassPRNT USB printing supported and webPRNT Browser / StarXpand Web unsupported. The old IV adapter and vendor scripts have been removed; historical `star-usb` attempts remain readable as previous IV attempts.
+The [supported devices PDF, TSP100IIIU table (page 21)](https://star-m.jp/wp-content/uploads/supported_peripheral_devices_en.pdf) marks PassPRNT USB printing supported and webPRNT Browser / StarXpand Web unsupported. The old IV adapter and vendor scripts have been removed; the attempt model retains the `star-usb` identifier for IV compatibility. Phase 1 performs a one-time reset of v1 browser tickets and attempts (see README).
 
 ## Implemented protocol
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { formatTicket } from '$lib/tickets/format';
+  import { blankNameLabel } from '$lib/tickets/ticket';
   import {
     flavors,
     maxScoopsPerServing,
@@ -9,7 +10,9 @@
     type Flavor,
     containers,
     toppings,
-    emptyEditor,
+    cancelServing,
+    editServing,
+    removeServing as removeDraftServing,
     draftTicket,
     commitServing,
     hasPendingServing,
@@ -82,11 +85,14 @@
       printerStatus.ready &&
       (!needsConfirmation || outputConfirmed),
   );
-  const draftPreview = $derived(
-    prepared
-      ? draftTicket(prepared, 'Assigned when printed', previewTimestamp)
-      : undefined,
-  );
+  const draftPreview = $derived.by(() => {
+    if (!prepared) return undefined;
+    try {
+      return draftTicket(prepared, 'Assigned when printed', previewTimestamp);
+    } catch {
+      return undefined;
+    }
+  });
   const preview = $derived(draftPreview ? formatTicket(draftPreview) : []);
   const lastPreview = $derived(
     viewState.ticket
@@ -191,16 +197,16 @@
     if (!draft || !editable) return;
     const existing =
       draft.editor.flavors.find((portion) => portion.flavor === flavor)
-        ?.scoops ?? 0;
-    const scoops = existing + amount;
-    if (scoops < 0 || totalScoops(draft.editor) + amount > maxScoopsPerServing)
+        ?.count ?? 0;
+    const count = existing + amount;
+    if (count < 0 || totalScoops(draft.editor) + amount > maxScoopsPerServing)
       return;
     const selected = draft.editor.flavors.filter(
       (portion) => portion.flavor !== flavor,
     );
     changeEditor({
       ...draft.editor,
-      flavors: scoops ? [...selected, { flavor, scoops }] : selected,
+      flavors: count ? [...selected, { flavor, count }] : selected,
     });
   }
 
@@ -215,17 +221,7 @@
 
   function removeServing(index: number) {
     if (!draft) return;
-    changeDraft({
-      ...draft,
-      servings: draft.servings.filter((_, i) => i !== index),
-      editor: draft.editingIndex === index ? emptyEditor() : draft.editor,
-      editingIndex:
-        draft.editingIndex === index
-          ? undefined
-          : draft.editingIndex !== undefined && draft.editingIndex > index
-            ? draft.editingIndex - 1
-            : draft.editingIndex,
-    });
+    changeDraft(removeDraftServing(draft, index));
   }
 
   async function print(reprint: boolean) {
@@ -404,7 +400,7 @@
                   {@const count =
                     draft.editor.flavors.find(
                       (portion) => portion.flavor === flavor,
-                    )?.scoops ?? 0}
+                    )?.count ?? 0}
                   <div class="scoop-choice" class:selected={count > 0}>
                     <strong>{flavor}</strong>
                     <div
@@ -492,12 +488,10 @@
               {#if unfinished}<button
                   class="text-button"
                   disabled={!editable}
-                  onclick={() =>
-                    changeDraft({
-                      ...draft!,
-                      editor: emptyEditor(),
-                      editingIndex: undefined,
-                    })}>Cancel serving</button
+                  onclick={() => changeDraft(cancelServing(draft!))}
+                  >{draft.editingIndex === undefined
+                    ? 'Cancel serving'
+                    : 'Cancel edit'}</button
                 >{/if}
             </div>
             <p class="small">
@@ -552,8 +546,10 @@
                 changeDraft({ ...draft!, name: event.currentTarget.value })}
             />
             <p class="small">
-              Ticket label: <strong
-                >{draft.name.trim() || draft.reference}</strong
+              Order #{draft.reference} · Ticket label:
+              <strong
+                >{draft.name.trim() ||
+                  blankNameLabel(Number(draft.reference))}</strong
               >
             </p>
             <ol class="servings" aria-label="Order servings">
@@ -584,12 +580,8 @@
                         class="text-button"
                         disabled={!editable || unfinished}
                         aria-label={`Edit serving ${index + 1}`}
-                        onclick={() =>
-                          changeDraft({
-                            ...draft!,
-                            editor: { ...serving },
-                            editingIndex: index,
-                          })}>Edit</button
+                        onclick={() => changeDraft(editServing(draft!, index))}
+                        >Edit</button
                       ><button
                         class="text-button"
                         disabled={!editable}
@@ -636,7 +628,9 @@
           <div>
             <h2 id="last-title">Last submitted order</h2>
             <p class="muted">
-              {viewState.ticket?.reference ?? 'No orders submitted yet'}
+              {viewState.ticket
+                ? `#${viewState.ticket.reference} · ${viewState.ticket.displayName}`
+                : 'No orders submitted yet'}
             </p>
           </div>
           <button
@@ -690,7 +684,7 @@
             >
           {:else if last?.result}<strong
               >{last.result.status === 'accepted'
-                ? `${last.reprint ? 'Reprint' : 'Order'} submitted — ${viewState.ticket?.reference}`
+                ? `${last.reprint ? 'Reprint' : 'Order'} submitted — ${viewState.ticket?.displayName}`
                 : last.result.status === 'failed'
                   ? 'Order submission failed'
                   : 'Outcome unknown'}</strong

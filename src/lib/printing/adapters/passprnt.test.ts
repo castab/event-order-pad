@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sampleTicket } from '../../tickets/ticket';
+import { parseTicket, sampleTicket } from '../../tickets/ticket';
 import {
   PassPrntPrinter,
   passPrntSupport,
@@ -41,29 +41,43 @@ describe('TSP143IIIU PassPRNT integration', () => {
       back: 'https://pad.example/?order_pad_attempt=attempt-2',
     });
     expect(uri.searchParams.get('html')).toContain('REPRINT');
-    expect(uri.searchParams.get('html')).toContain('ORDER: 0042');
+    expect(uri.searchParams.get('html')).toContain('#0043');
     expect(uri.searchParams.get('html')).toContain('ticket-1');
     expect(uri.searchParams.has('url')).toBe(false);
     expect(uri.searchParams.has('pdf')).toBe(false);
   });
   it('escapes ticket content and preserves UTF-8 instead of interpreting HTML', () => {
     const html = receiptHtml(
-      { ...ticket, notes: '<script>& "Crème"</script>' },
+      parseTicket({
+        ...ticket,
+        customerName: '<script>& "Crème"</script>',
+        displayName: undefined,
+      }),
       false,
     );
-    expect(html).toContain(
-      '&lt;script&gt;&amp; &quot;Crème&quot;&lt;/script&gt;',
-    );
+    expect(html).toContain('&lt;SCRIPT&gt;&amp;');
     expect(html).not.toContain('<script>');
     expect(html).not.toMatch(/src=|https?:/);
   });
   it('rejects oversized receipts before any handoff', () => {
     const large = {
       ...ticket,
-      items: Array.from({ length: 30 }, () => ({
-        name: 'Item',
-        quantity: 1,
-        modifiers: Array.from({ length: 20 }, () => 'Option'),
+      servings: Array.from({ length: 30 }, () => ({
+        flavors: [
+          { flavor: 'Chocolate' as const, count: 1 },
+          { flavor: 'Vanilla' as const, count: 1 },
+          { flavor: 'Strawberry' as const, count: 1 },
+          { flavor: 'Chocolate Chip' as const, count: 1 },
+        ],
+        container: 'Cup' as const,
+        toppings: [
+          'Whipped cream',
+          'Gummy Bears',
+          'Caramel Sauce',
+          'Chocolate Sauce',
+          'Sliced Almonds',
+          'Maraschino Cherries',
+        ] as const,
       })),
     };
     expect(() => receiptHtml(large, false)).toThrow('length limit');
