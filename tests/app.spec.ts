@@ -966,6 +966,8 @@ for (const viewport of [
   { width: 1024, height: 768 },
   { width: 768, height: 1024 },
   { width: 390, height: 844 },
+  { width: 820, height: 1180 },
+  { width: 1280, height: 800 },
 ]) {
   test(`responsive order and settings layout ${viewport.width}x${viewport.height}`, async ({
     page,
@@ -974,6 +976,13 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await page.goto('/');
     await page.getByLabel('Customer name (optional)').fill('Alex');
+    const emptyOrder = page.getByText(
+      'Servings you add show up here. For a one-serving order, just press Print order.',
+      { exact: true },
+    );
+    if (viewport.width >= 760) await expect(emptyOrder).toBeVisible();
+    else await expect(emptyOrder).toBeHidden();
+    await addServing(page);
     await chooseServing(page, 'Chocolate Chip', 'Sugar Cone', ['Gummy Bears']);
     await page
       .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
@@ -982,6 +991,53 @@ for (const viewport of [
       .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
       .click();
     await expect(printButton(page)).toBeEnabled();
+    const layout = await page.evaluate(() => {
+      const app = document.querySelector('.builder-app')!;
+      const order = document.querySelector('.order-panel')!;
+      const editor = document.querySelector('.editor-pane')!;
+      const actions = document.querySelector('.builder-actions')!;
+      const rect = (element: Element) =>
+        element.getBoundingClientRect().toJSON();
+      return {
+        areas: getComputedStyle(app).gridTemplateAreas,
+        order: rect(order),
+        editor: rect(editor),
+        actions: rect(actions),
+        flavorColumns: getComputedStyle(
+          document.querySelector('.flavor-rows')!,
+        ).gridTemplateColumns.split(' ').length,
+        toppingColumns: getComputedStyle(
+          document.querySelector('.topping-grid')!,
+        ).gridTemplateColumns.split(' ').length,
+        domReadingOrder:
+          !!(
+            order.compareDocumentPosition(editor) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+          ) &&
+          !!(
+            editor.compareDocumentPosition(actions) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+          ),
+      };
+    });
+    expect(layout.domReadingOrder).toBe(true);
+    expect(layout.flavorColumns).toBe(viewport.width >= 1100 ? 2 : 1);
+    expect(layout.toppingColumns).toBe(viewport.width >= 1100 ? 3 : 2);
+    if (viewport.width >= 760) {
+      expect(layout.areas).toBe(
+        '"header header" "editor order" "editor actions"',
+      );
+      expect(layout.editor.right).toBeLessThanOrEqual(layout.order.left);
+      expect(layout.order.width).toBeGreaterThanOrEqual(340);
+      expect(layout.order.width).toBeLessThanOrEqual(400);
+      expect(layout.actions.x).toBe(layout.order.x);
+      await expect(page.locator('.order-heading')).toContainText(
+        '1 serving · 1 scoop',
+      );
+    } else {
+      expect(layout.areas).toBe('"header" "content" "actions"');
+      expect(layout.order.bottom).toBeLessThanOrEqual(layout.editor.top);
+    }
     const bounds = await printButton(page).boundingBox();
     expect(bounds!.y).toBeGreaterThanOrEqual(0);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
@@ -1036,6 +1092,20 @@ for (const viewport of [
       path: testInfo.outputPath('printer-settings.png'),
       fullPage: true,
     });
+    await printButton(page).click();
+    const toast = page.getByLabel('Print notification');
+    await expect(toast).toContainText('Order #0001 sent to the printer');
+    const toastBounds = (await toast.boundingBox())!;
+    expect(toastBounds.y).toBe(68);
+    if (viewport.width >= 760) {
+      expect(toastBounds.width).toBe(380);
+      expect(toastBounds.x + toastBounds.width).toBe(viewport.width - 16);
+    } else {
+      expect(toastBounds.x).toBe(12);
+      expect(toastBounds.width).toBe(viewport.width - 24);
+    }
+    await toast.getByRole('button', { name: 'Reprint', exact: true }).click();
+    await expect(toast).toContainText('Reprint of #0001 sent');
   });
 }
 
@@ -1135,6 +1205,33 @@ test('30 simple servings print, additions stop at the cap and editing remains av
   await expect(page.getByText('30 of 30', { exact: true })).toBeVisible();
   await expect(printButton(page)).toHaveText('Print order · 30 servings');
   await expect(printButton(page)).toBeEnabled();
+  if (page.viewportSize()!.width >= 760) {
+    await openTools(page);
+    const scrolling = await page.evaluate(() => {
+      const order = document.querySelector('.order-panel')!;
+      const editor = document.querySelector('.editor-pane')!;
+      editor.scrollTop = 0;
+      order.scrollTop = order.scrollHeight;
+      const orderTop = order.scrollTop;
+      const editorBefore = editor.scrollTop;
+      editor.scrollTop = editor.scrollHeight;
+      return {
+        orderTop,
+        editorBefore,
+        editorAfter: editor.scrollTop,
+        orderAfter: order.scrollTop,
+      };
+    });
+    expect(scrolling.orderTop).toBeGreaterThan(0);
+    expect(scrolling.editorBefore).toBe(0);
+    expect(scrolling.editorAfter).toBeGreaterThan(0);
+    expect(scrolling.orderAfter).toBe(scrolling.orderTop);
+    await expect(printButton(page)).toBeInViewport();
+    await page
+      .getByRole('button', { name: 'Order tools', exact: true })
+      .click();
+  }
+
   await chooseServing(page, 'Chocolate');
   await expect(
     page.getByRole('button', { name: 'Add serving', exact: true }),
@@ -1346,4 +1443,34 @@ test('failed intent-save transaction shows recovery and never sends or resets th
   );
   await expect(printButton(page)).toBeEnabled();
   expect(submitted).toHaveLength(0);
+});
+
+test('responsive layouts change at precisely 760 and 1100 pixels', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  await expect(page.getByLabel('Customer name (optional)')).toBeVisible();
+  for (const width of [759, 760, 1099, 1100]) {
+    await page.setViewportSize({ width, height: 1180 });
+    const columns = await page.evaluate(() => {
+      const count = (selector: string) =>
+        getComputedStyle(
+          document.querySelector(selector)!,
+        ).gridTemplateColumns.split(' ').length;
+      return {
+        shell: count('.builder-app'),
+        flavors: count('.flavor-rows'),
+        toppings: count('.topping-grid'),
+      };
+    });
+    expect(columns.shell).toBe(width >= 760 ? 2 : 1);
+    expect(columns.flavors).toBe(width >= 1100 ? 2 : 1);
+    expect(columns.toppings).toBe(width >= 1100 ? 3 : 2);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  }
 });

@@ -110,6 +110,9 @@
       : [],
   );
   const servingCount = $derived(prepared?.servings.length ?? 0);
+  const savedScoops = $derived(
+    draft?.servings.reduce((n, serving) => n + totalScoops(serving), 0) ?? 0,
+  );
 
   const editing = $derived(draft?.editingIndex !== undefined);
   const full = $derived(!editing && (draft?.servings.length ?? 0) >= 30);
@@ -325,7 +328,7 @@
           previewTimestamp = new Date().toISOString();
           if (viewState.draft?.reference !== previousReference) {
             await tick();
-            document.querySelector('.builder-content')?.scrollTo({ top: 0 });
+            resetScroll();
           }
           showToast(
             reprint
@@ -358,6 +361,13 @@
     }
   }
 
+  function resetScroll() {
+    for (const panel of document.querySelectorAll(
+      '.builder-content, .order-panel, .editor-pane',
+    ))
+      panel.scrollTo({ top: 0 });
+  }
+
   async function startNewOrder() {
     if (
       working ||
@@ -371,7 +381,7 @@
     formError = '';
     previewTimestamp = new Date().toISOString();
     await tick();
-    document.querySelector('.builder-content')?.scrollTo({ top: 0 });
+    resetScroll();
   }
 </script>
 
@@ -474,374 +484,410 @@
   {/if}
 
   <main class="builder-content">
-    {#if !checkingPrinter && !printerStatus.ready}
-      <section class="notice error" role="alert">
-        <strong>Printer unavailable</strong>
-        <p>{printerStatus.message}</p>
-        <button class="secondary" onclick={checkPrinter} disabled={working}
-          >Check printer</button
-        >
-      </section>
-    {/if}
-    {#if recoveryNeeded}
-      <section
-        class="notice error recovery"
-        id="print-recovery"
-        tabindex="-1"
-        aria-label="Print recovery"
-      >
-        {#if viewState.notice}<div role="alert">
-            <strong>Storage needs attention</strong>
-            <p>{viewState.notice}</p>
-          </div>{/if}
-        {#if formError}<p role="alert">{formError}</p>{/if}
-        {#if last?.result && last.result.status !== 'accepted'}
-          <strong
-            >{last.result.status === 'outcome-unknown'
-              ? 'Outcome unknown · check the printer before continuing'
-              : 'Order submission failed'}</strong
+    <div class="order-panel">
+      {#if !checkingPrinter && !printerStatus.ready}
+        <section class="notice error" role="alert">
+          <strong>Printer unavailable</strong>
+          <p>{printerStatus.message}</p>
+          <button class="secondary" onclick={checkPrinter} disabled={working}
+            >Check printer</button
           >
-          <p>{last.result.message}</p>
-          {#if needsConfirmation}
-            <p>
-              The ticket may have printed or be queued. Check the output and
-              pending CUPS jobs. Nothing will be resent automatically.
-            </p>
-            <label class="output-check"
-              ><input
-                type="checkbox"
-                bind:checked={outputConfirmed}
-                disabled={working}
-              /><span>I checked the output and am ready to continue.</span
-              ></label
-            >
-          {:else}<p>
-              No job was submitted. Resolve the issue, then deliberately reprint
-              or start a new order.
-            </p>{/if}
-          <div class="recovery-actions">
-            <button
-              class="secondary"
-              onclick={() => print(true)}
-              disabled={!canSend}>Reprint saved order</button
-            ><button
-              class="ghost"
-              onclick={startNewOrder}
-              disabled={working ||
-                viewState.phase !== 'ready' ||
-                (needsConfirmation && !outputConfirmed)}>New order</button
-            >
-          </div>
-        {/if}
-      </section>
-    {/if}
-
-    {#if draft}
-      <div class="name-field">
-        <label for="order-name">Customer name (optional)</label>
-        <input
-          id="order-name"
-          type="text"
-          autocomplete="off"
-          placeholder={fallbackName}
-          value={draft.name}
-          disabled={!editable}
-          aria-describedby="name-hint"
-          oninput={(event) => changeName(event.currentTarget)}
-        />
-        <p id="name-hint">Left blank, the ticket says “{fallbackName}”</p>
-      </div>
-      {#if draft.servings.length && !draft.submittedTicketId}
-        <section class="saved-section" aria-labelledby="saved-title">
-          <div class="section-label">
-            <h2 id="saved-title">Saved servings</h2>
-            <span>{draft.servings.length} of 30</span>
-          </div>
-          <ol class="saved-servings" aria-label="Order servings">
-            {#each draft.servings as serving, index}
-              <li>
-                <button
-                  class="saved-serving"
-                  class:editing={draft.editingIndex === index}
-                  aria-label={`Edit serving ${index + 1}`}
-                  aria-pressed={draft.editingIndex === index}
-                  disabled={!editable}
-                  onclick={() => changeDraft(editServing(draft!, index))}
-                >
-                  <span class="serving-number">{index + 1}</span><span
-                    class="saved-copy"
-                    ><strong
-                      >{plural(totalScoops(serving), 'scoop')} · {serving.container}</strong
-                    ><span
-                      >{draft.editingIndex === index
-                        ? 'Editing now'
-                        : `${mixText(serving)} · ${serving.toppings.length ? plural(serving.toppings.length, 'topping') : 'No toppings'}`}</span
-                    ></span
-                  >
-                </button>
-                <button
-                  class="remove-serving"
-                  aria-label={`Remove serving ${index + 1}`}
-                  disabled={!editable}
-                  onclick={() => removeServing(index)}
-                  >{@render icon('trash')}</button
-                >
-              </li>
-            {/each}
-          </ol>
         </section>
       {/if}
-      <section class="serving-card" aria-labelledby="serving-title">
-        {#if !draft.submittedTicketId}
-          <div class="serving-heading">
-            <h1 id="serving-title">
-              Serving {(draft.editingIndex ?? draft.servings.length) + 1}
-            </h1>
-            {#if editing}<span class="badge">Editing</span>{/if}
-          </div>
-          <fieldset disabled={!editable}>
-            <legend class="sr-only">Flavors</legend>
-            <div class="section-label">
-              <h2>Flavors</h2>
-              <div class="scoop-meter">
-                <span class="meter-dots" aria-hidden="true"
-                  >{#each [0, 1, 2, 3, 4] as n}<span
-                      class:filled={n < totalScoops(draft.editor)}
-                    ></span>{/each}</span
-                ><span aria-live="polite" aria-label="Total scoops"
-                  >{totalScoops(draft.editor)} / 5 scoops</span
-                >
-              </div>
+      {#if recoveryNeeded}
+        <section
+          class="notice error recovery"
+          id="print-recovery"
+          tabindex="-1"
+          aria-label="Print recovery"
+        >
+          {#if viewState.notice}<div role="alert">
+              <strong>Storage needs attention</strong>
+              <p>{viewState.notice}</p>
+            </div>{/if}
+          {#if formError}<p role="alert">{formError}</p>{/if}
+          {#if last?.result && last.result.status !== 'accepted'}
+            <strong
+              >{last.result.status === 'outcome-unknown'
+                ? 'Outcome unknown · check the printer before continuing'
+                : 'Order submission failed'}</strong
+            >
+            <p>{last.result.message}</p>
+            {#if needsConfirmation}
+              <p>
+                The ticket may have printed or be queued. Check the output and
+                pending CUPS jobs. Nothing will be resent automatically.
+              </p>
+              <label class="output-check"
+                ><input
+                  type="checkbox"
+                  bind:checked={outputConfirmed}
+                  disabled={working}
+                /><span>I checked the output and am ready to continue.</span
+                ></label
+              >
+            {:else}<p>
+                No job was submitted. Resolve the issue, then deliberately
+                reprint or start a new order.
+              </p>{/if}
+            <div class="recovery-actions">
+              <button
+                class="secondary"
+                onclick={() => print(true)}
+                disabled={!canSend}>Reprint saved order</button
+              ><button
+                class="ghost"
+                onclick={startNewOrder}
+                disabled={working ||
+                  viewState.phase !== 'ready' ||
+                  (needsConfirmation && !outputConfirmed)}>New order</button
+              >
             </div>
-            <div class="flavor-rows">
-              {#each flavors as flavor}
-                {@const count =
-                  draft.editor.flavors.find((p) => p.flavor === flavor)
-                    ?.count ?? 0}
-                <div class="flavor-row">
-                  <span>{flavor}</span>
-                  <div
-                    class="flavor-counter"
-                    role="group"
-                    aria-label={`${flavor} scoops`}
+          {/if}
+        </section>
+      {/if}
+
+      {#if draft}
+        <div class="order-heading wide-only">
+          <h2>This order</h2>
+          <span
+            >{draft.servings.length
+              ? `${plural(draft.servings.length, 'serving')} · ${plural(savedScoops, 'scoop')}`
+              : 'Nothing saved yet'}</span
+          >
+        </div>
+        <div class="name-field">
+          <label for="order-name">Customer name (optional)</label>
+          <input
+            id="order-name"
+            type="text"
+            autocomplete="off"
+            placeholder={fallbackName}
+            value={draft.name}
+            disabled={!editable}
+            aria-describedby="name-hint"
+            oninput={(event) => changeName(event.currentTarget)}
+          />
+          <p id="name-hint">Left blank, the ticket says “{fallbackName}”</p>
+        </div>
+        {#if draft.servings.length && !draft.submittedTicketId}
+          <section class="saved-section" aria-labelledby="saved-title">
+            <div class="section-label">
+              <h2 id="saved-title">Saved servings</h2>
+              <span>{draft.servings.length} of 30</span>
+            </div>
+            <ol class="saved-servings" aria-label="Order servings">
+              {#each draft.servings as serving, index}
+                <li>
+                  <button
+                    class="saved-serving"
+                    class:editing={draft.editingIndex === index}
+                    aria-label={`Edit serving ${index + 1}`}
+                    aria-pressed={draft.editingIndex === index}
+                    disabled={!editable}
+                    onclick={() => changeDraft(editServing(draft!, index))}
                   >
-                    <button
-                      class="scoop-button minus"
-                      aria-label={`Remove a ${flavor} scoop`}
-                      disabled={!editable || count === 0}
-                      onclick={() => changeScoops(flavor, -1)}>−</button
+                    <span class="serving-number">{index + 1}</span><span
+                      class="saved-copy"
+                      ><strong
+                        >{plural(totalScoops(serving), 'scoop')} · {serving.container}</strong
+                      ><span
+                        >{draft.editingIndex === index
+                          ? 'Editing now'
+                          : `${mixText(serving)} · ${serving.toppings.length ? plural(serving.toppings.length, 'topping') : 'No toppings'}`}</span
+                      ></span
                     >
-                    <span
-                      class="scoop-count"
-                      class:zero={count === 0}
-                      aria-label={`${flavor} scoop count`}>{count}</span
-                    >
-                    <button
-                      class="scoop-button plus"
-                      aria-label={`Add a ${flavor} scoop`}
-                      disabled={!editable ||
-                        totalScoops(draft.editor) >= maxScoopsPerServing}
-                      onclick={() => changeScoops(flavor, 1)}>+</button
+                  </button>
+                  <button
+                    class="remove-serving"
+                    aria-label={`Remove serving ${index + 1}`}
+                    disabled={!editable}
+                    onclick={() => removeServing(index)}
+                    >{@render icon('trash')}</button
+                  >
+                </li>
+              {/each}
+            </ol>
+          </section>
+        {/if}
+        {#if !draft.servings.length && !draft.submittedTicketId}
+          <p class="empty-order wide-only">
+            Servings you add show up here. For a one-serving order, just press
+            Print order.
+          </p>
+        {/if}
+      {/if}
+    </div>
+    <div class="editor-pane">
+      <div class="editor-inner">
+        {#if draft}
+          <section class="serving-card" aria-labelledby="serving-title">
+            {#if !draft.submittedTicketId}
+              <div class="serving-heading">
+                <h1 id="serving-title">
+                  Serving {(draft.editingIndex ?? draft.servings.length) + 1}
+                </h1>
+                {#if editing}<span class="badge">Editing</span>{/if}
+              </div>
+              <fieldset disabled={!editable}>
+                <legend class="sr-only">Flavors</legend>
+                <div class="section-label">
+                  <h2>Flavors</h2>
+                  <div class="scoop-meter">
+                    <span class="meter-dots" aria-hidden="true"
+                      >{#each [0, 1, 2, 3, 4] as n}<span
+                          class:filled={n < totalScoops(draft.editor)}
+                        ></span>{/each}</span
+                    ><span aria-live="polite" aria-label="Total scoops"
+                      >{totalScoops(draft.editor)} / 5 scoops</span
                     >
                   </div>
                 </div>
-              {/each}
-            </div>
-            {#if totalScoops(draft.editor) >= maxScoopsPerServing}<p
-                class="scoop-limit"
-              >
-                5 scoops is the most per serving. Remove one to change the mix.
-              </p>{/if}
-          </fieldset>
-          <fieldset disabled={!editable}>
-            <legend>Container</legend>
-            <div class="container-grid">
-              {#each containers as container}<button
-                  class="toggle"
-                  aria-pressed={draft.editor.container === container}
-                  onclick={() => changeEditor({ ...draft!.editor, container })}
-                  >{container}</button
-                >{/each}
-            </div>
-          </fieldset>
-          <fieldset disabled={!editable}>
-            <legend>Toppings <span>Optional</span></legend>
-            <div class="topping-grid">
-              {#each toppings as topping}{@const selected =
-                  draft.editor.toppings.includes(topping)}<button
-                  class="toggle topping"
-                  aria-pressed={selected}
-                  onclick={() =>
-                    changeEditor({
-                      ...draft!.editor,
-                      toppings: selected
-                        ? draft!.editor.toppings.filter((t) => t !== topping)
-                        : [...draft!.editor.toppings, topping],
-                    })}
-                  ><span aria-hidden="true">{selected ? '✓' : '+'}</span
-                  >{topping}</button
-                >{/each}
-            </div>
-          </fieldset>
-        {:else}
-          <h1 id="serving-title">Submitted order</h1>
-          <ol class="submitted-servings" aria-label="Submitted servings">
-            {#each draft.servings as serving, index}<li>
-                <strong
-                  >Serving {index + 1} · {plural(totalScoops(serving), 'scoop')} ·
-                  {serving.container}</strong
-                >
-                <p>
-                  {mixText(serving)} · {serving.toppings.join(', ') ||
-                    'No toppings'}
-                </p>
-              </li>{/each}
-          </ol>
-        {/if}
-      </section>
-    {:else}<section class="serving-card">
-        <h1>Your serving</h1>
-        <p>
-          {viewState.phase === 'blocked'
-            ? 'Resolve the storage issue to recover your order.'
-            : 'Loading your order…'}
-        </p>
-      </section>{/if}
-
-    <section class="order-tools">
-      <button
-        class="tools-toggle"
-        aria-expanded={toolsOpen}
-        aria-controls="order-tools-panel"
-        onclick={toggleTools}
-        >Order tools <span aria-hidden="true">{toolsOpen ? '−' : '+'}</span
-        ></button
-      >
-      <div id="order-tools-panel" hidden={!toolsOpen}>
-        <a class="queue-link" href="/queue/">Build queue</a>
-        {#if queueNotice}<p role="status" aria-label="Queue synchronization">
-            {queueNotice}
-          </p>{/if}
-        <section aria-labelledby="usb-title" class="tools-card">
-          <h2 id="usb-title">Printer settings</h2>
-          <p>
-            {checkingPrinter
-              ? 'Checking USB printer…'
-              : printerStatus.ready
-                ? 'USB printing ready'
-                : 'Printer needs attention'}
-          </p>
-          <p>Orders print to the USB printer attached to this server.</p>
-          <dl>
-            <dt>Printer</dt>
-            <dd>Star TSP143IIIU</dd>
-            <dt>CUPS queue</dt>
-            <dd>
-              {printerStatus.queue ?? 'Unavailable until the service responds'}
-            </dd>
-          </dl>
-          <p>{printerStatus.message}</p>
-          <button
-            class="secondary"
-            onclick={checkPrinter}
-            disabled={working || checkingPrinter}
-            >{checkingPrinter ? 'Checking printer…' : 'Check printer'}</button
-          >
-          <details>
-            <summary>Server setup</summary>
-            <ol>
-              <li>
-                Connect the Star printer’s USB-B port to this server and power
-                the printer on.
-              </li>
-              <li>
-                Configure a local USB CUPS queue with the Star TSP100 Cutter
-                driver. Set <code>ORDER_PAD_QUEUE</code> to that queue when starting
-                the Order Pad service.
-              </li>
-              <li>
-                Verify a CUPS test print, then open this server’s Order Pad
-                address on your ordering device.
-              </li>
-            </ol>
-            <p>
-              Queue readiness and accepted submissions do not verify physical
-              output. Check paper, power, USB, and pending CUPS jobs before
-              reprinting.
-            </p>
-          </details>
-          <details>
-            <summary>Connection and local storage</summary>
-            <p>
-              {online ? 'Network available' : 'Device offline'} · {offlineStatus}
-            </p>
-            <p>
-              Drafts and the last submitted receipt are saved in this browser.
-              Printing requires this server. Keep one Order Pad tab open per
-              station and preserve browser storage during recovery.
-            </p>
-          </details>
-        </section>
-        {#if draft && !draft.submittedTicketId}<details class="tools-card">
-            <summary>Ticket preview</summary>
-            <div aria-label="Preparation ticket preview">
-              {#if preview.length}{@render receipt(preview)}{:else}<p>
-                  {printProblem}
-                </p>{/if}
-            </div>
-          </details>{/if}
-        {#if viewState.ticket}<section class="tools-card">
-            <h2>Last submitted order</h2>
-            <p>
-              #{viewState.ticket.reference} · {viewState.ticket.displayName}
-            </p>
-            <p>
-              {last?.result?.status === 'accepted'
-                ? `${last.reprint ? 'Reprint' : 'Order'} submitted — ${viewState.ticket.displayName}`
-                : last?.result?.message}
-            </p>
-            <details>
-              <summary>View last receipt</summary>
-              <div aria-label="Last submitted ticket preview">
-                {@render receipt(lastPreview)}
-              </div>
-            </details>
-            <details>
-              <summary>Print attempts ({viewState.attempts.length})</summary>
-              <ol>
-                {#each [...viewState.attempts].reverse() as attempt (attempt.id)}<li
+                <div class="flavor-rows">
+                  {#each flavors as flavor}
+                    {@const count =
+                      draft.editor.flavors.find((p) => p.flavor === flavor)
+                        ?.count ?? 0}
+                    <div class="flavor-row">
+                      <span>{flavor}</span>
+                      <div
+                        class="flavor-counter"
+                        role="group"
+                        aria-label={`${flavor} scoops`}
+                      >
+                        <button
+                          class="scoop-button minus"
+                          aria-label={`Remove a ${flavor} scoop`}
+                          disabled={!editable || count === 0}
+                          onclick={() => changeScoops(flavor, -1)}>−</button
+                        >
+                        <span
+                          class="scoop-count"
+                          class:zero={count === 0}
+                          aria-label={`${flavor} scoop count`}>{count}</span
+                        >
+                        <button
+                          class="scoop-button plus"
+                          aria-label={`Add a ${flavor} scoop`}
+                          disabled={!editable ||
+                            totalScoops(draft.editor) >= maxScoopsPerServing}
+                          onclick={() => changeScoops(flavor, 1)}>+</button
+                        >
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+                {#if totalScoops(draft.editor) >= maxScoopsPerServing}<p
+                    class="scoop-limit"
                   >
+                    5 scoops is the most per serving. Remove one to change the
+                    mix.
+                  </p>{/if}
+              </fieldset>
+              <fieldset disabled={!editable}>
+                <legend>Container</legend>
+                <div class="container-grid">
+                  {#each containers as container}<button
+                      class="toggle"
+                      aria-pressed={draft.editor.container === container}
+                      onclick={() =>
+                        changeEditor({ ...draft!.editor, container })}
+                      >{container}</button
+                    >{/each}
+                </div>
+              </fieldset>
+              <fieldset disabled={!editable}>
+                <legend>Toppings <span>Optional</span></legend>
+                <div class="topping-grid">
+                  {#each toppings as topping}{@const selected =
+                      draft.editor.toppings.includes(topping)}<button
+                      class="toggle topping"
+                      aria-pressed={selected}
+                      onclick={() =>
+                        changeEditor({
+                          ...draft!.editor,
+                          toppings: selected
+                            ? draft!.editor.toppings.filter(
+                                (t) => t !== topping,
+                              )
+                            : [...draft!.editor.toppings, topping],
+                        })}
+                      ><span aria-hidden="true">{selected ? '✓' : '+'}</span
+                      >{topping}</button
+                    >{/each}
+                </div>
+              </fieldset>
+            {:else}
+              <h1 id="serving-title">Submitted order</h1>
+              <ol class="submitted-servings" aria-label="Submitted servings">
+                {#each draft.servings as serving, index}<li>
                     <strong
-                      >{attempt.reprint ? 'REPRINT' : 'ORDER'} · {attempt.mode ===
-                      'linux-cups'
-                        ? 'Server USB'
-                        : `Previous ${attempt.mode} attempt`}</strong
+                      >Serving {index + 1} · {plural(
+                        totalScoops(serving),
+                        'scoop',
+                      )} ·
+                      {serving.container}</strong
                     >
                     <p>
-                      {new Date(attempt.startedAt).toLocaleString()} · {attempt
-                        .result?.status ?? 'Awaiting response'}
-                    </p>
-                    <p>
-                      {attempt.result?.message ??
-                        'Intent saved before sending.'}
+                      {mixText(serving)} · {serving.toppings.join(', ') ||
+                        'No toppings'}
                     </p>
                   </li>{/each}
               </ol>
-            </details>
+            {/if}
+          </section>
+        {:else}<section class="serving-card">
+            <h1>Your serving</h1>
+            <p>
+              {viewState.phase === 'blocked'
+                ? 'Resolve the storage issue to recover your order.'
+                : 'Loading your order…'}
+            </p>
           </section>{/if}
-        {#if draft && !recoveryNeeded}<button
-            class="ghost"
-            onclick={startNewOrder}
-            disabled={working ||
-              viewState.phase !== 'ready' ||
-              (needsConfirmation && !outputConfirmed) ||
-              (!draft.submittedTicketId &&
-                !draft.servings.length &&
-                !unfinished &&
-                !draft.name)}>New order</button
-          >{/if}
+
+        <section class="order-tools">
+          <button
+            class="tools-toggle"
+            aria-expanded={toolsOpen}
+            aria-controls="order-tools-panel"
+            onclick={toggleTools}
+            >Order tools <span aria-hidden="true">{toolsOpen ? '−' : '+'}</span
+            ></button
+          >
+          <div id="order-tools-panel" hidden={!toolsOpen}>
+            <a class="queue-link" href="/queue/">Build queue</a>
+            {#if queueNotice}<p
+                role="status"
+                aria-label="Queue synchronization"
+              >
+                {queueNotice}
+              </p>{/if}
+            <section aria-labelledby="usb-title" class="tools-card">
+              <h2 id="usb-title">Printer settings</h2>
+              <p>
+                {checkingPrinter
+                  ? 'Checking USB printer…'
+                  : printerStatus.ready
+                    ? 'USB printing ready'
+                    : 'Printer needs attention'}
+              </p>
+              <p>Orders print to the USB printer attached to this server.</p>
+              <dl>
+                <dt>Printer</dt>
+                <dd>Star TSP143IIIU</dd>
+                <dt>CUPS queue</dt>
+                <dd>
+                  {printerStatus.queue ??
+                    'Unavailable until the service responds'}
+                </dd>
+              </dl>
+              <p>{printerStatus.message}</p>
+              <button
+                class="secondary"
+                onclick={checkPrinter}
+                disabled={working || checkingPrinter}
+                >{checkingPrinter
+                  ? 'Checking printer…'
+                  : 'Check printer'}</button
+              >
+              <details>
+                <summary>Server setup</summary>
+                <ol>
+                  <li>
+                    Connect the Star printer’s USB-B port to this server and
+                    power the printer on.
+                  </li>
+                  <li>
+                    Configure a local USB CUPS queue with the Star TSP100 Cutter
+                    driver. Set <code>ORDER_PAD_QUEUE</code> to that queue when starting
+                    the Order Pad service.
+                  </li>
+                  <li>
+                    Verify a CUPS test print, then open this server’s Order Pad
+                    address on your ordering device.
+                  </li>
+                </ol>
+                <p>
+                  Queue readiness and accepted submissions do not verify
+                  physical output. Check paper, power, USB, and pending CUPS
+                  jobs before reprinting.
+                </p>
+              </details>
+              <details>
+                <summary>Connection and local storage</summary>
+                <p>
+                  {online ? 'Network available' : 'Device offline'} · {offlineStatus}
+                </p>
+                <p>
+                  Drafts and the last submitted receipt are saved in this
+                  browser. Printing requires this server. Keep one Order Pad tab
+                  open per station and preserve browser storage during recovery.
+                </p>
+              </details>
+            </section>
+            {#if draft && !draft.submittedTicketId}<details class="tools-card">
+                <summary>Ticket preview</summary>
+                <div aria-label="Preparation ticket preview">
+                  {#if preview.length}{@render receipt(preview)}{:else}<p>
+                      {printProblem}
+                    </p>{/if}
+                </div>
+              </details>{/if}
+            {#if viewState.ticket}<section class="tools-card">
+                <h2>Last submitted order</h2>
+                <p>
+                  #{viewState.ticket.reference} · {viewState.ticket.displayName}
+                </p>
+                <p>
+                  {last?.result?.status === 'accepted'
+                    ? `${last.reprint ? 'Reprint' : 'Order'} submitted — ${viewState.ticket.displayName}`
+                    : last?.result?.message}
+                </p>
+                <details>
+                  <summary>View last receipt</summary>
+                  <div aria-label="Last submitted ticket preview">
+                    {@render receipt(lastPreview)}
+                  </div>
+                </details>
+                <details>
+                  <summary>Print attempts ({viewState.attempts.length})</summary
+                  >
+                  <ol>
+                    {#each [...viewState.attempts].reverse() as attempt (attempt.id)}<li
+                      >
+                        <strong
+                          >{attempt.reprint ? 'REPRINT' : 'ORDER'} · {attempt.mode ===
+                          'linux-cups'
+                            ? 'Server USB'
+                            : `Previous ${attempt.mode} attempt`}</strong
+                        >
+                        <p>
+                          {new Date(attempt.startedAt).toLocaleString()} · {attempt
+                            .result?.status ?? 'Awaiting response'}
+                        </p>
+                        <p>
+                          {attempt.result?.message ??
+                            'Intent saved before sending.'}
+                        </p>
+                      </li>{/each}
+                  </ol>
+                </details>
+              </section>{/if}
+            {#if draft && !recoveryNeeded}<button
+                class="ghost"
+                onclick={startNewOrder}
+                disabled={working ||
+                  viewState.phase !== 'ready' ||
+                  (needsConfirmation && !outputConfirmed) ||
+                  (!draft.submittedTicketId &&
+                    !draft.servings.length &&
+                    !unfinished &&
+                    !draft.name)}>New order</button
+              >{/if}
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
   </main>
 
   <footer class="builder-actions">
@@ -873,3 +919,131 @@
     >
   </footer>
 </div>
+
+<style>
+  .builder-app {
+    max-width: none;
+    display: grid;
+    grid-template-areas: 'header' 'content' 'actions';
+    grid-template-rows: 60px minmax(0, 1fr) auto;
+  }
+  .builder-header {
+    grid-area: header;
+  }
+  .builder-content {
+    grid-area: content;
+    display: grid;
+    grid-template-areas: 'order' 'editor';
+    grid-template-rows: auto 1fr;
+    align-content: start;
+    gap: 0;
+    padding: 0;
+  }
+  .order-panel {
+    grid-area: order;
+    min-width: 0;
+    padding: 16px 16px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .editor-pane {
+    grid-area: editor;
+    min-width: 0;
+    padding: 20px 16px 24px;
+  }
+  .editor-inner {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+  .builder-actions {
+    grid-area: actions;
+    position: sticky;
+    bottom: 0;
+  }
+  .wide-only {
+    display: none;
+  }
+  .order-heading {
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .order-heading h2 {
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    color: var(--text-heading);
+  }
+  .order-heading > span {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .empty-order {
+    margin: 0;
+    padding: 20px 16px;
+    border-radius: var(--radius-card);
+    border: 1.5px dashed var(--paper-300);
+    text-align: center;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text-muted);
+  }
+  .flavor-rows {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  @media (min-width: 760px) {
+    .builder-app {
+      grid-template-areas: 'header header' 'editor order' 'editor actions';
+      grid-template-columns: minmax(0, 1fr) clamp(340px, 32vw, 400px);
+      grid-template-rows: 60px minmax(0, 1fr) auto;
+    }
+    .builder-content {
+      display: contents;
+    }
+    .editor-pane {
+      overflow-y: auto;
+      min-height: 0;
+      padding: 24px 28px 32px;
+      scroll-padding-top: 24px;
+    }
+    .order-panel {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 20px 20px 16px;
+      border-left: 1px solid var(--border-soft);
+      background: var(--cream-200);
+      scroll-padding-top: 20px;
+    }
+    .builder-actions {
+      position: static;
+      border-left: 1px solid var(--border-soft);
+      box-shadow: none;
+    }
+    .wide-only {
+      display: block;
+    }
+    .order-heading {
+      display: flex;
+    }
+    .print-toast {
+      left: auto;
+      right: 16px;
+      width: 380px;
+    }
+  }
+  @media (min-width: 1100px) {
+    .editor-pane {
+      padding: 28px 40px 40px;
+    }
+    .flavor-rows {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .topping-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+</style>
