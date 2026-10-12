@@ -18,15 +18,31 @@ export const toppings = [
 export type Flavor = (typeof flavors)[number];
 export type Container = (typeof containers)[number];
 export type Topping = (typeof toppings)[number];
-export interface Serving {
+export const maxScoopsPerServing = 5;
+export interface FlavorScoops {
   readonly flavor: Flavor;
+  readonly scoops: number;
+}
+export interface Serving {
+  readonly flavors: readonly FlavorScoops[];
   readonly container: Container;
   readonly toppings: readonly Topping[];
 }
 export interface ServingEditor {
-  readonly flavor: Flavor | '';
+  readonly flavors: readonly FlavorScoops[];
   readonly container: Container | '';
   readonly toppings: readonly Topping[];
+}
+export function totalScoops(serving: Pick<ServingEditor, 'flavors'>): number {
+  return serving.flavors.reduce((total, portion) => total + portion.scoops, 0);
+}
+export function scoopSummary(serving: Pick<ServingEditor, 'flavors'>): string {
+  return serving.flavors
+    .map(
+      ({ flavor, scoops }) =>
+        `${scoops} ${scoops === 1 ? 'scoop' : 'scoops'} ${flavor}`,
+    )
+    .join(' + ');
 }
 export interface OrderDraft {
   readonly name: string;
@@ -38,13 +54,13 @@ export interface OrderDraft {
 }
 
 export function emptyEditor(): ServingEditor {
-  return { flavor: '', container: '', toppings: [] };
+  return { flavors: [], container: '', toppings: [] };
 }
 
 export function hasPendingServing(draft: OrderDraft): boolean {
   return (
     draft.editingIndex !== undefined ||
-    !!draft.editor.flavor ||
+    draft.editor.flavors.length > 0 ||
     !!draft.editor.container ||
     draft.editor.toppings.length > 0
   );
@@ -55,8 +71,10 @@ export function commitServing(draft: OrderDraft): OrderDraft {
   const valid = parseDraft(draft);
   if (valid.submittedTicketId)
     throw new Error('This order is already submitted.');
-  if (!valid.editor.flavor || !valid.editor.container)
-    throw new Error('Choose a flavor and container for the current serving.');
+  if (!valid.editor.flavors.length || !valid.editor.container)
+    throw new Error(
+      'Add at least one scoop and choose a container for the current serving.',
+    );
   const servings = [...valid.servings];
   const serving = valid.editor as Serving;
   if (valid.editingIndex !== undefined) servings[valid.editingIndex] = serving;
@@ -80,7 +98,9 @@ export function prepareDraftForPrint(draft: OrderDraft): OrderDraft {
   const valid = parseDraft(draft);
   const prepared = hasPendingServing(valid) ? commitServing(valid) : valid;
   if (!prepared.servings.length)
-    throw new Error('Choose a flavor and container to start your order.');
+    throw new Error(
+      'Add at least one scoop and choose a container to start your order.',
+    );
   return prepared;
 }
 
@@ -136,18 +156,52 @@ export function parseDraft(value: unknown): OrderDraft {
     )
   )
     throw new Error('Invalid generated order label.');
-  const parseServing = (
-    raw: ServingEditor,
-    partial: boolean,
-  ): ServingEditor => {
+  const parseServing = (value: unknown, partial: boolean): ServingEditor => {
+    if (!value || typeof value !== 'object')
+      throw new Error('Invalid serving.');
+    const raw = value as Record<string, unknown>;
+    // Existing stored single-flavor drafts represent one scoop. Canonical drafts
+    // always use a flavor/count list; submitted tickets themselves stay immutable.
+    let portions: unknown = raw.flavors;
+    if (portions === undefined) {
+      if (
+        !flavors.includes(raw.flavor as Flavor) &&
+        !(partial && raw.flavor === '')
+      )
+        throw new Error('Invalid flavor.');
+      portions = raw.flavor ? [{ flavor: raw.flavor, scoops: 1 }] : [];
+    }
     if (
-      !raw ||
-      (!flavors.includes(raw.flavor as Flavor) &&
-        !(partial && raw.flavor === '')) ||
-      (!containers.includes(raw.container as Container) &&
-        !(partial && raw.container === ''))
+      !Array.isArray(portions) ||
+      portions.length > flavors.length ||
+      (!partial && !portions.length)
     )
-      throw new Error('Choose a flavor and container.');
+      throw new Error('Add at least one scoop.');
+    const selected = portions.map((value: unknown) => {
+      if (!value || typeof value !== 'object')
+        throw new Error('Invalid flavor scoops.');
+      const portion = value as FlavorScoops;
+      if (!flavors.includes(portion.flavor)) throw new Error('Invalid flavor.');
+      if (
+        !Number.isInteger(portion.scoops) ||
+        portion.scoops < 1 ||
+        portion.scoops > maxScoopsPerServing
+      )
+        throw new Error('Scoop counts must be whole numbers from 1 to 5.');
+      return Object.freeze({ flavor: portion.flavor, scoops: portion.scoops });
+    });
+    if (
+      new Set(selected.map((portion) => portion.flavor)).size !==
+      selected.length
+    )
+      throw new Error('Each flavor can appear only once per serving.');
+    if (totalScoops({ flavors: selected }) > maxScoopsPerServing)
+      throw new Error('A serving can contain at most 5 scoops.');
+    if (
+      !containers.includes(raw.container as Container) &&
+      !(partial && raw.container === '')
+    )
+      throw new Error('Choose a container.');
     if (
       !Array.isArray(raw.toppings) ||
       raw.toppings.some((t) => !toppings.includes(t)) ||
@@ -155,9 +209,15 @@ export function parseDraft(value: unknown): OrderDraft {
     )
       throw new Error('Invalid toppings.');
     return Object.freeze({
-      flavor: raw.flavor,
-      container: raw.container,
-      toppings: Object.freeze(toppings.filter((t) => raw.toppings.includes(t))),
+      flavors: Object.freeze(
+        flavors.flatMap((flavor) =>
+          selected.filter((portion) => portion.flavor === flavor),
+        ),
+      ),
+      container: raw.container as Container | '',
+      toppings: Object.freeze(
+        toppings.filter((t) => (raw.toppings as unknown[]).includes(t)),
+      ),
     });
   };
   if (!Array.isArray(v.servings) || v.servings.length > 30)
@@ -196,7 +256,7 @@ export function draftTicket(
   const valid = parseDraft(draft);
   if (
     valid.editingIndex !== undefined ||
-    valid.editor.flavor ||
+    valid.editor.flavors.length ||
     valid.editor.container ||
     valid.editor.toppings.length
   )
@@ -206,10 +266,14 @@ export function draftTicket(
     createdAt,
     reference: valid.name.trim() || valid.reference,
     items: valid.servings.map((s) => ({
-      name: `${s.flavor} ice cream`,
+      name: `Ice cream (${totalScoops(s)} ${totalScoops(s) === 1 ? 'scoop' : 'scoops'})`,
       quantity: 1,
       modifiers: [
         s.container,
+        ...s.flavors.map(
+          ({ flavor, scoops }) =>
+            `${scoops} ${scoops === 1 ? 'scoop' : 'scoops'} ${flavor}`,
+        ),
         ...(s.toppings.length ? s.toppings : ['No toppings']),
       ],
     })),

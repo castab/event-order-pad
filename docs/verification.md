@@ -1,5 +1,25 @@
 # Order Pad verification
 
+## Mixed flavors and scoop counts — 2026-10-11
+
+Each serving now has a list of flavors with positive integer scoop counts, capped at **5 scoops total per cup or cone**. Touch-sized +/− controls start at zero, show each flavor’s count and the shared total, disable additions at five, and remove a flavor when its count reaches zero. Container and toppings apply to the whole serving. Printing still includes the complete current serving or edit automatically.
+
+New tickets keep one item per serving (`quantity: 1`), with a heading such as **Ice cream (3 scoops)** and separate modifier lines for **2 scoops Chocolate Chip**, **1 scoop Strawberry**, the container, and toppings. The existing ticket API and receipt renderers need no schema change. Saved single-flavor drafts convert to one-scoop portions during recovery; submitted tickets remain unchanged for deliberate reprinting. No IndexedDB version bump or data clearing is needed.
+
+| Check                 | Result                                                            |
+| --------------------- | ----------------------------------------------------------------- |
+| npm run check         | Passed; zero Svelte errors/warnings and service TypeScript errors |
+| npm run lint          | Passed                                                            |
+| npm test              | Passed; 73 tests across 8 files                                   |
+| npm run build         | Passed                                                            |
+| npm run build:printer | Passed                                                            |
+| npm run test:e2e      | Passed; 22 Chromium tests                                         |
+| git diff --check      | Passed                                                            |
+
+Coverage includes every flavor/container with 1 and 5 scoops, combinations across all four flavors, mixed totals, duplicate/invalid/decimal/zero counts, aggregate limits, add/edit without duplication, frozen canonical drafts, legacy draft conversion, durable print/reset, reload recovery, and preserving scoop distributions during reprints. Browser tests explicitly exercise 2 Chocolate Chip + 1 Strawberry in one serving, reaching the shared cap, removing to free capacity, deleting the last scoop, editing/reloading mixed flavors, and old-draft recovery.
+
+Responsive checks at 360×780, 390×844, 768×1024, and 1024×768 report no horizontal overflow and a visible Print action. Phone and desktop mixed-flavor screenshots were visually inspected. Automated checks use mocked transport responses; no physical ticket was printed. Close all cached Order Pad tabs and reopen the station to activate the new client before recovering/editing drafts. Follow the updated [physical acceptance checklist](linux-printing.md) to inspect per-flavor counts, serving grouping, legibility, and cut on the printer.
+
 ## USB-only ordering UX — 2026-10-11
 
 Implemented Order and Printer settings tabs, automatic use of the server’s local USB queue, live startup/readiness checks, and read-only queue details. Printer selection, simulation controls, recurring setup acknowledgment, and PassPRNT launching are removed from the ordering interface. Historical adapters and stored records remain supported.

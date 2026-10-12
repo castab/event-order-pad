@@ -52,7 +52,7 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:4174
 
 Follow Tailscale's authorization link if HTTPS needs enabling. Serve is private to the tailnet; do not enable Funnel or expose CUPS port 631. Phone HTTPS uses 443 with no explicit port. The backend binds only to loopback port 4174.
 
-On the S10e, open the **Mint machine’s** HTTPS URL. The Order tab checks the server’s USB queue automatically. Choose a flavor and container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Printer settings** contains queue details, setup instructions, and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
+On the S10e, open the **Mint machine’s** HTTPS URL. The Order tab checks the server’s USB queue automatically. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Printer settings** contains queue details, setup instructions, and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
 
 The Mint URL is a different storage origin from the Windows URL. Old browser ticket/history remain at the old origin; no migration or erasure occurs. Existing sample tickets remain recoverable, and new receipts use the entered order contents.
 
@@ -93,8 +93,8 @@ On the phone, close all Order Pad tabs and reopen the same Mint HTTPS URL to act
 
 For physical acceptance of the simplified workflow:
 
-1. Choose Vanilla and Cup without pressing Add serving. Tap **Print order** once. Verify one serving, the generated two-word label, end marker, legibility, and partial cut. Confirm a fresh order opens with neither flavor nor container selected.
-2. Enter a name and add Chocolate Chip in a Sugar Cone with all six toppings. Choose Strawberry in a Cake Cone with no toppings and press Print directly. Verify the trimmed name, exactly two serving blocks, full toppings, and the no-toppings line.
+1. Choose Vanilla and Cup without pressing Add serving. Tap **Print order** once. Verify one serving with one Vanilla scoop, the generated two-word label, end marker, legibility, and partial cut. Confirm a fresh order opens with all flavor counts at zero and no container selected.
+2. Enter a name and choose 2 Chocolate Chip scoops + 1 Strawberry scoop in a Cup with all six toppings, then add that serving. Choose 5 Vanilla scoops in a Cake Cone with no toppings and press Print directly. Verify the trimmed name, exactly two serving blocks, total scoop counts of 3 and 5, correct per-flavor counts, full toppings, and the no-toppings line. The mixed flavors must remain together in one serving block.
 3. Begin another draft with a different name and unfinished selections. Deliberately **Reprint last order**. Verify REPRINT, original label/content/ID/timestamp, and that the new draft is unchanged.
 4. Switch to **Printer settings**, inspect the `Star_TSP143` queue, check readiness, and return to Order. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
 5. Inspect printer output and pending jobs during a controlled connection interruption. Verify the UI retains an unknown order and requires acknowledgment before continuing, without automatically resending.

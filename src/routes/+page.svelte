@@ -3,6 +3,10 @@
   import { formatTicket } from '$lib/tickets/format';
   import {
     flavors,
+    maxScoopsPerServing,
+    totalScoops,
+    scoopSummary,
+    type Flavor,
     containers,
     toppings,
     emptyEditor,
@@ -49,7 +53,7 @@
   );
   const unfinished = $derived(!!draft && hasPendingServing(draft));
   const editorComplete = $derived(
-    !!draft?.editor.flavor && !!draft?.editor.container,
+    !!draft?.editor.flavors.length && !!draft?.editor.container,
   );
   const needsConfirmation = $derived(
     last?.result?.status === 'outcome-unknown',
@@ -183,6 +187,23 @@
     if (draft) changeDraft({ ...draft, editor });
   }
 
+  function changeScoops(flavor: Flavor, amount: number) {
+    if (!draft || !editable) return;
+    const existing =
+      draft.editor.flavors.find((portion) => portion.flavor === flavor)
+        ?.scoops ?? 0;
+    const scoops = existing + amount;
+    if (scoops < 0 || totalScoops(draft.editor) + amount > maxScoopsPerServing)
+      return;
+    const selected = draft.editor.flavors.filter(
+      (portion) => portion.flavor !== flavor,
+    );
+    changeEditor({
+      ...draft.editor,
+      flavors: scoops ? [...selected, { flavor, scoops }] : selected,
+    });
+  }
+
   function addServing() {
     if (!draft || !editable) return;
     try {
@@ -308,7 +329,8 @@
         <div>
           <h1>Build an order</h1>
           <p>
-            Choose a flavor and container. Print includes your current serving.
+            Choose your scoops and container. Print includes your current
+            serving.
           </p>
         </div>
         <div class="printer-indicator" class:attention={!printerStatus.ready}>
@@ -374,19 +396,51 @@
               >
             </div>
             <fieldset disabled={!editable}>
-              <legend>Flavor <span>choose one</span></legend>
-              <div class="choices">
-                {#each flavors as flavor}<label class="choice"
-                    ><input
-                      type="radio"
-                      name="flavor"
-                      value={flavor}
-                      checked={draft.editor.flavor === flavor}
-                      onchange={() =>
-                        changeEditor({ ...draft!.editor, flavor })}
-                    /><span>{flavor}</span></label
-                  >{/each}
+              <legend
+                >Flavors &amp; scoops <span>mix up to 5 scoops</span></legend
+              >
+              <div class="choices scoop-choices">
+                {#each flavors as flavor}
+                  {@const count =
+                    draft.editor.flavors.find(
+                      (portion) => portion.flavor === flavor,
+                    )?.scoops ?? 0}
+                  <div class="scoop-choice" class:selected={count > 0}>
+                    <strong>{flavor}</strong>
+                    <div
+                      class="scoop-counter"
+                      role="group"
+                      aria-label={`${flavor} scoops`}
+                    >
+                      <button
+                        class="scoop-button"
+                        aria-label={`Remove scoop of ${flavor}`}
+                        disabled={!editable || count === 0}
+                        onclick={() => changeScoops(flavor, -1)}>−</button
+                      >
+                      <span
+                        class="scoop-count"
+                        aria-label={`${flavor} scoop count`}
+                        aria-live="polite">{count}</span
+                      >
+                      <button
+                        class="scoop-button"
+                        aria-label={`Add scoop of ${flavor}`}
+                        disabled={!editable ||
+                          totalScoops(draft.editor) >= maxScoopsPerServing}
+                        onclick={() => changeScoops(flavor, 1)}>+</button
+                      >
+                    </div>
+                  </div>
+                {/each}
               </div>
+              <p class="scoop-total" aria-live="polite">
+                {totalScoops(draft.editor)} of 5 scoops{totalScoops(
+                  draft.editor,
+                ) === maxScoopsPerServing
+                  ? ' · Remove a scoop to change flavors.'
+                  : ''}
+              </p>
             </fieldset>
             <fieldset disabled={!editable}>
               <legend>Container <span>choose one</span></legend>
@@ -459,10 +513,12 @@
             </p>
             <ol class="servings submitted" aria-label="Submitted servings">
               {#each draft.servings as serving, index}<li>
-                  <strong>{index + 1}. {serving.flavor}</strong>
+                  <strong>{index + 1}. {scoopSummary(serving)}</strong>
                   <p>
-                    {serving.container} · {serving.toppings.join(', ') ||
-                      'No toppings'}
+                    {serving.container} · {totalScoops(serving)}
+                    {totalScoops(serving) === 1 ? 'scoop' : 'scoops'} · {serving.toppings.join(
+                      ', ',
+                    ) || 'No toppings'}
                   </p>
                 </li>{/each}
             </ol>
@@ -510,10 +566,12 @@
                       index === draft.servings.length))}
                 <li class:pending>
                   <div>
-                    <strong>{index + 1}. {serving.flavor}</strong>
+                    <strong>{index + 1}. {scoopSummary(serving)}</strong>
                     <p>
-                      {serving.container} · {serving.toppings.join(', ') ||
-                        'No toppings'}
+                      {serving.container} · {totalScoops(serving)}
+                      {totalScoops(serving) === 1 ? 'scoop' : 'scoops'} · {serving.toppings.join(
+                        ', ',
+                      ) || 'No toppings'}
                     </p>
                     {#if pending}<span class="pending-label"
                         >Included when printing</span
@@ -948,6 +1006,46 @@
     cursor: pointer;
     font-size: 14px;
     line-height: 1.3;
+  }
+  .scoop-choice {
+    border: 1px solid #bdcfc1;
+    border-radius: 9px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+  }
+  .scoop-choice.selected {
+    background: #e2ede2;
+    border-color: #174f45;
+  }
+  .scoop-choice strong {
+    font-size: 14px;
+  }
+  .scoop-counter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .scoop-button {
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+    font-size: 24px;
+    border-color: #bdcfc1;
+    background: #fffef9;
+  }
+  .scoop-count {
+    min-width: 20px;
+    text-align: center;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .scoop-total {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: #28523d;
   }
   .choice:has(input:checked) {
     background: #e2ede2;

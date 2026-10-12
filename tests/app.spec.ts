@@ -16,7 +16,9 @@ async function chooseServing(
   container = 'Cup',
   toppings: string[] = [],
 ) {
-  await page.getByRole('radio', { name: flavor, exact: true }).check();
+  await page
+    .getByRole('button', { name: `Add scoop of ${flavor}`, exact: true })
+    .click();
   await page.getByRole('radio', { name: container, exact: true }).check();
   for (const topping of toppings)
     await page.getByRole('checkbox', { name: topping, exact: true }).check();
@@ -92,7 +94,11 @@ async function mockUsb(page: Page) {
     if (!body.reprint) {
       const draft = await readDraft(page);
       expect(draft.submittedTicketId).toBe(body.ticket.id);
-      expect(draft.editor).toEqual({ flavor: '', container: '', toppings: [] });
+      expect(draft.editor).toEqual({
+        flavors: [],
+        container: '',
+        toppings: [],
+      });
       lockedDrafts.push(draft);
     }
     await route.fulfill({
@@ -121,8 +127,8 @@ test('USB is automatic, Print includes the current serving, and the next order i
   await expect(page.getByText('Server setup', { exact: true })).toBeHidden();
   await expect(printButton(page)).toBeDisabled();
   await expect(
-    page.getByRole('radio', { name: 'Vanilla', exact: true }),
-  ).not.toBeChecked();
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('0');
   await expect(
     page.getByRole('radio', { name: 'Cup', exact: true }),
   ).not.toBeChecked();
@@ -154,15 +160,20 @@ test('USB is automatic, Print includes the current serving, and the next order i
     page.getByRole('radio', { name: 'Cup', exact: true }),
   ).not.toBeChecked();
   await expect(
-    page.getByRole('radio', { name: 'Chocolate Chip', exact: true }),
-  ).not.toBeChecked();
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('0');
   await expect(printButton(page)).toBeDisabled();
   expect(submitted).toHaveLength(1);
   expect(submitted[0].ticket.items).toEqual([
     {
-      name: 'Chocolate Chip ice cream',
+      name: 'Ice cream (1 scoop)',
       quantity: 1,
-      modifiers: ['Sugar Cone', 'Gummy Bears', 'Caramel Sauce'],
+      modifiers: [
+        'Sugar Cone',
+        '1 scoop Chocolate Chip',
+        'Gummy Bears',
+        'Caramel Sauce',
+      ],
     },
   ]);
   await page.getByText('View last receipt', { exact: true }).click();
@@ -172,6 +183,232 @@ test('USB is automatic, Print includes the current serving, and the next order i
   await expect(
     page.getByText('Print attempts (1)', { exact: true }),
   ).toBeVisible();
+});
+
+test('prints 3 mixed scoops as one serving and reprints the exact original distribution', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate Chip', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate Chip', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
+  await page.getByRole('radio', { name: 'Cup', exact: true }).check();
+  await page
+    .getByRole('checkbox', { name: 'Gummy Bears', exact: true })
+    .check();
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('2');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByText('3 of 5 scoops', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(1);
+  await expect(page.getByLabel('Order servings')).toContainText(
+    '2 scoops Chocolate Chip',
+  );
+  await expect(page.getByLabel('Order servings')).toContainText(
+    '1 scoop Strawberry',
+  );
+  await page.getByText('Ticket preview', { exact: true }).click();
+  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+    'Ice cream (3 scoops)',
+  );
+  await printButton(page).click();
+  await expect(page.getByRole('status')).toContainText('Order submitted');
+  expect(submitted[0].ticket.items).toEqual([
+    {
+      name: 'Ice cream (3 scoops)',
+      quantity: 1,
+      modifiers: [
+        'Cup',
+        '1 scoop Strawberry',
+        '2 scoops Chocolate Chip',
+        'Gummy Bears',
+      ],
+    },
+  ]);
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('0');
+  await chooseServing(page, 'Vanilla', 'Sugar Cone');
+  await page
+    .getByRole('button', { name: 'Add scoop of Vanilla', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByRole('status')).toContainText('Reprint submitted');
+  expect(submitted[1].ticket).toEqual(submitted[0].ticket);
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('2');
+  await page.getByText('View last receipt', { exact: true }).click();
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    '2 scoops Chocolate Chip',
+  );
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    'REPRINT',
+  );
+});
+
+test('five-scoop total applies across flavors, removing scoops frees capacity, and mixed edits survive reload', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page, 'Chocolate Chip', 'Cake Cone');
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate Chip', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Vanilla', exact: true })
+    .click();
+  await expect(page.getByText(/5 of 5 scoops/)).toContainText(
+    'Remove a scoop to change flavors',
+  );
+  for (const flavor of ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'])
+    await expect(
+      page.getByRole('button', { name: `Add scoop of ${flavor}`, exact: true }),
+    ).toBeDisabled();
+  await page
+    .getByRole('button', { name: 'Remove scoop of Vanilla', exact: true })
+    .click();
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('0');
+  await expect(
+    page.getByRole('button', { name: 'Remove scoop of Vanilla', exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Add serving', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Remove scoop of Strawberry', exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await readDraft(page)).editor.flavors.find(
+          (f) => f.flavor === 'Strawberry',
+        )?.scoops,
+    )
+    .toBe(1);
+  await page.reload();
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('2');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByText('4 of 5 scoops', { exact: true })).toBeVisible();
+  await printButton(page).click();
+  await expect(page.getByRole('status')).toContainText('Order submitted');
+  expect(submitted[0].ticket.items).toHaveLength(1);
+  expect(submitted[0].ticket.items[0].name).toBe('Ice cream (4 scoops)');
+  expect(submitted[0].ticket.items[0].modifiers).toEqual([
+    'Cake Cone',
+    '1 scoop Chocolate',
+    '1 scoop Strawberry',
+    '2 scoops Chocolate Chip',
+    'No toppings',
+  ]);
+});
+
+test('removing the last scoop blocks printing without dropping the selected container', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page);
+  await page
+    .getByRole('button', { name: 'Remove scoop of Vanilla', exact: true })
+    .click();
+  await expect(printButton(page)).toBeDisabled();
+  await expect(
+    page.getByRole('radio', { name: 'Cup', exact: true }),
+  ).toBeChecked();
+  await expect(page.getByText('0 of 5 scoops', { exact: true })).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
+  await expect(printButton(page)).toBeEnabled();
+});
+
+test('previous single-flavor drafts recover as one-scoop servings', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await expect(page.getByLabel('Name (optional)')).toBeEnabled();
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = indexedDB.open('order-pad-v1');
+      req.onsuccess = () => resolve(req.result);
+    });
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction('settings', 'readwrite');
+      tx.objectStore('settings').put(
+        {
+          name: 'Legacy draft',
+          reference: 'Sundae Sprinkle',
+          servings: [
+            {
+              flavor: 'Chocolate Chip',
+              container: 'Cup',
+              toppings: ['Gummy Bears'],
+            },
+          ],
+          editor: {
+            flavor: 'Strawberry',
+            container: 'Sugar Cone',
+            toppings: [],
+          },
+        },
+        'draft',
+      );
+      tx.oncomplete = () => resolve();
+    });
+    db.close();
+  });
+  await page.reload();
+  await expect(page.getByLabel('Name (optional)')).toHaveValue('Legacy draft');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(2);
+  await expect(page.getByLabel('Order servings')).toContainText(
+    '1 scoop Chocolate Chip',
+  );
+  await printButton(page).click();
+  await expect(page.getByRole('status')).toContainText('Order submitted');
+  expect(submitted[0].ticket.items).toHaveLength(2);
+  expect(submitted[0].ticket.items[0].modifiers).toContain(
+    '1 scoop Chocolate Chip',
+  );
+  expect(submitted[0].ticket.items[1].modifiers).toContain(
+    '1 scoop Strawberry',
+  );
 });
 
 test('settings preserve the draft, display the server queue, and support keyboard tab navigation', async ({
@@ -233,10 +470,12 @@ test('multi-serving edits replace rather than duplicate, and incomplete servings
   await page.goto('/');
   await addServing(page, 'Vanilla', 'Cup');
   await addServing(page, 'Strawberry', 'Cake Cone');
-  await page.getByRole('radio', { name: 'Chocolate', exact: true }).check();
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate', exact: true })
+    .click();
   await expect(printButton(page)).toBeDisabled();
   await expect(page.getByRole('status')).toContainText(
-    'Choose a flavor and container',
+    'Add at least one scoop and choose a container',
   );
   await page
     .getByRole('button', { name: 'Cancel serving', exact: true })
@@ -245,8 +484,11 @@ test('multi-serving edits replace rather than duplicate, and incomplete servings
     .getByRole('button', { name: 'Edit serving 2', exact: true })
     .click();
   await page
-    .getByRole('radio', { name: 'Chocolate Chip', exact: true })
-    .check();
+    .getByRole('button', { name: 'Remove scoop of Strawberry', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate Chip', exact: true })
+    .click();
   await page
     .getByRole('checkbox', { name: 'Gummy Bears', exact: true })
     .check();
@@ -254,11 +496,12 @@ test('multi-serving edits replace rather than duplicate, and incomplete servings
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
   expect(submitted[0].ticket.items.map((item) => item.name)).toEqual([
-    'Vanilla ice cream',
-    'Chocolate Chip ice cream',
+    'Ice cream (1 scoop)',
+    'Ice cream (1 scoop)',
   ]);
   expect(submitted[0].ticket.items[1].modifiers).toEqual([
     'Cake Cone',
+    '1 scoop Chocolate Chip',
     'Gummy Bears',
   ]);
 });
@@ -273,7 +516,12 @@ test('explicit Add, Save and Remove remain available and New order clears an act
   await page
     .getByRole('button', { name: 'Edit serving 1', exact: true })
     .click();
-  await page.getByRole('radio', { name: 'Chocolate', exact: true }).check();
+  await page
+    .getByRole('button', { name: 'Remove scoop of Vanilla', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add scoop of Chocolate', exact: true })
+    .click();
   await page.getByRole('button', { name: 'Save serving', exact: true }).click();
   await page
     .getByRole('button', { name: 'Remove serving 2', exact: true })
@@ -283,8 +531,8 @@ test('explicit Add, Save and Remove remain available and New order clears an act
   await page.getByRole('button', { name: 'New order', exact: true }).click();
   await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(0);
   await expect(
-    page.getByRole('radio', { name: 'Chocolate', exact: true }),
-  ).not.toBeChecked();
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('0');
 });
 
 test('reprints preserve original identity while a different incomplete draft is in progress', async ({
@@ -297,7 +545,9 @@ test('reprints preserve original identity while a different incomplete draft is 
   await printButton(page).click();
   await expect(page.getByRole('status')).toContainText('Order submitted');
   await page.getByLabel('Name (optional)').fill('Next customer');
-  await page.getByRole('radio', { name: 'Strawberry', exact: true }).check();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
   await page
     .getByRole('checkbox', { name: 'Gummy Bears', exact: true })
     .check();
@@ -313,8 +563,8 @@ test('reprints preserve original identity while a different incomplete draft is 
   expect(submitted[1].reprint).toBe(true);
   await expect(page.getByLabel('Name (optional)')).toHaveValue('Next customer');
   await expect(
-    page.getByRole('radio', { name: 'Strawberry', exact: true }),
-  ).toBeChecked();
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
   await page.getByText('View last receipt', { exact: true }).click();
   await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
     'REPRINT',
@@ -338,7 +588,9 @@ test('incomplete drafts reload, and blank-name fallback stays stable through sub
   const { submitted } = await mockUsb(page);
   await page.goto('/');
   await page.getByLabel('Name (optional)').fill('   ');
-  await page.getByRole('radio', { name: 'Strawberry', exact: true }).check();
+  await page
+    .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+    .click();
   await page
     .getByRole('checkbox', { name: 'Gummy Bears', exact: true })
     .check();
@@ -354,8 +606,8 @@ test('incomplete drafts reload, and blank-name fallback stays stable through sub
     page.getByRole('tab', { name: 'Order', exact: true }),
   ).toHaveAttribute('aria-selected', 'true');
   await expect(
-    page.getByRole('radio', { name: 'Strawberry', exact: true }),
-  ).toBeChecked();
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
   await expect(printButton(page)).toBeDisabled();
   await page.getByRole('radio', { name: 'Cup', exact: true }).check();
   await printButton(page).click();
@@ -579,7 +831,7 @@ test('cached app reopens offline with recovered draft but cannot print without i
   await page.goto('/');
   await chooseServing(page, 'Chocolate', 'Cup');
   await expect
-    .poll(async () => (await readDraft(page)).editor.flavor)
+    .poll(async () => (await readDraft(page)).editor.flavors[0]?.flavor)
     .toBe('Chocolate');
   await page
     .getByRole('tab', { name: 'Printer settings', exact: true })
@@ -590,8 +842,8 @@ test('cached app reopens offline with recovered draft but cannot print without i
   await context.setOffline(true);
   await page.reload();
   await expect(
-    page.getByRole('radio', { name: 'Chocolate', exact: true }),
-  ).toBeChecked();
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
   await expect(page.getByRole('alert')).toContainText(
     'printing service unavailable',
   );
@@ -617,6 +869,7 @@ test('unsupported IndexedDB blocks sends with an actionable notice', async ({
 });
 
 for (const viewport of [
+  { width: 360, height: 780 },
   { width: 1024, height: 768 },
   { width: 768, height: 1024 },
   { width: 390, height: 844 },
@@ -629,6 +882,12 @@ for (const viewport of [
     await page.goto('/');
     await page.getByLabel('Name (optional)').fill('Alex');
     await chooseServing(page, 'Chocolate Chip', 'Sugar Cone', ['Gummy Bears']);
+    await page
+      .getByRole('button', { name: 'Add scoop of Chocolate Chip', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Add scoop of Strawberry', exact: true })
+      .click();
     await expect(printButton(page)).toBeEnabled();
     const bounds = await printButton(page).boundingBox();
     expect(bounds!.y).toBeGreaterThanOrEqual(0);

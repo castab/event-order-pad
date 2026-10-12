@@ -15,7 +15,7 @@ npm ci
 npm run dev
 ```
 
-Choose a flavor and container, then select any toppings. Flavor and container have no defaults. For a single serving, tap **Print order** directly; it includes the serving currently being configured. For multiple servings, use **Add serving** for each earlier serving, then print the last one directly. Editing a serving and pressing Print saves that replacement without duplicating it. **Save serving**, **Remove**, and **Cancel serving** remain available.
+Use the +/− controls to choose scoop counts for one or more flavors, choose a container, then select any toppings. Each cup or cone allows **1–5 scoops total** across its flavors. The total updates automatically; at five scoops, remove one before adding another. Flavors start at zero and the container has no default. For a single serving, tap **Print order** directly; it includes the serving currently being configured. For multiple servings, use **Add serving** for each earlier serving, then print the last one directly. Editing a serving and pressing Print saves that replacement without duplicating it. **Save serving**, **Remove**, and **Cancel serving** remain available.
 
 The menu is:
 
@@ -23,7 +23,7 @@ The menu is:
 - Containers: Cup, Cake Cone, Sugar Cone.
 - Toppings: Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries.
 
-Enter an optional name (up to 80 printable characters). Blank names use a stable two-word ice cream label such as **Sundae Sprinkle**. Each serving has its own preparation block, including **No toppings** when appropriate. Orders support up to 30 servings, subject to receipt-length limits. Incomplete selections must be completed or canceled before printing.
+Enter an optional name (up to 80 printable characters). Blank names use a stable two-word ice cream label such as **Sundae Sprinkle**. Each serving has its own preparation block with its total and per-flavor scoop counts, container, and toppings, including **No toppings** when appropriate. For example, one cup with 2 Chocolate Chip + 1 Strawberry prints **Ice cream (3 scoops)** with **2 scoops Chocolate Chip** and **1 scoop Strawberry** underneath; it remains one serving. Orders support up to 30 servings, subject to receipt-length limits. At least one scoop and a container are required before printing. Incomplete selections must be completed or canceled. Existing single-flavor drafts recover as one-scoop servings; already submitted tickets remain unchanged for reprinting.
 
 The **Order** tab contains the builder, summary, and always-visible print action. Receipt previews and print attempts are collapsed by default. The **Printer settings** tab shows the server’s configured USB queue, live readiness checks, and setup instructions. Switching tabs preserves the order. Readiness is checked automatically on startup; no recurring setup acknowledgment is required. A static-only host cannot print.
 
