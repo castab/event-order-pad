@@ -35,7 +35,7 @@ before printing. Incomplete selections must be completed or canceled. Schema 2
 tickets remain immutable for reprinting; old browser records receive the one-time
 reset described below.
 
-The **Order** tab contains the builder, summary, and always-visible print action. Receipt previews and print attempts are collapsed by default. The **Printer settings** tab shows the server’s configured USB queue, live readiness checks, and setup instructions. Switching tabs preserves the order. Readiness is checked automatically on startup; no recurring setup acknowledgment is required. A static-only host cannot print.
+The builder shows customer name, saved servings, and the current serving, with an always-visible print action. **Order tools** contains printer settings, receipt previews, print attempts, and New order. Opening or closing these tools preserves the draft. Accepted prints reset the builder and show a six-second toast; failed or unknown outcomes keep the order saved with visible recovery actions. Unknown outcomes require inspecting the printer before continuing. The header reprints the last order without changing its identity or an independent draft. The current app icon temporarily stands in for the supplied brand logo; Poppins fonts are hosted locally for offline use. Readiness is checked automatically on startup; no recurring setup acknowledgment is required. A static-only host cannot print.
 
 After the server accepts a submission, the accepted result and a fresh empty draft save together. The screen is ready for the next customer, while **Reprint last order** preserves the previous receipt’s ID, label, timestamp, and REPRINT marker. Reprinting while building another order does not change that draft. **New order** explicitly clears a draft.
 
@@ -66,7 +66,7 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `printer-service/`: optional Linux host; receipt PDF, CUPS submission, durable attempt journal and static serving. The domain remains printer-neutral.
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
 - `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Structured tickets use schema 2 and IndexedDB version 2; the one-time v1 reset is described below.
-- `src/routes/+page.svelte`: Order and Printer settings tabs, serving editor, summary, collapsed receipts/attempts, and direct USB submissions/reprints.
+- `src/routes/+page.svelte`: token-styled serving builder, toast and recovery feedback, collapsed Order tools, and direct USB submissions/reprints.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
 In the current UI, accepted means CUPS accepted a queue submission, not physical verification. The attempt model still supports simulator/PassPRNT results. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. It also retains the IV adapter identifier; v1 browser history receives the one-time reset below.

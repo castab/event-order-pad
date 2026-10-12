@@ -3,6 +3,7 @@ import {
   commitServing,
   cancelServing,
   editServing,
+  sameServing,
   removeServing,
   prepareDraftForPrint,
   draftTicket,
@@ -203,5 +204,59 @@ describe('ice cream orders with flavor scoops', () => {
         draft({ editor: { ...emptyEditor(), flavors: serving().flavors } }),
       ),
     ).toThrow('To finish this serving: choose a container.');
+  });
+  it('switches saved edits by discarding unsaved changes while protecting a new serving', () => {
+    const original = draft({ servings: [serving(), serving('Chocolate')] });
+    const changed = {
+      ...editServing(original, 0),
+      editor: serving('Strawberry', 3),
+    };
+    expect(editServing(changed, 0).editor).toEqual(changed.editor);
+    const switched = editServing(changed, 1);
+    expect(switched.editingIndex).toBe(1);
+    expect(switched.editor).toEqual(original.servings[1]);
+    expect(switched.servings).toEqual(original.servings);
+    for (const editor of [
+      serving(),
+      { ...emptyEditor(), container: 'Cup' as const },
+      { ...emptyEditor(), toppings: ['Gummy Bears' as const] },
+    ]) {
+      const pending = parseDraft({ ...original, editor });
+      expect(editServing(pending, 1)).toEqual(pending);
+    }
+    const locked = parseDraft({ ...original, submittedTicketId: 'locked' });
+    expect(editServing(locked, 1)).toEqual(locked);
+  });
+  it('compares all serving selections after menu normalization', () => {
+    const mixed: Serving = {
+      flavors: [
+        { flavor: 'Chocolate', count: 2 },
+        { flavor: 'Vanilla', count: 1 },
+      ],
+      container: 'Cup',
+      toppings: ['Whipped cream', 'Gummy Bears'],
+    };
+    expect(
+      sameServing(mixed, {
+        ...mixed,
+        flavors: [...mixed.flavors].reverse(),
+        toppings: [...mixed.toppings].reverse(),
+      }),
+    ).toBe(true);
+    for (const changed of [
+      { ...mixed, container: 'Sugar Cone' as const },
+      { ...mixed, toppings: [] },
+      { ...mixed, flavors: [{ flavor: 'Chocolate' as const, count: 3 }] },
+      {
+        ...mixed,
+        flavors: [
+          { flavor: 'Chocolate' as const, count: 1 },
+          { flavor: 'Vanilla' as const, count: 1 },
+        ],
+      },
+    ])
+      expect(sameServing(mixed, changed)).toBe(false);
+    expect(sameServing(emptyEditor(), emptyEditor())).toBe(true);
+    expect(sameServing(emptyEditor(), mixed)).toBe(false);
   });
 });

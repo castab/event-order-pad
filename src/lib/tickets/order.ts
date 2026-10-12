@@ -61,7 +61,12 @@ export function cancelServing(draft: OrderDraft): OrderDraft {
 /** Protect an unfinished serving when another saved serving is tapped. */
 export function editServing(draft: OrderDraft, index: number): OrderDraft {
   const valid = parseDraft(draft);
-  if (hasPendingServing(valid) || valid.submittedTicketId) return valid;
+  if (
+    valid.submittedTicketId ||
+    valid.editingIndex === index ||
+    (valid.editingIndex === undefined && hasPendingServing(valid))
+  )
+    return valid;
   if (!Number.isInteger(index) || !valid.servings[index])
     throw new Error('Invalid serving being edited.');
   return parseDraft({
@@ -69,6 +74,14 @@ export function editServing(draft: OrderDraft, index: number): OrderDraft {
     editor: valid.servings[index],
     editingIndex: index,
   });
+}
+
+/** Compare normalized menu selections, independent of selection order. */
+export function sameServing(a: ServingEditor, b: ServingEditor): boolean {
+  return (
+    JSON.stringify(parseServing(a, true)) ===
+    JSON.stringify(parseServing(b, true))
+  );
 }
 export function removeServing(draft: OrderDraft, index: number): OrderDraft {
   const valid = parseDraft(draft);
