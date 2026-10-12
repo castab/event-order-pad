@@ -224,7 +224,16 @@ See `screens/build-queue.dc.html`.
   - order number, display name, time placed;
   - a wait badge that names the time and is tinted by age (moss under 5 min, olive 5–10, rust
     10+);
-  - servings listed in ticket order;
+  - servings listed in ticket order. Each serving shows:
+    - a headline: `3 scoops · Sugar Cone`;
+    - one rounded chip per flavor, each with a dark count bubble (`[2] Chocolate Chip`);
+    - one chip per topping. Topping chips use a different shape from flavor chips (6 px
+      radius, olive outline, leading `+` icon), so the two never read as one list.
+    - A serving with no toppings shows a single dashed, muted "No toppings" chip.
+    - Never join toppings or flavors into one comma-separated line. Chips wrap onto new lines
+      but never split a name (`white-space: nowrap` inside each chip).
+    - Render each set as a `<ul>` with `aria-label` "Flavors" / "Toppings" so screen readers
+      announce the count of each.
   - **Mark #0043 done**, a single tap with no confirmation.
 - **Recently done** strip along the bottom (last ~8) with **Undo** to reopen a mistaken tap.
 - **Empty state:** "All caught up / New orders show up here the moment they print."

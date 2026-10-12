@@ -56,13 +56,32 @@ button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
 </header>
 <ol style="margin: 0; padding: 4px 18px; list-style: none; display: flex; flex-direction: column">
 <sc-for list="{{ o.servings }}" as="s" hint-placeholder-count="2">
-<li style="padding: 10px 0; display: flex; gap: 12px; border-bottom: 1px dashed var(--border-soft)">
+<li style="padding: 12px 0; display: flex; gap: 12px; border-bottom: 1px dashed var(--border-soft)">
 <span style="width: 26px; height: 26px; flex-shrink: 0; border-radius: 999px; background: var(--olive-700); color: var(--cream-100); font: 700 12px/26px var(--font-sans); text-align: center">{{ s.num }}</span>
-<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
-<span style="font: 600 15px/1.35 var(--font-sans); color: var(--text-heading)">{{ s.headline }}</span>
-<span style="font: 400 14px/1.45 var(--font-sans); color: var(--ink-700)">{{ s.mix }}</span>
-<span style="font: 400 13px/1.45 var(--font-sans); color: var(--text-muted)">{{ s.toppings }}</span>
-</span>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+<span style="font: 600 15px/26px var(--font-sans); color: var(--text-heading)">{{ s.headline }}</span>
+<ul aria-label="Flavors" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.flavors }}" as="f" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 4px; border-radius: 999px; background: var(--surface-page); display: flex; align-items: center; gap: 8px">
+<span style="min-width: 24px; height: 24px; box-sizing: border-box; padding: 0 6px; border-radius: 999px; background: var(--olive-900); color: var(--cream-100); font: 700 13px/24px var(--font-sans); text-align: center">{{ f.count }}</span>
+<span style="font: 500 14px/1 var(--font-sans); color: var(--text-heading); white-space: nowrap">{{ f.name }}</span>
+</li>
+</sc-for>
+</ul>
+<sc-if value="{{ s.hasToppings }}" hint-placeholder-val="{{ true }}">
+<ul aria-label="Toppings" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.toppings }}" as="t" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 8px; border-radius: 6px; border: 1.5px solid var(--olive-700); background: var(--surface-card); display: flex; align-items: center; gap: 6px">
+<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5f5b40" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+<span style="font: 600 14px/1 var(--font-sans); color: var(--olive-900); white-space: nowrap">{{ t }}</span>
+</li>
+</sc-for>
+</ul>
+</sc-if>
+<sc-if value="{{ s.noToppings }}" hint-placeholder-val="{{ false }}">
+<span style="align-self: flex-start; height: 32px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1.5px dashed var(--paper-300); display: flex; align-items: center; font: 500 14px/1 var(--font-sans); color: var(--text-muted)">No toppings</span>
+</sc-if>
+</div>
 </li>
 </sc-for>
 </ol>
@@ -140,8 +159,10 @@ class Component extends DCLogic {
           return {
             num: i + 1,
             headline: plural(total(s), 'scoop') + ' · ' + s.container,
-            mix: FLAVORS.filter(function (f) { return s.counts[f]; }).map(function (f) { return s.counts[f] + '× ' + f; }).join(', '),
-            toppings: s.toppings.length ? s.toppings.join(', ') : 'No toppings'
+            flavors: FLAVORS.filter(function (f) { return s.counts[f]; }).map(function (f) { return { count: s.counts[f], name: f }; }),
+            toppings: s.toppings,
+            hasToppings: s.toppings.length > 0,
+            noToppings: s.toppings.length === 0
           };
         }),
         done: function () {
