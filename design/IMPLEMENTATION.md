@@ -8,7 +8,7 @@ them done. It replaces handwritten notepad orders with a fixed, repeatable forma
 
 | Path | What it is |
 | --- | --- |
-| `screens/order-builder.dc.html` | Order-taking screen, phone (S10e, designed at 390×844). |
+| `screens/order-builder.dc.html` | Order-taking screen. Responsive: phone (S10e, 390×844), tablet (820 wide) and laptop (1280 wide) layouts in one file; breakpoints in its `<style>` block. |
 | `screens/prep-ticket.dc.html` | The printed ticket, 80 mm roll, designed at 576 px wide (72 mm printable at 203 dpi). |
 | `screens/build-queue.dc.html` | Build-station queue, landscape tablet (designed at 1180×820). |
 | `tokens/tokens.json`, `tokens/tokens.css`, `tokens/bundle.css` | Fiona's Ice Cream design system values: colors, type, spacing, radii, shadows. |
@@ -161,7 +161,31 @@ clear message when an order would exceed it, even under 30 servings.
 
 ## Order builder screen (`src/routes/+page.svelte` or a new route)
 
-See `screens/order-builder.dc.html`. Structure:
+See `screens/order-builder.dc.html`.
+
+### Responsive layout
+
+The builder must work on phones and on wider screens (tablets, laptops) from one component.
+Use CSS breakpoints, not separate pages or user-agent sniffing. The layout CSS is the
+`.ob-*` rules in the design file's `<style>` block.
+
+| Width | Layout |
+| --- | --- |
+| < 760 px (phones) | One scrolling column: customer name and saved servings, then the serving editor. The action bar (status line, Cancel/Add, Print order) is sticky at the bottom of the screen. |
+| ≥ 760 px (tablets, small laptops) | Two columns filling the viewport under the header. Left: the serving editor, scrolling on its own, max 880 px wide. Right: a 340–400 px "This order" panel with order summary, name, saved servings (scrolls) and the action bar pinned to the bottom of the panel. When nothing is saved, the panel shows "Servings you add show up here. For a one-serving order, just press Print order." |
+| ≥ 1100 px (laptops) | Same two columns; flavor rows go to 2 columns and toppings to 3. |
+
+- The toast spans the width under the header on phones. On wide screens it sits top-right, 380 px wide.
+- Size the app shell with `100dvh` so mobile browser toolbars don't hide the action bar.
+  Respect `env(safe-area-inset-bottom)` on the sticky bar.
+- Keep DOM order equal to reading order on every layout, so keyboard and screen-reader order
+  stay sensible: header → name + saved servings → serving editor → actions. Place them with
+  `grid-template-areas` per breakpoint instead of CSS `order`. The design file uses
+  `display: contents` + `order` for the phone case only because of the canvas it was drawn in.
+- Touch targets stay ≥ 44 px at every size; don't shrink controls on wide screens.
+- Playwright: run the builder tests at 390×844, 820×1180 and 1280×800.
+
+Structure:
 
 - **Header** (olive): logo, `ORDER #0043`, and a reprint icon button (disabled until something
   has printed; `aria-label="Reprint last order"`).
