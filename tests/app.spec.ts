@@ -1388,14 +1388,16 @@ test('live blank-name hint, printable name limit and button toggle semantics', a
         page.getByRole('button', { name: other, exact: true }),
       ).toHaveAttribute('aria-pressed', String(other === container));
   }
-  const topping = page.getByRole('button', {
-    name: 'Gummy Bears',
-    exact: true,
-  });
-  await topping.click();
-  await expect(topping).toHaveAttribute('aria-pressed', 'true');
-  await topping.click();
-  await expect(topping).toHaveAttribute('aria-pressed', 'false');
+  for (const toppingName of ['Rainbow Sprinkles', 'Chocolate Sprinkles']) {
+    const topping = page.getByRole('button', {
+      name: toppingName,
+      exact: true,
+    });
+    await topping.click();
+    await expect(topping).toHaveAttribute('aria-pressed', 'true');
+    await topping.click();
+    await expect(topping).toHaveAttribute('aria-pressed', 'false');
+  }
   await expect(page.getByLabel('Total scoops')).toHaveAttribute(
     'aria-live',
     'polite',
