@@ -4,6 +4,7 @@ import type { PrintAttemptResult, TicketPrinter } from '../port';
 export interface LinuxPrinterStatus {
   readonly ready: boolean;
   readonly message: string;
+  readonly queue?: string;
 }
 
 export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
@@ -18,7 +19,11 @@ export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
       typeof data.ready === 'boolean' &&
       typeof data.message === 'string'
     )
-      return data;
+      return {
+        ready: data.ready,
+        message: data.message,
+        queue: typeof data.queue === 'string' ? data.queue : undefined,
+      };
   } catch {
     /* A static host has no Linux printing service. */
   }

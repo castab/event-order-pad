@@ -52,11 +52,13 @@ export function createApp({
           await cups.check();
           json(200, {
             ready: true,
+            queue: cups.queue,
             message: `CUPS queue ${cups.queue} is configured for USB. Physical printer status is unverified.`,
           });
         } catch (error) {
           json(200, {
             ready: false,
+            queue: cups.queue,
             message: `${(error as Error).message} Check CUPS on Mint.`,
           });
         }

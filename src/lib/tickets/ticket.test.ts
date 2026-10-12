@@ -24,7 +24,7 @@ describe('ticket validation and shared layout', () => {
   });
   it('formats quantities, modifiers, instructions and the end marker', () => {
     const output = ticketText(ticket);
-    expect(output).toContain('ORDER #0042');
+    expect(output).toContain('ORDER: 0042');
     expect(output).toContain('2 x Vanilla ice cream');
     expect(output).toContain('  + Waffle cone');
     expect(output).toContain('  PLEASE: Sprinkles on one cone only.');

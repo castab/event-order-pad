@@ -86,8 +86,11 @@ it('serves the static app and live status without caching API results', async ()
   const status = await send('/api/printer');
   expect(status.cache).toBe('no-store');
   expect(JSON.parse(status.body).ready).toBe(true);
+  expect(JSON.parse(status.body).queue).toBe('OrderPad');
   check.mockRejectedValue(new Error('Queue disabled'));
-  expect(JSON.parse((await send('/api/printer')).body).ready).toBe(false);
+  const unavailable = JSON.parse((await send('/api/printer')).body);
+  expect(unavailable.ready).toBe(false);
+  expect(unavailable.queue).toBe('OrderPad');
   expect((await send('/api/unknown')).status).toBe(404);
 });
 it('rejects unrelated hosts, foreign/missing origins, non-JSON and invalid/oversized tickets before printing', async () => {

@@ -2,11 +2,12 @@ import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it, vi } from 'vitest';
 import { IndexedDbTicketStore } from '../storage/ticket-store';
 import { PrintSession } from './session';
+import { sampleTicket } from '../tickets/ticket';
 import { SimulatedPrinter } from './adapters/simulated';
 import { passPrntReturn } from './adapters/passprnt';
 import type { PrintAttemptResult, TicketPrinter } from './port';
 
-function fixture() {
+async function fixture() {
   const store = new IndexedDbTicketStore(new IDBFactory(), 'test');
   let id = 0;
   const session = new PrintSession(
@@ -15,12 +16,15 @@ function fixture() {
     () => `id-${++id}`,
     () => new Date(1791576000000 + id).toISOString(),
   );
+  await store.saveTicket(
+    sampleTicket('fixture-ticket', '2026-10-09T20:00:00.000Z'),
+  );
   return { store, session };
 }
 
 describe('durable print state', () => {
   it('keeps external launch pending until a matching callback and never prepares two launches', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     const print = vi.fn(async (_ticket, options) => {
       expect((await store.load())?.attempts[0].id).toBe(options.attemptId);
@@ -60,7 +64,7 @@ describe('durable print state', () => {
   it.each(['mismatched-id', 'wrong-mode', 'no-return'] as const)(
     'recovers handoff as unknown on %s without treating it as success',
     async (reason) => {
-      const { store, session } = fixture();
+      const { store, session } = await fixture();
       await session.initialize();
       const printer: TicketPrinter = {
         mode: 'star-passprnt',
@@ -92,14 +96,14 @@ describe('durable print state', () => {
   it.each(['accepted', 'failed', 'outcome-unknown'] as const)(
     'records %s and recovers after reload without retry',
     async (scenario) => {
-      const { store, session } = fixture();
+      const { store, session } = await fixture();
       await session.initialize();
       const printer = new SimulatedPrinter(scenario, 0);
       const send = vi.spyOn(printer, 'print');
       await session.print(printer, false);
       expect(session.state.phase).toBe('ready');
       expect(session.state.attempts[0].result?.status).toBe(scenario);
-      expect(printer.preview).toContain('ORDER #0042');
+      expect(printer.preview).toContain('ORDER: 0042');
       const reloaded = new PrintSession(store, () => {});
       await reloaded.initialize();
       expect(reloaded.state.ticket?.id).toBe(session.state.ticket?.id);
@@ -108,7 +112,7 @@ describe('durable print state', () => {
     },
   );
   it('saves ticket and pending attempt before entering the printer port', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     const printer: TicketPrinter = {
       mode: 'simulated',
@@ -124,7 +128,7 @@ describe('durable print state', () => {
     await session.print(printer, false);
   });
   it('prevents concurrent taps and requires explicit reprint after any attempt', async () => {
-    const { session } = fixture();
+    const { session } = await fixture();
     await session.initialize();
     let release!: (result: PrintAttemptResult) => void;
     const print = vi.fn(
@@ -148,7 +152,7 @@ describe('durable print state', () => {
     expect(print).toHaveBeenCalledTimes(1);
     const originalId = session.state.ticket!.id;
     const simulator = new SimulatedPrinter('accepted', 0);
-    await session.print(simulator, true);
+    await session.print(simulator, true, true);
     expect(simulator.preview).toMatch(/^REPRINT\n/);
     expect(session.state.ticket!.id).toBe(originalId);
     expect(session.state.attempts).toHaveLength(2);
@@ -156,7 +160,7 @@ describe('durable print state', () => {
     expect(session.state.attempts[1].reprint).toBe(true);
   });
   it('recovers pending intent as unknown, never sends during initialize', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     await store.startAttempt({
       id: 'interrupted',
@@ -173,7 +177,7 @@ describe('durable print state', () => {
     );
   });
   it('blocks printing on storage failure before send', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     vi.spyOn(store, 'startAttempt').mockRejectedValue(new Error('quota'));
     const printer = new SimulatedPrinter('accepted', 0);
@@ -183,7 +187,7 @@ describe('durable print state', () => {
     expect(session.state.phase).toBe('blocked');
   });
   it('keeps pending intent recoverable when saving the final result fails', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     vi.spyOn(store, 'finishAttempt').mockRejectedValueOnce(new Error('quota'));
     await session.print(new SimulatedPrinter('accepted', 0), false);
@@ -194,7 +198,7 @@ describe('durable print state', () => {
     expect(reload.state.attempts[0].result?.status).toBe('outcome-unknown');
   });
   it('conservatively records an adapter exception as unknown', async () => {
-    const { session } = fixture();
+    const { session } = await fixture();
     await session.initialize();
     await session.print(
       {
@@ -209,7 +213,7 @@ describe('durable print state', () => {
     expect(session.state.attempts[0].result?.status).toBe('outcome-unknown');
   });
   it('rejects replacing immutable ticket contents or a final outcome', async () => {
-    const { store, session } = fixture();
+    const { store, session } = await fixture();
     await session.initialize();
     await expect(
       store.saveTicket({ ...session.state.ticket!, reference: '9999' }),

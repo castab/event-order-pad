@@ -41,7 +41,7 @@ describe('TSP143IIIU PassPRNT integration', () => {
       back: 'https://pad.example/?order_pad_attempt=attempt-2',
     });
     expect(uri.searchParams.get('html')).toContain('REPRINT');
-    expect(uri.searchParams.get('html')).toContain('ORDER #0042');
+    expect(uri.searchParams.get('html')).toContain('ORDER: 0042');
     expect(uri.searchParams.get('html')).toContain('ticket-1');
     expect(uri.searchParams.has('url')).toBe(false);
     expect(uri.searchParams.has('pdf')).toBe(false);

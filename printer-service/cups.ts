@@ -73,31 +73,43 @@ export class Cups {
       this.queue,
       '-l',
     ]);
-    for (const [name, value] of [
-      ['PageType', 'Variable0'],
-      ['DocCutType', 'PartialCutDoc1'],
-      ['PageCutType', 'NoCutPage0'],
-    ]) {
-      if (
-        !options.split('\n').some(
-          (line) =>
-            line.startsWith(`${name}/`) &&
-            line
-              .split(/\s+/)
-              .map((token) => token.replace(/^\*/, ''))
-              .includes(value),
-        )
-      )
+    this.installedJobOptions(options);
+    return options;
+  }
+  private installedJobOptions(options: string): string[] {
+    const jobOptions: string[] = [];
+    for (const [name, supported] of [
+      ['PageType', ['0Variable', 'Variable0']],
+      ['DocCutType', ['1PartialCutDoc', 'PartialCutDoc1']],
+      ['PageCutType', ['0NoCutPage', 'NoCutPage0']],
+    ] as const) {
+      const line = options
+        .split('\n')
+        .find((line) => line.startsWith(`${name}/`));
+      const choices =
+        line
+          ?.slice(line.indexOf(':') + 1)
+          .trim()
+          .split(/\s+/)
+          .map((token) => token.replace(/^\*/, '')) ?? [];
+      const value = supported.find((value) => choices.includes(value));
+      if (!value)
         throw new Error(
           'CUPS queue needs the Star TSP100 Cutter driver and variable-length/partial-cut options.',
         );
+      jobOptions.push('-o', `${name}=${value}`);
     }
-    return options;
+    return jobOptions;
   }
   async prepare(
     heightMm: number,
-  ): Promise<{ media: string; heightMm: number }> {
+  ): Promise<{ media: string; heightMm: number; jobOptions: string[] }> {
+    if (!Number.isFinite(heightMm) || heightMm <= 0 || heightMm > 2000)
+      throw new Error(
+        'No suitable receipt size: height must be within 2000 mm.',
+      );
     const options = await this.check();
+    const jobOptions = this.installedJobOptions(options);
     if (
       (
         await this.run('lpstat', ['-h', 'localhost:631', '-o', this.queue])
@@ -119,6 +131,7 @@ export class Cups {
       return {
         media: `Custom.72x${Math.max(30, heightMm)}mm`,
         heightMm: Math.max(30, heightMm),
+        jobOptions,
       };
     const sizes = values
       .map((media) => ({
@@ -135,9 +148,14 @@ export class Cups {
       .sort((a, b) => a.numbers[1] - b.numbers[1]);
     if (!sizes.length)
       throw new Error('No suitable 72 mm receipt size in this CUPS driver.');
-    return { media: sizes[0].media, heightMm: sizes[0].numbers[1] };
+    return { media: sizes[0].media, heightMm: sizes[0].numbers[1], jobOptions };
   }
-  async submit(pdf: Buffer, media: string, attemptId: string): Promise<string> {
+  async submit(
+    pdf: Buffer,
+    media: string,
+    attemptId: string,
+    jobOptions: string[],
+  ): Promise<string> {
     const output = await this.run(
       'lp',
       [
@@ -153,12 +171,7 @@ export class Cups {
         `media=${media}`,
         '-o',
         'orientation-requested=3',
-        '-o',
-        'PageType=Variable0',
-        '-o',
-        'PageCutType=NoCutPage0',
-        '-o',
-        'DocCutType=PartialCutDoc1',
+        ...jobOptions,
         '-',
       ],
       pdf,

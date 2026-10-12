@@ -43,7 +43,7 @@ export function formatTicket(
   };
   if (reprint) add('REPRINT', 'reprint');
   add('PREPARATION TICKET', 'heading');
-  add(`ORDER #${ticket.reference}`, 'reference');
+  add(`ORDER: ${ticket.reference}`, 'reference');
   add(ticket.createdAt.replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC'));
   lines.push({ text: '-'.repeat(columns), role: 'body' });
   for (const item of ticket.items) {

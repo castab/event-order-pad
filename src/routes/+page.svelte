@@ -1,78 +1,115 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { formatTicket } from '$lib/tickets/format';
-  import { selectPrinter, realPrinterSupport } from '$lib/printing/select';
+  import {
+    flavors,
+    maxScoopsPerServing,
+    totalScoops,
+    scoopSummary,
+    type Flavor,
+    containers,
+    toppings,
+    emptyEditor,
+    draftTicket,
+    commitServing,
+    hasPendingServing,
+    prepareDraftForPrint,
+    type OrderDraft,
+    type ServingEditor,
+  } from '$lib/tickets/order';
   import { PrintSession, type SessionState } from '$lib/printing/session';
-  import type { TicketPrinter } from '$lib/printing/port';
-  import type { SimulationScenario } from '$lib/printing/adapters/simulated';
   import { IndexedDbTicketStore } from '$lib/storage/ticket-store';
   import {
+    LinuxCupsPrinter,
     linuxPrinterStatus,
     type LinuxPrinterStatus,
   } from '$lib/printing/adapters/linux-cups';
-  import {
-    passPrntReturn,
-    cleanPassPrntReturn,
-  } from '$lib/printing/adapters/passprnt';
 
+  let tab = $state<'order' | 'printer'>('order');
   let viewState = $state<SessionState>({ phase: 'loading', attempts: [] });
   let session: PrintSession;
-  let mode = $state<TicketPrinter['mode']>('simulated');
-  let scenario = $state<SimulationScenario>('accepted');
-  let unsupported = $state<string | undefined>();
-  let setupConfirmed = $state(false);
-  let reprintConfirmed = $state(false);
+  let sending = $state(false);
+  let checkingPrinter = $state(false);
+  let printerStatus = $state<LinuxPrinterStatus>({
+    ready: false,
+    message: 'Checking the server’s USB printer…',
+  });
+  let outputConfirmed = $state(false);
+  let formError = $state('');
   let online = $state(true);
   let offlineStatus = $state('Checking offline availability…');
-  let handoffLaunched = $state(false);
-  let linuxStatus = $state<LinuxPrinterStatus>({
-    ready: false,
-    message: 'Check the Linux printing service before printing.',
-  });
-  let checkingLinux = $state(false);
-  const last = $derived(viewState.attempts[viewState.attempts.length - 1]);
-  const preview = $derived(
-    viewState.ticket
-      ? formatTicket(viewState.ticket, last?.reprint ?? false)
-      : [],
+  let previewTimestamp = $state(new Date().toISOString());
+  const printer = new LinuxCupsPrinter();
+  const draft = $derived(viewState.draft);
+  const last = $derived(viewState.attempts.at(-1));
+  const working = $derived(
+    sending || ['saving', 'printing', 'handoff'].includes(viewState.phase),
   );
-  const ready = $derived(
+  const editable = $derived(
     viewState.phase === 'ready' &&
-      (mode === 'simulated' ||
-        (mode === 'linux-cups'
-          ? linuxStatus.ready && setupConfirmed
-          : !unsupported && setupConfirmed)),
+      !working &&
+      !!draft &&
+      !draft.submittedTicketId,
+  );
+  const unfinished = $derived(!!draft && hasPendingServing(draft));
+  const editorComplete = $derived(
+    !!draft?.editor.flavors.length && !!draft?.editor.container,
   );
   const needsConfirmation = $derived(
     last?.result?.status === 'outcome-unknown',
   );
-  const working = $derived(
-    viewState.phase === 'saving' ||
-      viewState.phase === 'printing' ||
-      viewState.phase === 'handoff',
+  const prepared = $derived.by(() => {
+    if (!draft || draft.submittedTicketId) return undefined;
+    try {
+      return prepareDraftForPrint(draft);
+    } catch {
+      return undefined;
+    }
+  });
+  const printProblem = $derived.by(() => {
+    if (!draft || draft.submittedTicketId) return '';
+    try {
+      prepareDraftForPrint(draft);
+      return '';
+    } catch (error) {
+      return (error as Error).message;
+    }
+  });
+  const canSend = $derived(
+    viewState.phase === 'ready' &&
+      !working &&
+      !checkingPrinter &&
+      printerStatus.ready &&
+      (!needsConfirmation || outputConfirmed),
+  );
+  const draftPreview = $derived(
+    prepared
+      ? draftTicket(prepared, 'Assigned when printed', previewTimestamp)
+      : undefined,
+  );
+  const preview = $derived(draftPreview ? formatTicket(draftPreview) : []);
+  const lastPreview = $derived(
+    viewState.ticket
+      ? formatTicket(viewState.ticket, last?.reprint ?? false)
+      : [],
+  );
+  const servingCount = $derived(
+    prepared?.servings.length ?? draft?.servings.length ?? 0,
   );
 
   onMount(() => {
-    unsupported = realPrinterSupport();
     const updateOnline = () => {
       online = navigator.onLine;
     };
     updateOnline();
     window.addEventListener('online', updateOnline);
     window.addEventListener('offline', updateOnline);
+    let cancelled = false;
     try {
       session = new PrintSession(new IndexedDbTicketStore(), (next) => {
         viewState = next;
       });
-      const returned = passPrntReturn(location.href);
-      void session.initialize(returned).then(() => {
-        if (viewState.phase !== 'blocked')
-          history.replaceState(
-            history.state,
-            '',
-            cleanPassPrntReturn(location.href),
-          );
-      });
+      void session.initialize();
     } catch {
       viewState = {
         phase: 'blocked',
@@ -81,25 +118,22 @@
           'IndexedDB is unavailable in this browser. Printing is blocked because tickets and attempts cannot be saved.',
       };
     }
-    let cancelled = false;
+    void checkPrinter();
     const checkCache = async () => {
       try {
         const names = await caches.keys();
         if (!cancelled)
           offlineStatus = names.some((name) => name.startsWith('order-pad-'))
-            ? 'App assets cached · test reopening offline on this device'
-            : 'Assets not cached yet · offline reopening unverified';
+            ? 'App assets cached · printer host connection required'
+            : 'App assets not cached yet';
       } catch {
         if (!cancelled)
           offlineStatus = 'Offline cache unavailable in this browser';
       }
     };
     void checkCache();
-    if ('serviceWorker' in navigator) {
+    if ('serviceWorker' in navigator)
       void navigator.serviceWorker.ready.then(checkCache);
-    } else
-      offlineStatus =
-        'Service workers unavailable · offline reopening unsupported';
     return () => {
       cancelled = true;
       window.removeEventListener('online', updateOnline);
@@ -107,384 +141,662 @@
     };
   });
 
-  async function print(reprint: boolean) {
-    if (!ready || (reprint && needsConfirmation && !reprintConfirmed)) return;
-    reprintConfirmed = false;
-    handoffLaunched = false;
-    await session.print(selectPrinter(mode, scenario), reprint);
+  async function checkPrinter() {
+    if (working || checkingPrinter) return;
+    checkingPrinter = true;
+    printerStatus = {
+      ...printerStatus,
+      message: 'Checking the server’s USB printer…',
+    };
+    printerStatus = await linuxPrinterStatus();
+    checkingPrinter = false;
   }
 
-  async function checkLinux() {
-    checkingLinux = true;
-    setupConfirmed = false;
-    linuxStatus = await linuxPrinterStatus();
-    checkingLinux = false;
+  function selectTab(next: 'order' | 'printer') {
+    tab = next;
+    if (next === 'printer' && !checkingPrinter) void checkPrinter();
+  }
+
+  async function tabKey(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    selectTab(
+      event.key === 'Home'
+        ? 'order'
+        : event.key === 'End'
+          ? 'printer'
+          : tab === 'order'
+            ? 'printer'
+            : 'order',
+    );
+    await tick();
+    document.getElementById(`${tab}-tab`)?.focus();
+  }
+
+  function changeDraft(next: OrderDraft) {
+    if (!editable) return;
+    formError = '';
+    try {
+      session.updateDraft(next);
+    } catch (error) {
+      formError = (error as Error).message;
+    }
+  }
+
+  function changeEditor(editor: ServingEditor) {
+    if (draft) changeDraft({ ...draft, editor });
+  }
+
+  function changeScoops(flavor: Flavor, amount: number) {
+    if (!draft || !editable) return;
+    const existing =
+      draft.editor.flavors.find((portion) => portion.flavor === flavor)
+        ?.scoops ?? 0;
+    const scoops = existing + amount;
+    if (scoops < 0 || totalScoops(draft.editor) + amount > maxScoopsPerServing)
+      return;
+    const selected = draft.editor.flavors.filter(
+      (portion) => portion.flavor !== flavor,
+    );
+    changeEditor({
+      ...draft.editor,
+      flavors: scoops ? [...selected, { flavor, scoops }] : selected,
+    });
+  }
+
+  function addServing() {
+    if (!draft || !editable) return;
+    try {
+      changeDraft(commitServing(draft));
+    } catch (error) {
+      formError = (error as Error).message;
+    }
+  }
+
+  function removeServing(index: number) {
+    if (!draft) return;
+    changeDraft({
+      ...draft,
+      servings: draft.servings.filter((_, i) => i !== index),
+      editor: draft.editingIndex === index ? emptyEditor() : draft.editor,
+      editingIndex:
+        draft.editingIndex === index
+          ? undefined
+          : draft.editingIndex !== undefined && draft.editingIndex > index
+            ? draft.editingIndex - 1
+            : draft.editingIndex,
+    });
+  }
+
+  async function print(reprint: boolean) {
+    if (
+      !canSend ||
+      (!reprint && (!editable || !prepared)) ||
+      (reprint && !viewState.attempts.length)
+    )
+      return;
+    const confirmed = outputConfirmed;
+    outputConfirmed = false;
+    formError = '';
+    sending = true;
+    try {
+      if (reprint) await session.print(printer, true, confirmed);
+      else await session.submit(printer, confirmed);
+      if (viewState.phase === 'ready' && last?.result?.status === 'accepted')
+        previewTimestamp = new Date().toISOString();
+    } catch (error) {
+      formError = (error as Error).message;
+    } finally {
+      sending = false;
+    }
+  }
+
+  async function startNewOrder() {
+    if (
+      working ||
+      viewState.phase !== 'ready' ||
+      (needsConfirmation && !outputConfirmed)
+    )
+      return;
+    await session.newOrder(outputConfirmed);
+    // Preserve acknowledgment while the latest saved result is still unknown.
+    formError = '';
+    previewTimestamp = new Date().toISOString();
   }
 </script>
 
 <svelte:head>
-  <title>Order Pad · Ticket Test</title>
+  <title>Order Pad · Build an order</title>
   <meta
     name="description"
-    content="A preparation ticket printer test with simulation, Linux CUPS, and Star Android USB modes."
+    content="Build ice cream orders and print tickets to the server’s USB printer."
   />
 </svelte:head>
 
+{#snippet receipt(lines: ReturnType<typeof formatTicket>)}
+  <div class="paper">
+    {#each lines as line, index (index)}
+      <div
+        class:heading={line.role === 'heading'}
+        class:reference={line.role === 'reference'}
+        class:reprint={line.role === 'reprint'}
+        class:end={line.role === 'end'}
+      >
+        {line.text || '\u00a0'}
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
 <div class="app">
   <header>
-    <div class="brand">
-      <span class="brand-icon" aria-hidden="true">≡</span>
-      <div><strong>Order Pad</strong><span>Preparation tickets</span></div>
-    </div>
-    <span class="milestone">MILESTONE 1 <span>·</span> PRINTER TEST</span>
-  </header>
-  <main>
-    <div class="intro">
-      <div>
-        <p class="eyebrow">FROM THE COUNTER TO THE KITCHEN</p>
-        <h1>Test a preparation ticket.</h1>
-        <p>One sample order. One clear printer boundary. No checkout.</p>
-      </div>
-      <span class:real={mode !== 'simulated'} class="mode-badge"
-        >{mode === 'simulated'
-          ? 'SIMULATED · NO PHYSICAL PRINT'
-          : 'REAL USB · DEVICE TEST REQUIRED'}</span
+    <a class="brand" href="#order-panel" onclick={() => selectTab('order')}
+      ><span class="brand-icon" aria-hidden="true">≡</span><span
+        ><strong>Order Pad</strong><small>Preparation tickets</small></span
+      ></a
+    >
+    <div class="tabs" role="tablist" aria-label="Workspace">
+      <button
+        id="order-tab"
+        role="tab"
+        aria-selected={tab === 'order'}
+        aria-controls="order-panel"
+        tabindex={tab === 'order' ? 0 : -1}
+        onclick={() => selectTab('order')}
+        onkeydown={tabKey}>Order</button
+      >
+      <button
+        id="printer-tab"
+        role="tab"
+        aria-selected={tab === 'printer'}
+        aria-controls="printer-panel"
+        tabindex={tab === 'printer' ? 0 : -1}
+        onclick={() => selectTab('printer')}
+        onkeydown={tabKey}>Printer settings</button
       >
     </div>
+  </header>
 
-    <div class="workspace">
-      <section class="controls" aria-labelledby="printer-title">
-        <div class="section-heading">
-          <span class="step">01</span>
-          <div>
-            <h2 id="printer-title">Printer &amp; transport</h2>
-            <p>Choose where this test ticket goes.</p>
-          </div>
-        </div>
-        <label for="printer">Printer mode</label>
-        <select
-          id="printer"
-          bind:value={mode}
-          disabled={working}
-          onchange={() => {
-            setupConfirmed = false;
-            reprintConfirmed = false;
-            if (mode === 'linux-cups') void checkLinux();
-          }}
-        >
-          <option value="simulated">Simulated printer — no hardware</option>
-          <option value="star-passprnt"
-            >Star TSP143IIIU — USB-B / PassPRNT</option
-          >
-          <option value="linux-cups">Star TSP143IIIU — Linux USB / CUPS</option>
-        </select>
-        {#if mode === 'simulated'}
-          <div class="status good">
-            <span class="dot"></span>
-            <div>
-              <strong>Simulation ready</strong>
-              <p>
-                Renders the ticket and saves the attempt. Nothing is physically
-                printed.
-              </p>
-            </div>
-          </div>
-          <label for="scenario">Simulate an outcome</label>
-          <select id="scenario" bind:value={scenario} disabled={working}>
-            <option value="accepted">Accepted</option><option value="failed"
-              >Failed · paper out</option
-            ><option value="outcome-unknown">Unknown · response missing</option>
-          </select>
-        {:else if mode === 'linux-cups'}
-          <div
-            class="status"
-            class:good={linuxStatus.ready}
-            class:caution={!linuxStatus.ready}
-          >
-            <span class="dot"></span>
-            <div>
-              <strong
-                >{linuxStatus.ready
-                  ? 'Linux queue configured'
-                  : 'Linux service needs attention'}</strong
-              >
-              <p>{linuxStatus.message}</p>
-            </div>
-          </div>
-          <button
-            class="secondary"
-            onclick={checkLinux}
-            disabled={working || checkingLinux}
-            >{checkingLinux
-              ? 'Checking service…'
-              : 'Check Linux service'}</button
-          >
-          <div class="setup">
-            <h3>Linux USB setup</h3>
-            <p>
-              Connect the printer to the Mint machine’s USB port. Start its
-              Order Pad printing service, then open that machine’s HTTPS address
-              on this phone.
-            </p>
-            <label class="checkbox"
-              ><input
-                type="checkbox"
-                bind:checked={setupConfirmed}
-                disabled={!linuxStatus.ready || working || checkingLinux}
-              /><span>I verified a CUPS test print on the Linux machine.</span
-              ></label
-            >
-            <p class="small">
-              Print submits directly through the Linux service. CUPS may hold a
-              job until the printer is ready. Inspect pending jobs before
-              reprinting; queue acceptance does not confirm physical output.
-            </p>
-          </div>
-        {:else}
-          <div class="status caution">
-            <span class="dot"></span>
-            <div>
-              <strong
-                >{unsupported
-                  ? 'Unsupported runtime'
-                  : 'Android eligible · connection unverified'}</strong
-              >
-              <p>
-                {unsupported ??
-                  'Star PassPRNT handles USB permission and printing. Installation and device connection have not been verified by this page.'}
-              </p>
-            </div>
-          </div>
-          <div class="setup">
-            <h3>USB setup</h3>
-            <ol>
-              <li>
-                Install Star Quick Setup Utility and Star PassPRNT on the Galaxy
-                S10e (Android 12).
-              </li>
-              <li>
-                Connect the phone’s <strong>USB-C</strong> port through a USB
-                host/OTG adapter and data cable to the printer’s
-                <strong>USB-B</strong> port. Power the printer from mains.
-              </li>
-              <li>
-                Grant Android USB access to Star’s apps. Verify a sample print
-                in Quick Setup Utility, then select TSP100IIIU / USB in
-                PassPRNT. Keep only this printer connected.
-              </li>
-              <li>
-                Open this app’s HTTPS URL in Chrome. Save an attempt here, then
-                tap the PassPRNT launch link once. Return to the same browser
-                and origin for the result.
-              </li>
-            </ol>
-            <label class="checkbox"
-              ><input
-                type="checkbox"
-                bind:checked={setupConfirmed}
-                disabled={!!unsupported || working}
-              /><span>I completed USB permission and printer selection.</span
-              ></label
-            >
-            <p class="small">
-              If access was denied, reconnect and grant permission in
-              Android/PassPRNT. The printer’s USB-A port only charges Android
-              devices; USB-B does not charge the phone. Hardware and offline
-              return still need testing.
-            </p>
-          </div>
-        {/if}
-
-        <div class="actions">
-          {#if viewState.phase === 'handoff'}
-            <div class="warning">
-              <strong>Attempt saved · PassPRNT launch pending</strong>
-              <p>
-                Tap once to send this ticket through PassPRNT. Keep PassPRNT in
-                the foreground until it returns. Error retry pop-ups are
-                disabled.
-              </p>
-              {#if !handoffLaunched}
-                <a
-                  class="launch"
-                  href={viewState.handoffUrl}
-                  onclick={() => {
-                    handoffLaunched = true;
-                  }}>Open PassPRNT and print ↗</a
-                >
-              {:else}
-                <p>
-                  Launch requested. This page cannot confirm that PassPRNT
-                  opened or printed.
-                </p>
-              {/if}
-              <p>
-                If no result returns, close PassPRNT and inspect the printer
-                first. Recovering records an unknown outcome and never sends
-                another ticket.
-              </p>
-              <button class="secondary" onclick={() => location.reload()}
-                >Recover without resending</button
-              >
-            </div>
-          {/if}
-          <button
-            class="primary"
-            onclick={() => print(false)}
-            disabled={!ready || viewState.attempts.length > 0}
-            >{working
-              ? viewState.phase === 'saving'
-                ? 'Saving print attempt…'
-                : viewState.phase === 'handoff'
-                  ? 'Waiting for PassPRNT…'
-                  : 'Sending test ticket…'
-              : 'Print Test Ticket'}</button
-          >
-          {#if needsConfirmation}<div class="warning">
-              <strong>Outcome unknown · duplicates are possible</strong>
-              <p>
-                Check the printer and kitchen before reprinting. There will be
-                no automatic retry.
-              </p>
-              <label class="checkbox"
-                ><input
-                  type="checkbox"
-                  bind:checked={reprintConfirmed}
-                  disabled={working}
-                /><span>I checked the output and want another ticket.</span
-                ></label
-              >
-            </div>{/if}
-          <button
-            class="secondary"
-            onclick={() => print(true)}
-            disabled={!ready ||
-              !viewState.attempts.length ||
-              (needsConfirmation && !reprintConfirmed)}
-            >Reprint Last Ticket</button
-          >
-          <p class="small">
-            Every repeat is marked REPRINT and keeps the original ticket ID.
-            Keep one Order Pad tab open per station.
+  <main>
+    <div
+      id="order-panel"
+      role="tabpanel"
+      tabindex="0"
+      aria-labelledby="order-tab"
+      hidden={tab !== 'order'}
+    >
+      <div class="intro">
+        <div>
+          <h1>Build an order</h1>
+          <p>
+            Choose your scoops and container. Print includes your current
+            serving.
           </p>
         </div>
+        <div class="printer-indicator" class:attention={!printerStatus.ready}>
+          <span class="dot" aria-hidden="true"></span>
+          <span
+            >{checkingPrinter
+              ? 'Checking USB printer…'
+              : printerStatus.ready
+                ? 'USB printing ready'
+                : 'Printer needs attention'}</span
+          >
+          <button class="text-button" onclick={() => selectTab('printer')}
+            >Settings</button
+          >
+        </div>
+      </div>
+
+      {#if !checkingPrinter && !printerStatus.ready}
+        <div class="notice warning" role="alert">
+          <strong>Printer unavailable</strong>
+          <p>{printerStatus.message}</p>
+          <button
+            class="secondary compact"
+            onclick={checkPrinter}
+            disabled={working}>Check printer</button
+          >
+        </div>
+      {/if}
+      {#if viewState.notice}<div class="notice warning" role="alert">
+          <strong>Storage needs attention</strong>
+          <p>{viewState.notice}</p>
+        </div>{/if}
+      {#if needsConfirmation}
+        <div class="notice warning">
+          <strong>Outcome unknown · check the printer before continuing</strong>
+          <p>
+            The ticket may have printed or be queued. Check the output and
+            pending CUPS jobs. Nothing will be resent automatically.
+          </p>
+          <label class="checkbox"
+            ><input
+              type="checkbox"
+              bind:checked={outputConfirmed}
+              disabled={working}
+            /><span>I checked the output and am ready to continue.</span></label
+          >
+        </div>
+      {/if}
+
+      <div class="order-layout">
+        <section class="card editor" aria-labelledby="serving-title">
+          {#if draft && !draft.submittedTicketId}
+            <div class="section-heading">
+              <h2 id="serving-title">
+                {draft.editingIndex === undefined
+                  ? 'Choose your serving'
+                  : `Edit serving ${draft.editingIndex + 1}`}
+              </h2>
+              <span class="muted"
+                >{draft.editingIndex === undefined
+                  ? `Serving ${draft.servings.length + 1}`
+                  : 'Changes included when printing'}</span
+              >
+            </div>
+            <fieldset disabled={!editable}>
+              <legend
+                >Flavors &amp; scoops <span>mix up to 5 scoops</span></legend
+              >
+              <div class="choices scoop-choices">
+                {#each flavors as flavor}
+                  {@const count =
+                    draft.editor.flavors.find(
+                      (portion) => portion.flavor === flavor,
+                    )?.scoops ?? 0}
+                  <div class="scoop-choice" class:selected={count > 0}>
+                    <strong>{flavor}</strong>
+                    <div
+                      class="scoop-counter"
+                      role="group"
+                      aria-label={`${flavor} scoops`}
+                    >
+                      <button
+                        class="scoop-button"
+                        aria-label={`Remove scoop of ${flavor}`}
+                        disabled={!editable || count === 0}
+                        onclick={() => changeScoops(flavor, -1)}>−</button
+                      >
+                      <span
+                        class="scoop-count"
+                        aria-label={`${flavor} scoop count`}
+                        aria-live="polite">{count}</span
+                      >
+                      <button
+                        class="scoop-button"
+                        aria-label={`Add scoop of ${flavor}`}
+                        disabled={!editable ||
+                          totalScoops(draft.editor) >= maxScoopsPerServing}
+                        onclick={() => changeScoops(flavor, 1)}>+</button
+                      >
+                    </div>
+                  </div>
+                {/each}
+              </div>
+              <p class="scoop-total" aria-live="polite">
+                {totalScoops(draft.editor)} of 5 scoops{totalScoops(
+                  draft.editor,
+                ) === maxScoopsPerServing
+                  ? ' · Remove a scoop to change flavors.'
+                  : ''}
+              </p>
+            </fieldset>
+            <fieldset disabled={!editable}>
+              <legend>Container <span>choose one</span></legend>
+              <div class="choices containers">
+                {#each containers as container}<label class="choice"
+                    ><input
+                      type="radio"
+                      name="container"
+                      value={container}
+                      checked={draft.editor.container === container}
+                      onchange={() =>
+                        changeEditor({ ...draft!.editor, container })}
+                    /><span>{container}</span></label
+                  >{/each}
+              </div>
+            </fieldset>
+            <fieldset disabled={!editable}>
+              <legend>Toppings <span>optional</span></legend>
+              <div class="choices">
+                {#each toppings as topping}<label class="choice"
+                    ><input
+                      type="checkbox"
+                      checked={draft.editor.toppings.includes(topping)}
+                      onchange={(event) =>
+                        changeEditor({
+                          ...draft!.editor,
+                          toppings: event.currentTarget.checked
+                            ? [...draft!.editor.toppings, topping]
+                            : draft!.editor.toppings.filter(
+                                (t) => t !== topping,
+                              ),
+                        })}
+                    /><span>{topping}</span></label
+                  >{/each}
+              </div>
+            </fieldset>
+            <div class="editor-actions">
+              <button
+                class="secondary"
+                onclick={addServing}
+                disabled={!editable ||
+                  !editorComplete ||
+                  (draft.servings.length >= 30 &&
+                    draft.editingIndex === undefined)}
+                >{draft.editingIndex === undefined
+                  ? 'Add serving'
+                  : 'Save serving'}</button
+              >
+              {#if unfinished}<button
+                  class="text-button"
+                  disabled={!editable}
+                  onclick={() =>
+                    changeDraft({
+                      ...draft!,
+                      editor: emptyEditor(),
+                      editingIndex: undefined,
+                    })}>Cancel serving</button
+                >{/if}
+            </div>
+            <p class="small">
+              {draft.editingIndex === undefined
+                ? 'For more servings, add this one and choose another. For the last serving, just press Print order.'
+                : 'Save to keep editing, or press Print order to save and submit.'}
+            </p>
+          {:else if draft}<h2 id="serving-title">Submitted order</h2>
+            <p class="muted">
+              {last?.result?.status === 'failed'
+                ? 'No job was submitted. Resolve the issue, then reprint this order or start a new one.'
+                : 'This order is saved. Check its print result before continuing.'}
+            </p>
+            <ol class="servings submitted" aria-label="Submitted servings">
+              {#each draft.servings as serving, index}<li>
+                  <strong>{index + 1}. {scoopSummary(serving)}</strong>
+                  <p>
+                    {serving.container} · {totalScoops(serving)}
+                    {totalScoops(serving) === 1 ? 'scoop' : 'scoops'} · {serving.toppings.join(
+                      ', ',
+                    ) || 'No toppings'}
+                  </p>
+                </li>{/each}
+            </ol>
+          {:else}<h2 id="serving-title">Your serving</h2>
+            <p class="muted">
+              {viewState.phase === 'blocked'
+                ? 'Resolve the storage issue to recover your order.'
+                : 'Loading your order…'}
+            </p>{/if}
+        </section>
+
+        <aside class="card order-summary" aria-labelledby="order-title">
+          <div class="section-heading">
+            <h2 id="order-title">Your order</h2>
+            <span class="count"
+              >{servingCount}
+              {servingCount === 1 ? 'serving' : 'servings'}</span
+            >
+          </div>
+          {#if draft}
+            <label class="field-label" for="order-name">Name (optional)</label>
+            <input
+              id="order-name"
+              type="text"
+              maxlength="80"
+              autocomplete="off"
+              placeholder="Customer name"
+              value={draft.name}
+              disabled={!editable}
+              oninput={(event) =>
+                changeDraft({ ...draft!, name: event.currentTarget.value })}
+            />
+            <p class="small">
+              Ticket label: <strong
+                >{draft.name.trim() || draft.reference}</strong
+              >
+            </p>
+            <ol class="servings" aria-label="Order servings">
+              {#each prepared?.servings ?? draft.servings as serving, index}
+                {@const pending =
+                  !!prepared &&
+                  unfinished &&
+                  (draft.editingIndex === index ||
+                    (draft.editingIndex === undefined &&
+                      index === draft.servings.length))}
+                <li class:pending>
+                  <div>
+                    <strong>{index + 1}. {scoopSummary(serving)}</strong>
+                    <p>
+                      {serving.container} · {totalScoops(serving)}
+                      {totalScoops(serving) === 1 ? 'scoop' : 'scoops'} · {serving.toppings.join(
+                        ', ',
+                      ) || 'No toppings'}
+                    </p>
+                    {#if pending}<span class="pending-label"
+                        >Included when printing</span
+                      >{/if}
+                  </div>
+                  {#if !draft.submittedTicketId && !pending}<div
+                      class="serving-actions"
+                    >
+                      <button
+                        class="text-button"
+                        disabled={!editable || unfinished}
+                        aria-label={`Edit serving ${index + 1}`}
+                        onclick={() =>
+                          changeDraft({
+                            ...draft!,
+                            editor: { ...serving },
+                            editingIndex: index,
+                          })}>Edit</button
+                      ><button
+                        class="text-button"
+                        disabled={!editable}
+                        aria-label={`Remove serving ${index + 1}`}
+                        onclick={() => removeServing(index)}>Remove</button
+                      >
+                    </div>{/if}
+                </li>
+              {/each}
+            </ol>
+            {#if !servingCount}<p class="empty">
+                Your servings will appear here.
+              </p>{/if}
+            {#if draft.servings.length >= 30}<p class="small">
+                This order has reached the 30-serving limit.
+              </p>{/if}
+            {#if !draft.submittedTicketId}<details class="receipt-details">
+                <summary>Ticket preview</summary>
+                <div aria-label="Preparation ticket preview">
+                  {#if preview.length}{@render receipt(preview)}{:else}<p
+                      class="small"
+                    >
+                      {printProblem}
+                    </p>{/if}
+                </div>
+              </details>{/if}
+            <button
+              class="text-button new-order"
+              onclick={startNewOrder}
+              disabled={working ||
+                viewState.phase !== 'ready' ||
+                (needsConfirmation && !outputConfirmed) ||
+                (!draft.submittedTicketId &&
+                  !draft.servings.length &&
+                  !unfinished &&
+                  !draft.name)}>New order</button
+            >
+          {/if}
+        </aside>
+      </div>
+
+      <section class="card last-order" aria-labelledby="last-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="last-title">Last submitted order</h2>
+            <p class="muted">
+              {viewState.ticket?.reference ?? 'No orders submitted yet'}
+            </p>
+          </div>
+          <button
+            class="secondary compact"
+            onclick={() => print(true)}
+            disabled={!canSend || !viewState.attempts.length}
+            >Reprint last order</button
+          >
+        </div>
+        {#if viewState.ticket}<details class="receipt-details">
+            <summary>View last receipt</summary>
+            <div aria-label="Last submitted ticket preview">
+              {@render receipt(lastPreview)}
+            </div>
+          </details>{/if}
+        {#if viewState.attempts.length}<details class="attempt-details">
+            <summary>Print attempts ({viewState.attempts.length})</summary>
+            <ol class="attempts">
+              {#each [...viewState.attempts].reverse() as attempt (attempt.id)}<li
+                >
+                  <div>
+                    <strong
+                      >{attempt.reprint ? 'REPRINT' : 'ORDER'} · {attempt.mode ===
+                      'linux-cups'
+                        ? 'Server USB'
+                        : `Previous ${attempt.mode} attempt`}</strong
+                    ><span class="small"
+                      >{new Date(attempt.startedAt).toLocaleString()}</span
+                    >
+                  </div>
+                  <span
+                    class="outcome"
+                    class:unknown={attempt.result?.status === 'outcome-unknown'}
+                    >{attempt.result?.status ?? 'Awaiting response'}</span
+                  >
+                  <p>
+                    {attempt.result?.message ?? 'Intent saved before sending.'}
+                  </p>
+                </li>{/each}
+            </ol>
+          </details>{/if}
+      </section>
+      {#if formError}<p class="notice warning" role="alert">{formError}</p>{/if}
+      <div class="action-bar">
         <div class="feedback" role="status" aria-live="polite">
           {#if viewState.notice}<strong>Storage needs attention</strong>
-            <p>{viewState.notice}</p>
-          {:else if viewState.phase === 'loading'}<p>
-              Recovering the saved ticket…
-            </p>
-          {:else if viewState.phase === 'saving'}<strong
-              >Saving print intent</strong
+          {:else if working}<strong
+              >{viewState.phase === 'saving'
+                ? 'Saving order…'
+                : 'Submitting order…'}</strong
             >
-            <p>No data has been sent yet.</p>
-          {:else if viewState.phase === 'printing'}<strong
-              >Attempt saved · awaiting response</strong
-            >
-            <p>Keep this page open while awaiting the print result.</p>
-          {:else if viewState.phase === 'handoff'}<strong
-              >Attempt saved · awaiting PassPRNT result</strong
-            >
-            <p>
-              No successful print is claimed by preparing or opening the link.
-            </p>
           {:else if last?.result}<strong
               >{last.result.status === 'accepted'
-                ? 'Accepted'
+                ? `${last.reprint ? 'Reprint' : 'Order'} submitted — ${viewState.ticket?.reference}`
                 : last.result.status === 'failed'
-                  ? 'Failed'
-                  : 'Outcome unknown'}{last.result.simulated
-                ? ' · SIMULATED'
-                : last.mode === 'linux-cups'
-                  ? ' · LINUX CUPS'
-                  : ' · STAR USB'}</strong
+                  ? 'Order submission failed'
+                  : 'Outcome unknown'}</strong
             >
-            <p>{last.result.message}</p>
-          {:else}<p>Ticket saved locally. Ready for its first test.</p>{/if}
+            <p>
+              {last.result.status === 'accepted'
+                ? 'Accepted by the USB print queue.'
+                : last.result.message}
+            </p>
+          {:else}<strong
+              >{viewState.phase === 'loading'
+                ? 'Loading your order…'
+                : 'Ready for your next order'}</strong
+            >{/if}
+          {#if printProblem && !working}<p class="print-help" id="print-help">
+              {printProblem}
+            </p>{/if}
         </div>
-      </section>
-
-      <section class="preview-panel" aria-labelledby="preview-title">
-        <div class="section-heading">
-          <span class="step">02</span>
-          <div>
-            <h2 id="preview-title">Ticket preview</h2>
-            <p>Illustrative data · 80 mm paper layout</p>
-          </div>
-        </div>
-        <div class="paper">
-          <div class="paper-caption">
-            {last && last.mode !== 'simulated'
-              ? 'TEXT PREVIEW · CHECK PHYSICAL OUTPUT'
-              : 'SIMULATED PREVIEW · NOTHING PRINTED'}
-          </div>
-          <div class="receipt" aria-label="Preparation ticket preview">
-            {#each preview as line, i (i)}<div
-                class:heading={line.role === 'heading'}
-                class:reference={line.role === 'reference'}
-                class:reprint={line.role === 'reprint'}
-                class:end={line.role === 'end'}
-              >
-                {line.text || '\u00a0'}
-              </div>{/each}
-          </div>
-          <div class="cut-line">
-            <span>✂</span> PARTIAL CUT AFTER END MARKER
-          </div>
-        </div>
-      </section>
+        <button
+          class="primary print-button"
+          aria-describedby={printProblem ? 'print-help' : undefined}
+          onclick={() => print(false)}
+          disabled={!canSend || !editable || !prepared}
+          >{working
+            ? 'Submitting…'
+            : `Print order${servingCount ? ` · ${servingCount}` : ''}`}</button
+        >
+      </div>
     </div>
 
-    <section class="history" aria-labelledby="history-title">
-      <div class="section-heading">
-        <span class="step">03</span>
+    <div
+      id="printer-panel"
+      role="tabpanel"
+      tabindex="0"
+      aria-labelledby="printer-tab"
+      hidden={tab !== 'printer'}
+    >
+      <div class="intro">
         <div>
-          <h2 id="history-title">Saved print attempts</h2>
-          <p>Recovered after reload on this browser and origin.</p>
+          <h1>Printer settings</h1>
+          <p>Orders print to the USB printer attached to this server.</p>
         </div>
-        <span class="count">{viewState.attempts.length}</span>
       </div>
-      {#if !viewState.attempts.length}<p class="empty">
-          No attempts yet. The sample ticket is saved before the first send.
-        </p>{:else}<ol class="attempts">
-          {#each [...viewState.attempts].reverse() as attempt (attempt.id)}<li>
-              <div>
-                <strong
-                  >{attempt.reprint ? 'REPRINT' : 'TEST TICKET'} · #{viewState
-                    .ticket?.reference}</strong
-                ><span
-                  >{attempt.mode === 'simulated'
-                    ? 'Simulation'
-                    : attempt.mode === 'star-usb'
-                      ? 'Previous IV adapter'
-                      : attempt.mode === 'linux-cups'
-                        ? 'Linux CUPS USB'
-                        : 'Star PassPRNT USB'} · {new Date(
-                    attempt.startedAt,
-                  ).toLocaleString()}</span
-                >
-              </div>
-              <span
-                class="outcome"
-                class:unknown={attempt.result?.status === 'outcome-unknown'}
-                >{attempt.result?.status ?? 'Awaiting response'}</span
-              >
-              <p>{attempt.result?.message ?? 'Intent saved before sending.'}</p>
-            </li>{/each}
-        </ol>{/if}
-    </section>
-    <footer>
-      <span class="network"
-        ><span class="dot" class:offline={!online}></span>{online
-          ? 'Network available'
-          : 'Device offline'}</span
-      ><span>{offlineStatus}</span>
-      <p>
-        Offline reopening must be tested on your device. Linux printing needs a
-        connection to the host; Android USB uses PassPRNT. Local data can be
-        removed by browser storage cleanup; this milestone has no cloud backup.
-      </p>
-    </footer>
+      <section class="card settings-card" aria-labelledby="usb-title">
+        <h2 id="usb-title">Star TSP143IIIU</h2>
+        <p class="muted">Primary order-ticket printer · USB</p>
+        <dl>
+          <dt>Print destination</dt>
+          <dd>This server’s USB printer</dd>
+          <dt>CUPS queue</dt>
+          <dd>
+            {printerStatus.queue ?? 'Unavailable until the service responds'}
+          </dd>
+        </dl>
+        <div class="notice" class:warning={!printerStatus.ready}>
+          <strong
+            >{checkingPrinter
+              ? 'Checking printer…'
+              : printerStatus.ready
+                ? 'USB queue configured'
+                : 'Printer needs attention'}</strong
+          >
+          <p>{printerStatus.message}</p>
+        </div>
+        <button
+          class="secondary"
+          onclick={checkPrinter}
+          disabled={working || checkingPrinter}
+          >{checkingPrinter ? 'Checking printer…' : 'Check printer'}</button
+        >
+        <h3>Server setup</h3>
+        <ol class="setup-steps">
+          <li>
+            Connect the Star printer’s USB-B port to this server and power the
+            printer on.
+          </li>
+          <li>
+            Configure a local USB CUPS queue with the Star TSP100 Cutter driver.
+            Set <code>ORDER_PAD_QUEUE</code> to that queue when starting the Order
+            Pad service.
+          </li>
+          <li>
+            Verify a CUPS test print on the server, then open this server’s
+            Order Pad address on your ordering device.
+          </li>
+        </ol>
+        <p class="small">
+          Printer configuration is managed on the server. Queue readiness and
+          accepted submissions do not verify physical output. If tickets stop
+          appearing, check paper, power, USB, and pending CUPS jobs before
+          reprinting.
+        </p>
+        <details>
+          <summary>Connection and local storage</summary>
+          <p class="small">
+            {online ? 'Network available' : 'Device offline'} · {offlineStatus}
+          </p>
+          <p class="small">
+            Drafts and the last submitted receipt are saved in this browser.
+            Printing requires a connection to this server. Keep one Order Pad
+            tab open per station and preserve browser storage when recovering a
+            print.
+          </p>
+        </details>
+      </section>
+    </div>
   </main>
 </div>
 
@@ -499,358 +811,390 @@
     font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   }
   :global(button),
-  :global(select),
   :global(input) {
     font: inherit;
   }
   :global(button),
-  :global(select),
   :global(a) {
     -webkit-tap-highlight-color: transparent;
   }
   :global(:focus-visible) {
     outline: 3px solid #c67c27;
-    outline-offset: 4px;
+    outline-offset: 3px;
+  }
+  :global([hidden]) {
+    display: none !important;
   }
   .app {
-    max-width: 1400px;
+    max-width: 1280px;
     margin: auto;
   }
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 24px 36px;
+    gap: 20px;
+    padding: 20px 32px;
     border-bottom: 1px solid #d7ded2;
   }
   .brand {
     display: flex;
-    gap: 12px;
     align-items: center;
+    gap: 10px;
+    color: inherit;
+    text-decoration: none;
   }
   .brand-icon {
     background: #174f45;
-    color: #fff;
-    width: 42px;
-    height: 42px;
-    border-radius: 11px;
+    color: white;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
     display: grid;
     place-items: center;
-    font-size: 32px;
+    font-size: 30px;
   }
   .brand strong {
     display: block;
-    font-size: 21px;
+    font-size: 20px;
   }
-  .brand div > span {
-    font-size: 13px;
+  .brand small {
     color: #5c7166;
+    font-size: 12px;
   }
-  .milestone {
-    font-size: 11px;
-    letter-spacing: 1.5px;
-    font-weight: 700;
-    color: #5c7166;
+  .tabs {
+    display: flex;
+    gap: 4px;
+    background: #e5eae0;
+    padding: 4px;
+    border-radius: 12px;
   }
-  .milestone span {
-    padding: 0 6px;
+  button {
+    min-height: 48px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    padding: 10px 16px;
+    cursor: pointer;
+    font-weight: 650;
+    color: #174f45;
+    background: transparent;
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .tabs button {
+    font-size: 14px;
+  }
+  .tabs button[aria-selected='true'] {
+    background: #fffef9;
+    box-shadow: 0 1px 4px #233b3412;
   }
   main {
-    padding: 38px 36px;
+    padding: 26px 32px 170px;
   }
   .intro {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
-    margin-bottom: 30px;
-  }
-  .eyebrow {
-    font-size: 11px;
-    font-weight: 750;
-    letter-spacing: 1.5px;
-    color: #537364;
-  }
-  h1 {
-    font-size: clamp(26px, 3vw, 38px);
-    letter-spacing: -1px;
-    margin: 10px 0;
-  }
-  .intro p:last-child {
-    color: #5c7166;
-    margin-bottom: 0;
-  }
-  .mode-badge {
-    flex-shrink: 0;
-    border: 1px solid #bdd4c5;
-    border-radius: 24px;
-    background: #e2ede2;
-    color: #28523d;
-    padding: 12px 16px;
-    font-size: 11px;
-    letter-spacing: 0.6px;
-    font-weight: 750;
-  }
-  .mode-badge.real {
-    color: #805119;
-    background: #fcf0d9;
-    border-color: #e0c79c;
-  }
-  .workspace {
-    display: grid;
-    grid-template-columns: minmax(320px, 1fr) minmax(360px, 1fr);
-    gap: 24px;
-    align-items: start;
-  }
-  .controls,
-  .history {
-    border: 1px solid #d5ded2;
-    border-radius: 18px;
-    background: #fffef9;
-    padding: 26px;
-  }
-  .section-heading {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    gap: 16px;
     margin-bottom: 24px;
   }
-  .step {
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
-    padding: 9px;
-    border: 1px solid #cfd9ce;
-    border-radius: 8px;
-    color: #647b68;
+  h1 {
+    font-size: clamp(26px, 3vw, 34px);
+    letter-spacing: -0.8px;
+    margin: 0 0 8px;
   }
-  h2 {
-    font-size: 19px;
-    margin: 0 0 5px;
-    letter-spacing: -0.3px;
-  }
-  .section-heading p {
-    font-size: 13px;
-    color: #687c6e;
+  .intro p,
+  .muted {
     margin: 0;
-  }
-  label {
-    display: block;
-    font-size: 13px;
-    font-weight: 650;
-    margin-bottom: 8px;
-  }
-  select {
-    display: block;
-    width: 100%;
-    padding: 14px 12px;
-    min-height: 52px;
-    background: #fff;
-    border: 1px solid #bdcfc1;
-    border-radius: 9px;
-    font-size: 15px;
-    color: #233b34;
-  }
-  .status {
-    display: flex;
-    gap: 11px;
-    padding: 16px;
-    border-radius: 10px;
-    margin: 18px 0;
+    color: #5c7166;
     font-size: 14px;
-    background: #eef4ed;
-  }
-  .status p {
-    margin: 6px 0 0;
     line-height: 1.5;
-    font-size: 13px;
-    color: #4d6757;
+  }
+  .printer-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #28523d;
+    white-space: nowrap;
   }
   .dot {
-    display: inline-block;
     width: 8px;
     height: 8px;
     background: #497b5a;
     border-radius: 50%;
     flex-shrink: 0;
-    margin-top: 5px;
   }
-  .caution {
-    background: #fff0d8;
-  }
-  .caution .dot {
+  .attention .dot {
     background: #ad731e;
   }
-  .setup {
-    font-size: 14px;
-    line-height: 1.6;
+  .attention {
+    color: #805119;
+  }
+  .text-button {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+  .order-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+    align-items: start;
+    gap: 20px;
+  }
+  .card {
+    background: #fffef9;
+    border: 1px solid #d5ded2;
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  h2 {
+    font-size: 19px;
+    margin: 0;
+    letter-spacing: -0.3px;
+  }
+  .section-heading > .muted {
+    font-size: 12px;
   }
   h3 {
-    font-size: 15px;
+    font-size: 16px;
+    margin-top: 28px;
   }
-  .setup ol {
-    padding-left: 22px;
+  fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0 0 22px;
+    min-width: 0;
   }
-  .setup li {
+  legend {
+    font-size: 14px;
+    font-weight: 700;
     margin-bottom: 10px;
   }
-  .launch {
-    display: inline-block;
-    color: #174f45;
-    padding: 12px 0;
-    font-weight: 650;
+  legend span {
+    font-weight: 400;
+    color: #627369;
+    margin-left: 8px;
+    font-size: 12px;
   }
-  .checkbox {
+  .choices {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .containers {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .choice {
     display: flex;
-    gap: 12px;
     align-items: center;
-    min-height: 52px;
+    gap: 9px;
+    border: 1px solid #bdcfc1;
+    border-radius: 9px;
+    padding: 12px;
+    min-height: 54px;
+    cursor: pointer;
     font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
+    line-height: 1.3;
   }
-  .checkbox input {
-    width: 22px;
-    height: 22px;
-    flex-shrink: 0;
-    accent-color: #174f45;
+  .scoop-choice {
+    border: 1px solid #bdcfc1;
+    border-radius: 9px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
   }
-  .actions {
-    border-top: 1px solid #e1e6dc;
-    margin-top: 24px;
-    padding-top: 24px;
+  .scoop-choice.selected {
+    background: #e2ede2;
+    border-color: #174f45;
   }
-  button {
-    width: 100%;
-    min-height: 56px;
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: 16px;
+  .scoop-choice strong {
+    font-size: 14px;
+  }
+  .scoop-counter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .scoop-button {
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+    font-size: 24px;
+    border-color: #bdcfc1;
+    background: #fffef9;
+  }
+  .scoop-count {
+    min-width: 20px;
+    text-align: center;
     font-weight: 700;
-    border: 1px solid #174f45;
+    font-variant-numeric: tabular-nums;
+  }
+  .scoop-total {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: #28523d;
+  }
+  .choice:has(input:checked) {
+    background: #e2ede2;
+    border-color: #174f45;
+  }
+  .choice input,
+  .checkbox input {
+    width: 21px;
+    height: 21px;
+    margin: 0;
+    accent-color: #174f45;
+    flex-shrink: 0;
+  }
+  .editor-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .secondary {
+    border-color: #174f45;
+    background: transparent;
   }
   .primary {
     background: #174f45;
-    color: #fff;
-    margin-bottom: 12px;
-  }
-  .secondary {
-    background: transparent;
-    color: #174f45;
-  }
-  button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
+    color: white;
+    border-color: #174f45;
   }
   .small {
     font-size: 12px;
     line-height: 1.6;
     color: #627369;
   }
-  .feedback {
-    background: #f1f4ed;
-    border-radius: 10px;
-    padding: 16px;
-    font-size: 14px;
-    margin-top: 18px;
-  }
-  .feedback p {
-    margin: 6px 0 0;
-    line-height: 1.6;
-  }
-  .warning {
-    background: #fff0d8;
-    border: 1px solid #dfc99f;
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 12px;
-    font-size: 14px;
-    line-height: 1.5;
-  }
-  .warning p {
-    margin: 8px 0;
-  }
-  .preview-panel {
-    background: #e5eae0;
-    padding: 26px;
-    border: 1px solid #d5ded2;
-    border-radius: 18px;
-  }
-  .paper {
-    max-width: 430px;
-    margin: 0 auto;
-    background: #fffef9;
-    box-shadow: 0 6px 22px #273b3212;
-    padding: 24px 20px 0;
-  }
-  .paper-caption {
-    text-align: center;
-    font-size: 9px;
-    font-weight: 750;
-    letter-spacing: 0.8px;
-    color: #69766d;
-    margin-bottom: 25px;
-  }
-  .receipt {
-    font:
-      13px/1.65 ui-monospace,
-      Consolas,
-      monospace;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    color: #252d29;
-  }
-  .receipt .heading,
-  .receipt .reference,
-  .receipt .reprint,
-  .receipt .end {
-    text-align: center;
-    font-weight: 800;
-  }
-  .receipt .heading {
-    letter-spacing: 1px;
-    margin-bottom: 10px;
-  }
-  .receipt .reference {
-    font-size: 25px;
-    margin-bottom: 14px;
-  }
-  .receipt .reprint {
-    font-size: 24px;
-    border: 2px solid #252d29;
-    margin-bottom: 16px;
-  }
-  .receipt .end {
-    margin: 18px 0;
-  }
-  .cut-line {
-    border-top: 2px dashed #c8cfc5;
-    font-size: 9px;
-    color: #657269;
-    letter-spacing: 0.5px;
-    text-align: center;
-    padding: 14px 0;
-  }
-  .cut-line span {
-    margin-right: 6px;
-    font-size: 15px;
-  }
-  .history {
-    margin-top: 24px;
-  }
-  .history .section-heading {
-    margin-bottom: 12px;
+  .order-summary {
+    position: sticky;
+    top: 16px;
   }
   .count {
-    margin-left: auto;
-    border-radius: 30px;
-    padding: 6px 12px;
+    border-radius: 20px;
     background: #e7eee3;
+    padding: 6px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .field-label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 650;
+  }
+  #order-name {
+    display: block;
+    width: 100%;
+    min-height: 48px;
+    border: 1px solid #bdcfc1;
+    border-radius: 9px;
+    background: white;
+    padding: 10px 12px;
+    color: inherit;
+  }
+  .servings {
+    list-style: none;
+    padding: 0;
+    margin: 16px 0;
+  }
+  .servings li {
+    border-top: 1px solid #e1e6dc;
+    padding: 14px 0;
+  }
+  .servings strong {
     font-size: 14px;
+  }
+  .servings p {
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 5px 0 0;
+    color: #5c7166;
+  }
+  .serving-actions {
+    display: flex;
+    margin: 4px 0 -8px;
+  }
+  .pending-label {
+    display: block;
+    font-size: 11px;
+    color: #28523d;
+    margin-top: 8px;
+  }
+  .pending {
+    background: #eef4ed;
+    padding: 14px 12px !important;
+    border-radius: 8px;
   }
   .empty {
     color: #718073;
     font-size: 14px;
-    margin: 22px 0 4px;
+    margin: 24px 0;
+  }
+  details {
+    border-top: 1px solid #e1e6dc;
+    margin-top: 12px;
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 650;
+    font-size: 13px;
+    padding: 14px 0;
+    min-height: 48px;
+  }
+  .new-order {
+    margin-top: 12px;
+  }
+  .last-order {
+    margin-top: 20px;
+  }
+  .last-order .section-heading {
+    margin-bottom: 0;
+  }
+  .last-order .muted {
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+  }
+  .paper {
+    background: white;
+    color: #252d29;
+    max-width: 430px;
+    margin: 8px auto 16px;
+    padding: 20px;
+    box-shadow: 0 3px 12px #233b3410;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font:
+      12px/1.6 ui-monospace,
+      Consolas,
+      monospace;
+  }
+  .paper .heading,
+  .paper .reference,
+  .paper .reprint,
+  .paper .end {
+    text-align: center;
+    font-weight: 800;
+  }
+  .paper .reference {
+    font-size: 20px;
+    margin: 8px 0;
+  }
+  .paper .reprint {
+    border: 2px solid #252d29;
+    font-size: 20px;
+    margin-bottom: 12px;
   }
   .attempts {
     list-style: none;
@@ -858,110 +1202,211 @@
     margin: 0;
   }
   .attempts li {
-    padding: 18px 0;
-    border-top: 1px solid #e2e7de;
+    border-top: 1px solid #e1e6dc;
+    padding: 16px 0;
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 8px;
+    font-size: 13px;
   }
-  .attempts strong {
-    font-size: 14px;
-  }
-  .attempts li div > span {
+  .attempts .small {
     display: block;
-    margin-top: 5px;
-    font-size: 12px;
-    color: #677b6b;
+  }
+  .attempts p {
+    grid-column: 1 / -1;
+    line-height: 1.5;
+    margin: 0;
+    color: #5c7166;
   }
   .outcome {
-    font-size: 12px;
-    color: #3d5f46;
-    padding: 7px 10px;
-    background: #e9efe3;
+    background: #e7eee3;
+    padding: 6px 8px;
     border-radius: 6px;
     align-self: start;
+    font-size: 12px;
   }
   .outcome.unknown {
     background: #fff0d8;
     color: #805119;
   }
-  .attempts p {
-    grid-column: 1 / -1;
-    font-size: 13px;
-    margin: 0;
+  .notice {
+    background: #eef4ed;
+    border-radius: 10px;
+    border: 1px solid #d5ded2;
+    padding: 16px;
+    margin-bottom: 20px;
+    font-size: 14px;
     line-height: 1.5;
-    color: #556b5c;
+    overflow-wrap: anywhere;
   }
-  footer {
-    margin-top: 25px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px 22px;
-    color: #657a69;
-    font-size: 12px;
+  .notice p {
+    margin: 8px 0;
   }
-  footer p {
-    flex-basis: 100%;
-    margin: 0;
-    line-height: 1.5;
+  .warning {
+    background: #fff0d8;
+    border-color: #dfc99f;
   }
-  .network {
+  .checkbox {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
+    min-height: 48px;
   }
-  .network .dot {
+  .action-bar {
+    position: fixed;
+    z-index: 5;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(calc(100% - 32px), 1216px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 16px 24px;
+    background: #fffef9;
+    border: 1px solid #bdcfc1;
+    border-radius: 14px;
+    box-shadow: 0 4px 24px #233b3420;
+  }
+  .feedback {
+    min-width: 0;
+    font-size: 14px;
+  }
+  .feedback strong {
+    overflow-wrap: anywhere;
+  }
+  .feedback p {
+    font-size: 12px;
+    line-height: 1.4;
+    margin: 5px 0 0;
+    color: #627369;
+  }
+  .feedback .print-help {
+    color: #805119;
+  }
+  .print-button {
+    min-width: 190px;
+    min-height: 56px;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .settings-card {
+    max-width: 740px;
+  }
+  .settings-card > .muted {
+    margin: 8px 0 24px;
+  }
+  dl {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    gap: 12px;
+    font-size: 14px;
+    margin-bottom: 24px;
+  }
+  dt {
+    color: #627369;
+  }
+  dd {
     margin: 0;
+    overflow-wrap: anywhere;
+    font-weight: 600;
   }
-  .dot.offline {
-    background: #b57a32;
+  .setup-steps {
+    padding-left: 22px;
+    font-size: 14px;
+    line-height: 1.6;
   }
-  @media (max-width: 950px) {
+  .setup-steps li {
+    margin-bottom: 10px;
+  }
+  code {
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 900px) {
+    header {
+      padding: 18px 20px;
+    }
+    main {
+      padding: 24px 20px 200px;
+    }
     .intro {
       align-items: start;
       flex-direction: column;
     }
-    .workspace {
-      gap: 16px;
-    }
-    .controls,
-    .preview-panel {
+    .card {
       padding: 20px;
     }
-    header {
-      padding: 20px 24px;
+    .order-layout {
+      grid-template-columns: minmax(0, 1.2fr) minmax(260px, 1fr);
+      gap: 16px;
     }
-    main {
-      padding: 28px 24px;
-    }
-  }
-  @media (max-width: 860px) {
-    .workspace {
+    .containers {
       grid-template-columns: 1fr;
     }
-    .milestone {
-      display: none;
+    .section-heading {
+      flex-wrap: wrap;
+    }
+  }
+  @media (max-width: 650px) {
+    header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+      padding: 16px;
+    }
+    .tabs button {
+      flex: 1;
     }
     main {
-      padding: 24px 16px;
+      padding: 20px 16px 230px;
     }
-    header {
-      padding: 18px 20px;
+    .order-layout {
+      grid-template-columns: 1fr;
     }
-    .mode-badge {
-      font-size: 10px;
+    .order-summary {
+      position: static;
+    }
+    .containers {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .choice {
+      padding: 10px 8px;
+      font-size: 13px;
+      gap: 6px;
+    }
+    .card {
+      padding: 18px;
+    }
+    .action-bar {
+      flex-direction: column;
+      align-items: stretch;
+      padding: 12px 16px;
+      gap: 10px;
+      bottom: 8px;
+    }
+    .print-button {
+      width: 100%;
+    }
+    .last-order .section-heading {
+      align-items: start;
+    }
+    .compact {
+      font-size: 13px;
+      padding: 8px 12px;
     }
     .attempts li {
       grid-template-columns: 1fr;
     }
-    .attempts p {
-      grid-column: 1;
-    }
     .outcome {
       justify-self: start;
     }
-    .receipt {
-      font-size: clamp(10px, 2.7vw, 13px);
+    dl {
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    dd {
+      margin-bottom: 12px;
     }
   }
 </style>
