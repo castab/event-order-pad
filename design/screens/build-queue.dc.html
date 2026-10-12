@@ -40,7 +40,9 @@ button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
 </div>
 </sc-if>
 <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start">
-<sc-for list="{{ orders }}" as="o" hint-placeholder-count="4">
+<sc-for list="{{ columns }}" as="col" hint-placeholder-count="3">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 20px">
+<sc-for list="{{ col.cards }}" as="o" hint-placeholder-count="2">
 <article style="box-sizing: border-box; border-radius: 16px; background: var(--surface-card); box-shadow: var(--shadow-card); display: flex; flex-direction: column; overflow: hidden">
 <header style="padding: 16px 18px 12px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-soft)">
 <span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
@@ -56,13 +58,32 @@ button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
 </header>
 <ol style="margin: 0; padding: 4px 18px; list-style: none; display: flex; flex-direction: column">
 <sc-for list="{{ o.servings }}" as="s" hint-placeholder-count="2">
-<li style="padding: 10px 0; display: flex; gap: 12px; border-bottom: 1px dashed var(--border-soft)">
+<li style="padding: 12px 0; display: flex; gap: 12px; border-bottom: 1px dashed var(--border-soft)">
 <span style="width: 26px; height: 26px; flex-shrink: 0; border-radius: 999px; background: var(--olive-700); color: var(--cream-100); font: 700 12px/26px var(--font-sans); text-align: center">{{ s.num }}</span>
-<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
-<span style="font: 600 15px/1.35 var(--font-sans); color: var(--text-heading)">{{ s.headline }}</span>
-<span style="font: 400 14px/1.45 var(--font-sans); color: var(--ink-700)">{{ s.mix }}</span>
-<span style="font: 400 13px/1.45 var(--font-sans); color: var(--text-muted)">{{ s.toppings }}</span>
-</span>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+<span style="font: 600 15px/26px var(--font-sans); color: var(--text-heading)">{{ s.headline }}</span>
+<ul aria-label="Flavors" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.flavors }}" as="f" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 4px; border-radius: 999px; background: var(--surface-page); display: flex; align-items: center; gap: 8px">
+<span style="min-width: 24px; height: 24px; box-sizing: border-box; padding: 0 6px; border-radius: 999px; background: var(--olive-900); color: var(--cream-100); font: 700 13px/24px var(--font-sans); text-align: center">{{ f.count }}</span>
+<span style="font: 500 14px/1 var(--font-sans); color: var(--text-heading); white-space: nowrap">{{ f.name }}</span>
+</li>
+</sc-for>
+</ul>
+<sc-if value="{{ s.hasToppings }}" hint-placeholder-val="{{ true }}">
+<ul aria-label="Toppings" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.toppings }}" as="t" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 8px; border-radius: 6px; border: 1.5px solid var(--olive-700); background: var(--surface-card); display: flex; align-items: center; gap: 6px">
+<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5f5b40" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+<span style="font: 600 14px/1 var(--font-sans); color: var(--olive-900); white-space: nowrap">{{ t }}</span>
+</li>
+</sc-for>
+</ul>
+</sc-if>
+<sc-if value="{{ s.noToppings }}" hint-placeholder-val="{{ false }}">
+<span style="align-self: flex-start; height: 32px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1.5px dashed var(--paper-300); display: flex; align-items: center; font: 500 14px/1 var(--font-sans); color: var(--text-muted)">No toppings</span>
+</sc-if>
+</div>
 </li>
 </sc-for>
 </ol>
@@ -70,6 +91,8 @@ button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
 <x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Button" variant="primary" size="md" on-click="{{ o.done }}" style="width: 100%">{{ o.doneLabel }}</x-import>
 </div>
 </article>
+</sc-for>
+</div>
 </sc-for>
 </div>
 </div>
@@ -111,7 +134,8 @@ class Component extends DCLogic {
         { id: 't40', ref: 40, name: 'Happy Sprinkle', at: now - 12 * min, servings: [sv({ 'Chocolate': 2 }, 'Cup', ['Chocolate Sauce', 'Maraschino Cherries']), sv({ 'Vanilla': 1, 'Strawberry': 1 }, 'Cake Cone', [])] },
         { id: 't41', ref: 41, name: 'Dana', at: now - 7 * min, servings: [sv({ 'Chocolate Chip': 1 }, 'Sugar Cone', ['Sliced Almonds'])] },
         { id: 't42', ref: 42, name: 'Lucky Waffle', at: now - 4 * min, servings: [sv({ 'Vanilla': 3 }, 'Cup', ['Whipped cream', 'Caramel Sauce', 'Maraschino Cherries']), sv({ 'Strawberry': 1 }, 'Cup', []), sv({ 'Chocolate': 1, 'Chocolate Chip': 1 }, 'Sugar Cone', ['Gummy Bears']), sv({ 'Vanilla': 1 }, 'Cake Cone', [])] },
-        { id: 't43', ref: 43, name: 'Maria', at: now - 1 * min, servings: [sv({ 'Chocolate Chip': 2, 'Strawberry': 1 }, 'Sugar Cone', ['Whipped cream', 'Chocolate Sauce']), sv({ 'Vanilla': 1 }, 'Cup', []), sv({ 'Chocolate': 1, 'Vanilla': 1 }, 'Cake Cone', ['Gummy Bears'])] }
+        { id: 't43', ref: 43, name: 'Maria', at: now - 1 * min, servings: [sv({ 'Chocolate Chip': 2, 'Strawberry': 1 }, 'Sugar Cone', ['Whipped cream', 'Chocolate Sauce']), sv({ 'Vanilla': 1 }, 'Cup', []), sv({ 'Chocolate': 1, 'Vanilla': 1 }, 'Cake Cone', ['Gummy Bears'])] },
+        { id: 't44', ref: 44, name: 'Cozy Swirl', at: now - 0.5 * min, servings: [sv({ 'Strawberry': 2 }, 'Cake Cone', ['Sliced Almonds'])] }
       ],
       done: [
         { id: 't39', ref: 39, name: 'Jolly Cone', at: now - 18 * min, doneAt: now - 2 * min, servings: [sv({ 'Vanilla': 1 }, 'Cup', [])] }
@@ -140,8 +164,10 @@ class Component extends DCLogic {
           return {
             num: i + 1,
             headline: plural(total(s), 'scoop') + ' · ' + s.container,
-            mix: FLAVORS.filter(function (f) { return s.counts[f]; }).map(function (f) { return s.counts[f] + '× ' + f; }).join(', '),
-            toppings: s.toppings.length ? s.toppings.join(', ') : 'No toppings'
+            flavors: FLAVORS.filter(function (f) { return s.counts[f]; }).map(function (f) { return { count: s.counts[f], name: f }; }),
+            toppings: s.toppings,
+            hasToppings: s.toppings.length > 0,
+            noToppings: s.toppings.length === 0
           };
         }),
         done: function () {
@@ -167,10 +193,28 @@ class Component extends DCLogic {
         }
       };
     });
-    var oldest = open.length ? Math.max(0, Math.floor((st.now - open[0].at) / 60000)) : 0;
+    // Pack cards, oldest first, into whichever column is shortest (leftmost on ties).
+    // In the app, use each card's measured height; here it is estimated from its content.
+    function estHeight(o) {
+      var h = 150;
+      o.servings.forEach(function (s) {
+        var fl = FLAVORS.filter(function (f) { return s.counts[f]; }).length;
+        var tp = Math.max(1, s.toppings.length);
+        h += 66 + Math.ceil(fl / 2) * 38 + Math.ceil(tp / 2) * 38;
+      });
+      return h;
+    }
+    var cols = [0, 1, 2].map(function () { return { cards: [], h: 0 }; });
+    orders.forEach(function (card, i) {
+      var t = 0;
+      for (var j = 1; j < cols.length; j++) if (cols[j].h < cols[t].h) t = j;
+      cols[t].cards.push(card);
+      cols[t].h += estHeight(open[i]) + 20;
+    });
+    var oldest = open.length ?Math.max(0, Math.floor((st.now - open[0].at) / 60000)) : 0;
     return {
       wmSize: 18,
-      orders: orders,
+      columns: cols.map(function (c) { return { cards: c.cards }; }),
       isEmpty: open.length === 0,
       openCount: open.length,
       servingCount: open.reduce(function (n, o) { return n + o.servings.length; }, 0),
