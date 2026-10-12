@@ -21,7 +21,7 @@ The menu is:
 
 - Flavors: Chocolate, Vanilla, Strawberry, Chocolate Chip.
 - Containers: Cup, Cake Cone, Sugar Cone.
-- Toppings: Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries.
+- Toppings: Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries, Rainbow Sprinkles, Chocolate Sprinkles.
 
 Enter an optional name (up to 80 printable characters). Blank names use a stable
 adjective and ice cream noun derived from the numeric order reference, such as

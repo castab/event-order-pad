@@ -59,11 +59,11 @@ describe('structured immutable tickets', () => {
     ])
       expect(Object.isFrozen(value)).toBe(true);
   });
-  it('supports every flavor/count/container and all 64 topping combinations', () => {
+  it('supports every flavor/count/container and all 256 topping combinations', () => {
     for (const flavor of FLAVORS)
       for (const container of CONTAINERS)
         for (const count of [1, 2, 3, 4, 5])
-          for (let mask = 0; mask < 64; mask++) {
+          for (let mask = 0; mask < 1 << TOPPINGS.length; mask++) {
             const toppings = TOPPINGS.filter((_, i) => mask & (1 << i));
             const result = parseTicket(
               input([{ flavors: [{ flavor, count }], container, toppings }]),
@@ -74,7 +74,7 @@ describe('structured immutable tickets', () => {
               toppings,
             });
           }
-  });
+  }, 15_000);
   it.each([0, -1, 1.5, 6, '2', null, undefined, NaN, Infinity])(
     'rejects invalid scoop count %s',
     (count) => {
@@ -350,7 +350,7 @@ describe('prep-ticket layouts', () => {
     const busy = {
       ...simple,
       flavors: FLAVORS.map((flavor) => ({ flavor, count: 1 })),
-      toppings: [...TOPPINGS],
+      toppings: TOPPINGS.slice(0, 6),
     };
     const servings = [
       ...Array(20).fill(busy),

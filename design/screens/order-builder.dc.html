@@ -134,7 +134,7 @@ button:disabled{cursor:default}
 <span style="font: 400 13px/1.4 var(--font-sans); color: var(--text-muted)">Optional</span>
 </div>
 <div class="ob-toppings" style="display: grid; gap: 8px">
-<sc-for list="{{ toppings }}" as="t" hint-placeholder-count="6">
+<sc-for list="{{ toppings }}" as="t" hint-placeholder-count="8">
 <sc-if value="{{ t.isSelected }}" hint-placeholder-val="{{ false }}">
 <button type="button" aria-pressed="true" onClick="{{ t.pick }}" style="min-height: 48px; padding: 6px 10px; border-radius: 10px; border: 2px solid var(--olive-800); background: var(--olive-700); color: var(--cream-100); font: 500 14px/1.25 var(--font-sans); display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M20 6 9 17l-5-5"></path></svg>{{ t.label }}</button>
 </sc-if>
@@ -214,7 +214,7 @@ button:disabled{cursor:default}
 <script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
 var FLAVORS = ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'];
 var CONTAINERS = ['Cup', 'Cake Cone', 'Sugar Cone'];
-var TOPPINGS = ['Whipped cream', 'Gummy Bears', 'Caramel Sauce', 'Chocolate Sauce', 'Sliced Almonds', 'Maraschino Cherries'];
+var TOPPINGS = ['Whipped cream', 'Gummy Bears', 'Caramel Sauce', 'Chocolate Sauce', 'Sliced Almonds', 'Maraschino Cherries', 'Rainbow Sprinkles', 'Chocolate Sprinkles'];
 var MAX_SCOOPS = 5;
 var MAX_SERVINGS = 30;
 var ADJ = ['Happy', 'Sunny', 'Jolly', 'Cheery', 'Lucky', 'Cozy', 'Breezy', 'Bouncy', 'Friendly', 'Merry', 'Peppy', 'Snazzy'];

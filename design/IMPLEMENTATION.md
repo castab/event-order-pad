@@ -46,8 +46,8 @@ Soft serve is not offered for now.
   scoop is removed.
 - **Container:** exactly one of Cup, Cake Cone, Sugar Cone. None is preselected.
 - **Toppings:** optional, any combination of Whipped cream, Gummy Bears, Caramel Sauce,
-  Chocolate Sauce, Sliced Almonds, Maraschino Cherries. With none selected the ticket prints
-  "No toppings".
+  Chocolate Sauce, Sliced Almonds, Maraschino Cherries, Rainbow Sprinkles, and Chocolate
+  Sprinkles. With none selected the ticket prints "No toppings".
 
 **Orders.**
 
@@ -93,7 +93,7 @@ entry point and keep everything frozen.
 export const FLAVORS = ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'] as const;
 export const CONTAINERS = ['Cup', 'Cake Cone', 'Sugar Cone'] as const;
 export const TOPPINGS = ['Whipped cream', 'Gummy Bears', 'Caramel Sauce', 'Chocolate Sauce',
-  'Sliced Almonds', 'Maraschino Cherries'] as const;
+  'Sliced Almonds', 'Maraschino Cherries', 'Rainbow Sprinkles', 'Chocolate Sprinkles'] as const;
 
 export interface Serving {
   readonly flavors: readonly { flavor: Flavor; count: number }[]; // menu order, counts ≥1, sum 1–5

@@ -45,7 +45,7 @@ Both production outputs have been rebuilt. The existing station service was rest
 
 ## Milestone 2 — order builder (2026-10-11)
 
-Implemented explicit flavor/container selection, any combination of six toppings, separately configured servings with add/edit/remove, optional names and stable two-word fallback labels. New orders and their first intents commit atomically; serialized draft writes restore unfinished editor selections independently from the latest submitted receipt. Reprints preserve the original ticket while a new draft is being built. Existing IndexedDB version/records and both real printer routes are retained.
+Implemented explicit flavor/container selection, any combination of eight toppings, separately configured servings with add/edit/remove, optional names and stable two-word fallback labels. New orders and their first intents commit atomically; serialized draft writes restore unfinished editor selections independently from the latest submitted receipt. Reprints preserve the original ticket while a new draft is being built. Existing IndexedDB version/records and both real printer routes are retained.
 
 | Check                 | Result                                                            |
 | --------------------- | ----------------------------------------------------------------- |

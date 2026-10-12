@@ -14,6 +14,8 @@ export const TOPPINGS = [
   'Chocolate Sauce',
   'Sliced Almonds',
   'Maraschino Cherries',
+  'Rainbow Sprinkles',
+  'Chocolate Sprinkles',
 ] as const;
 export type Flavor = (typeof FLAVORS)[number];
 export type Container = (typeof CONTAINERS)[number];
