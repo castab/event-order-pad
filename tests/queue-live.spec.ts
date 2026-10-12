@@ -209,7 +209,7 @@ test('tracking off hides the queue and keeps prints, reprints and drafts working
   await expect(queue.getByRole('article')).toHaveCount(0);
   await page.getByRole('button', { name: 'Order tools', exact: true }).click();
   await expect(
-    page.getByRole('link', { name: 'Build queue', exact: true }),
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0);
   await page
     .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
@@ -240,7 +240,7 @@ test('tracking off hides the queue and keeps prints, reprints and drafts working
   await queue.reload();
   await page.getByRole('button', { name: 'Order tools', exact: true }).click();
   await expect(
-    page.getByRole('link', { name: 'Build queue', exact: true }),
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toBeVisible();
   await expect(
     queue.getByRole('button', { name: 'Undo done for #0043', exact: true }),
@@ -280,14 +280,14 @@ test('open browsers stop their stream and publication retries after the service 
   await expect.poll(service.activeStreams).toBe(1);
   await page.getByRole('button', { name: 'Order tools', exact: true }).click();
   await expect(
-    page.getByRole('link', { name: 'Build queue', exact: true }),
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toBeVisible();
   await service.restart(false);
   await expect(
     queue.getByRole('heading', { name: 'Order tracking is turned off' }),
   ).toBeVisible({ timeout: 10000 });
   await expect(
-    page.getByRole('link', { name: 'Build queue', exact: true }),
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0, { timeout: 10000 });
   await expect.poll(service.activeStreams).toBe(0);
   const queueRequests: string[] = [];

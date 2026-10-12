@@ -1504,7 +1504,7 @@ test('unavailable tracking settings do not block printing or reprints', async ({
   );
   await openTools(page);
   await expect(
-    page.getByRole('link', { name: 'Build queue', exact: true }),
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0);
   expect(submitted).toHaveLength(2);
   expect(publications).toBe(0);

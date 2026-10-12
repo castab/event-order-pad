@@ -194,7 +194,7 @@
 </script>
 
 <svelte:head
-  ><title>Build queue · Order Pad</title><meta
+  ><title>Now Scooping · Order Pad</title><meta
     name="description"
     content="Track open ice cream orders and mark completed orders done."
   /></svelte:head
@@ -286,7 +286,7 @@
           height="44"
         /></a
       ><span class="header-rule" aria-hidden="true"></span>
-      <h1>Build queue</h1>
+      <h1>Now Scooping</h1>
     </div>
     {#if trackingEnabled !== false}<dl
         class="queue-metrics"

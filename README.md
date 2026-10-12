@@ -88,7 +88,7 @@ npm run start:printer
 
 The value must be exactly `true` or `false`. Restart the service and reload open
 Order Pad tabs after changing it; no rebuild is needed just to change the setting.
-With tracking off, the builder hides **Build queue**, `/queue/` shows a disabled
+With tracking off, the builder hides **Now Scooping**, `/queue/` shows a disabled
 message, and queue APIs and SSE are disabled. Ordinary printing, reprints, draft
 recovery and numeric references continue working. Existing server order history
 and the print-attempt journal stay intact.
@@ -102,7 +102,7 @@ setting on its next tracking check.
 
 ## Shared build queue
 
-Open **Build queue** in Order tools, or open `/queue/` at the same Mint HTTPS
+Open **Now Scooping** in Order tools, or open `/queue/` at the same Mint HTTPS
 origin on the build-station tablet. The queue reads everything from the Linux
 printer service (`GET /api/orders` and its SSE stream), so it needs that service
 running; a static-only host cannot show it. The service pushes an initial queue snapshot

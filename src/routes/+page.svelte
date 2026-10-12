@@ -819,7 +819,7 @@
           >
           <div id="order-tools-panel" hidden={!toolsOpen}>
             {#if trackingEnabled}<a class="queue-link" href="/queue/"
-                >Build queue</a
+                >Now Scooping</a
               >{/if}
             {#if trackingEnabled && queueNotice}<p
                 role="status"
