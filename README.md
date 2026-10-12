@@ -68,7 +68,7 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Structured tickets use schema 2 and IndexedDB version 2; the one-time v1 reset is described below.
 - `src/routes/+page.svelte`: token-styled serving builder, toast and recovery feedback, collapsed Order tools, and direct USB submissions/reprints.
 - `src/lib/orders/` and `printer-service/orders.ts`: shared order records, disk persistence, live SSE snapshots, and a durable publication outbox; order retries cannot resend printing.
-- `src/routes/queue/`: oldest-first build cards, age badges, completion and Undo.
+- `src/routes/queue/` and `src/lib/orders/pack.ts`: oldest-first build cards packed into measured columns, chip-based serving details, age badges, completion and Undo.
 - `src/service-worker.ts`: versioned same-origin shell caching (network-first pages with a cached offline fallback); no USB send/result caching or forced mid-job updates.
 - `src/lib/app-update.ts`: checks for a new deployment and applies it at a safe moment.
 
@@ -103,16 +103,28 @@ setting on its next tracking check.
 ## Shared build queue
 
 Open **Build queue** in Order tools, or open `/queue/` at the same Mint HTTPS
-origin on the build-station tablet. The service pushes an initial queue snapshot
+origin on the build-station tablet. The queue reads everything from the Linux
+printer service (`GET /api/orders` and its SSE stream), so it needs that service
+running; a static-only host cannot show it. The service pushes an initial queue snapshot
 and updates after every saved order change over Server-Sent Events (SSE). The
 queue sorts open orders by their first submission and shows serving totals and wait ages.
 Wait badges use moss below five minutes, olive from five to ten, and rust at ten
 minutes or more. **Mark #… done** takes one tap; the latest eight completed orders
 have **Undo**. Ages refresh at least every 30 seconds. Connection errors preserve
-the last received list and expose a refresh action; a failed initial load does not
+the last received list and show a **Reconnecting…** notice with a refresh action; a
+failed initial load does not
 claim the queue is empty. Mark done and Undo remain usable while live updates are
 disconnected if their normal API requests still succeed. Action failures remain
 visible until a successful action or manual refresh; live events do not hide them.
+
+Each serving lists its flavors as rounded chips with a count bubble and its
+toppings as separate outlined chips with a `+` icon; a serving without toppings
+shows a dashed **No toppings** chip. Cards are packed into 1, 2, 3 or 4 columns
+(below 640, 1000 and 1500 pixels, otherwise four): each card, oldest first, goes
+into the currently shortest column using its measured height, leftmost on ties,
+so short cards leave no gaps. Cards re-pack only when the set of open orders or
+the column count changes, never on the 30-second age refresh. Each card carries
+`aria-posinset`/`aria-setsize` so assistive technology reads them in age order.
 
 The browser reconnects automatically, with a three-second server-advertised delay.
 Every connection receives a complete current snapshot, including after a service

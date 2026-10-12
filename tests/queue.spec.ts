@@ -1,4 +1,10 @@
-import { test, expect, type BrowserContext } from '@playwright/test';
+import {
+  test,
+  expect,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from '@playwright/test';
 import {
   parseTicket,
   sampleTicket,
@@ -319,21 +325,22 @@ test('queue matches the reference: oldest-first cards, totals, menu details, loc
   await backend(context, fixtures());
   await page.clock.install({ time: new Date(now) });
   await page.goto('/queue/');
-  const cards = page.getByRole('article');
-  await expect(cards).toHaveCount(4);
-  await expect(cards.nth(0)).toHaveAttribute(
+  const card = (reference: string) =>
+    page.getByRole('article', { name: new RegExp(`^Order #${reference} `) });
+  await expect(page.getByRole('article')).toHaveCount(4);
+  await expect(card('0040')).toHaveAttribute(
     'aria-label',
     'Order #0040 · Happy Sprinkle',
   );
-  await expect(cards.nth(1)).toHaveAttribute(
+  await expect(card('0041')).toHaveAttribute(
     'aria-label',
     'Order #0041 · Dana',
   );
-  await expect(cards.nth(2)).toHaveAttribute(
+  await expect(card('0042')).toHaveAttribute(
     'aria-label',
     'Order #0042 · Lucky Waffle',
   );
-  await expect(cards.nth(3)).toHaveAttribute(
+  await expect(card('0043')).toHaveAttribute(
     'aria-label',
     'Order #0043 · Maria',
   );
@@ -341,24 +348,227 @@ test('queue matches the reference: oldest-first cards, totals, menu details, loc
   await expect(totals).toContainText('4');
   await expect(totals).toContainText('10');
   await expect(totals).toContainText('12m');
-  await expect(cards.nth(0).getByLabel('Wait 12 min')).toHaveClass(/rust/);
-  await expect(cards.nth(1).getByLabel('Wait 7 min')).toHaveClass(/olive/);
-  await expect(cards.nth(2).getByLabel('Wait 4 min')).toHaveClass(/moss/);
-  await expect(cards.nth(0).locator('time')).toHaveText('11:48 AM');
-  await expect(cards.nth(3)).toContainText('3 scoops · Sugar Cone');
-  await expect(cards.nth(3)).toContainText('1× Strawberry, 2× Chocolate Chip');
-  await expect(cards.nth(3)).toContainText('Whipped cream, Chocolate Sauce');
-  await expect(cards.nth(3)).toContainText('No toppings');
+  await expect(card('0040').getByLabel('Wait 12 min')).toHaveClass(/rust/);
+  await expect(card('0041').getByLabel('Wait 7 min')).toHaveClass(/olive/);
+  await expect(card('0042').getByLabel('Wait 4 min')).toHaveClass(/moss/);
+  await expect(card('0040').locator('time')).toHaveText('11:48 AM');
+  await expect(card('0043')).toContainText('3 scoops · Sugar Cone');
   await expect(
     page.getByRole('button', { name: 'Undo done for #0039' }),
   ).toBeVisible();
-  const bounds = await cards.evaluateAll((elements) =>
-    elements.map((element) => element.getBoundingClientRect().x),
-  );
-  expect(bounds[0]).toBeLessThan(bounds[1]);
-  expect(bounds[1]).toBeLessThan(bounds[2]);
-  expect(bounds[3]).toBe(bounds[0]);
+  expectPacked(await placed(page), 3);
   await page.screenshot({ path: testInfo.outputPath('build-queue.png') });
+});
+
+test('flavors and toppings are separate chips, and servings without toppings say so', async ({
+  page,
+  context,
+}) => {
+  await backend(context, fixtures());
+  await page.goto('/queue/');
+  const maria = page.getByRole('article', { name: /^Order #0043 / });
+  const servings = maria.getByRole('listitem').filter({
+    has: page.getByRole('list', { name: 'Flavors' }),
+  });
+  await expect(servings).toHaveCount(3);
+  const first = servings.nth(0);
+  await expect(first).toContainText('3 scoops · Sugar Cone');
+  const flavors = first.getByRole('list', { name: 'Flavors' });
+  await expect(flavors.getByRole('listitem')).toHaveText([
+    '1 Strawberry',
+    '2 Chocolate Chip',
+  ]);
+  const toppings = first.getByRole('list', { name: 'Toppings' });
+  await expect(toppings.getByRole('listitem')).toHaveText([
+    'Whipped cream',
+    'Chocolate Sauce',
+  ]);
+  // Never joined into one comma-separated line.
+  await expect(first).not.toContainText('Whipped cream, Chocolate Sauce');
+  await expect(first).not.toContainText('Strawberry, ');
+  // The two chip families use different shapes and never wrap inside a chip.
+  const shape = async (chip: Locator) =>
+    chip.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        radius: style.borderTopLeftRadius,
+        border: style.borderTopWidth,
+        borderStyle: style.borderTopStyle,
+        nowrap: [element, ...element.querySelectorAll('*')].every(
+          (node) => getComputedStyle(node).whiteSpace === 'nowrap',
+        ),
+        hasIcon: !!element.querySelector('svg[aria-hidden="true"]'),
+      };
+    });
+  const flavorChip = await shape(flavors.getByRole('listitem').first());
+  const toppingChip = await shape(toppings.getByRole('listitem').first());
+  expect(flavorChip.radius).not.toBe(toppingChip.radius);
+  expect(toppingChip.radius).toBe('6px');
+  expect(toppingChip.borderStyle).toBe('solid');
+  expect(toppingChip.border).not.toBe('0px');
+  expect(toppingChip.hasIcon).toBe(true);
+  expect(flavorChip.hasIcon).toBe(false);
+  expect(flavorChip.nowrap && toppingChip.nowrap).toBe(true);
+
+  // Serving 2 has no toppings: one dashed, muted chip and no Toppings list.
+  const plain = servings.nth(1);
+  await expect(plain.getByRole('list', { name: 'Toppings' })).toHaveCount(0);
+  const none = plain.getByText('No toppings', { exact: true });
+  await expect(none).toHaveCount(1);
+  expect(await shape(none)).toMatchObject({ borderStyle: 'dashed' });
+  await expect(maria.getByText('No toppings', { exact: true })).toHaveCount(1);
+});
+
+type Placed = {
+  position: number;
+  x: number;
+  y: number;
+  bottom: number;
+  width: number;
+};
+
+/** Open cards with their on-screen boxes, in age order (aria-posinset). */
+async function placed(page: Page): Promise<Placed[]> {
+  const cards = await page.getByRole('article').evaluateAll((elements) =>
+    elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      return {
+        position: Number(element.getAttribute('aria-posinset')),
+        x: box.x,
+        y: box.y,
+        bottom: box.bottom,
+        width: box.width,
+      };
+    }),
+  );
+  return cards.sort((a, b) => a.position - b.position);
+}
+
+const columnsUsed = async (page: Page) =>
+  new Set((await placed(page)).map((card) => Math.round(card.x))).size;
+
+/**
+ * Cards in age order must each sit directly under the previous card of their
+ * column, in the column that was shortest when they were placed (leftmost on ties).
+ */
+function expectPacked(cards: Placed[], columns: number) {
+  const left = Math.min(...cards.map((card) => card.x));
+  const step = cards[0].width + 20;
+  const top = Math.min(...cards.map((card) => card.y));
+  const ends = Array.from({ length: columns }, () => top);
+  cards.forEach((card, index) => {
+    const column = Math.round((card.x - left) / step);
+    const shortest = Math.min(...ends);
+    const expected = ends.findIndex((end) => end <= shortest + 1);
+    expect(column, `card ${index + 1} column`).toBe(expected);
+    expect(card.y, `card ${index + 1} top`).toBeCloseTo(ends[column], 0);
+    ends[column] = card.bottom + 20;
+  });
+}
+
+const draw = (
+  reference: number,
+  minutesAgo: number,
+  servingCount: number,
+): QueueOrder => {
+  const submitted = before(minutesAgo);
+  return parseOrder({
+    ticket: parseTicket({
+      schema: 2,
+      id: `p${reference}`,
+      createdAt: submitted,
+      reference: String(reference).padStart(4, '0'),
+      customerName: `Guest ${reference}`,
+      servings: Array.from({ length: servingCount }, (_, index) =>
+        serving(
+          index % 2 ? 'Vanilla' : 'Chocolate',
+          1 + (index % 3),
+          'Cup',
+          index % 2 ? ['Gummy Bears', 'Caramel Sauce'] : [],
+        ),
+      ),
+    }),
+    submittedAt: submitted,
+    status: 'open',
+  });
+};
+
+test('cards pack into the shortest column in age order at 3, 2, 1 and 4 columns', async ({
+  page,
+  context,
+}) => {
+  // Oldest first; deliberately uneven heights so round-robin would leave gaps.
+  await backend(context, [
+    draw(1, 30, 4),
+    draw(2, 25, 1),
+    draw(3, 20, 1),
+    draw(4, 15, 1),
+    draw(5, 10, 3),
+    draw(6, 5, 1),
+    draw(7, 2, 2),
+  ]);
+  await page.goto('/queue/');
+  await expect(page.getByRole('article')).toHaveCount(7);
+  let cards = await placed(page);
+  expectPacked(cards, 3);
+  // The fourth card goes under a short card, not under the 4-serving one.
+  expect(cards[3].x).not.toBe(cards[0].x);
+  expect(await columnsUsed(page)).toBe(3);
+
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await expect.poll(() => columnsUsed(page)).toBe(2);
+  expectPacked(await placed(page), 2);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => columnsUsed(page)).toBe(1);
+  cards = await placed(page);
+  expectPacked(cards, 1);
+  cards.slice(1).forEach((card, index) => {
+    expect(card.y).toBeGreaterThan(cards[index].y);
+  });
+
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await expect.poll(() => columnsUsed(page)).toBe(4);
+  expectPacked(await placed(page), 4);
+});
+
+test('arrivals and completions re-pack, but the age refresh never moves cards', async ({
+  page,
+  context,
+}) => {
+  const api = await backend(context, [
+    draw(1, 12, 3),
+    draw(2, 9, 1),
+    draw(3, 6, 2),
+  ]);
+  await page.clock.install({ time: new Date(now) });
+  await page.goto('/queue/');
+  await expect(page.getByRole('article')).toHaveCount(3);
+  const initial = await placed(page);
+  expectPacked(initial, 3);
+
+  // Ages cross a wait threshold; nothing may move.
+  await page.clock.fastForward(5 * 60000);
+  await expect(
+    page
+      .getByRole('article', { name: /^Order #0002 / })
+      .getByLabel('Wait 14 min'),
+  ).toHaveClass(/rust/);
+  expect(await placed(page)).toEqual(initial);
+
+  // A new order lands in the shortest column.
+  api.upsert(draw(4, 0, 1).ticket);
+  await expect(page.getByRole('article')).toHaveCount(4);
+  expectPacked(await placed(page), 3);
+
+  // Completing the oldest order re-packs the rest, still oldest first.
+  await page
+    .getByRole('button', { name: 'Mark #0001 done', exact: true })
+    .click();
+  await expect(page.getByRole('article')).toHaveCount(3);
+  const after = await placed(page);
+  expect(after.map((card) => card.position)).toEqual([1, 2, 3]);
+  expectPacked(after, 3);
 });
 
 test('done is a single action, Undo restores original ordering and survives a reload', async ({
@@ -515,6 +725,8 @@ test('disconnected queue keeps API actions usable and reconnects to catch up wit
   await expect(page.getByRole('article')).toHaveCount(4);
   api.failList(true);
   await expect(page.getByRole('alert')).toContainText('disconnected');
+  await expect(page.getByRole('alert')).toContainText('Reconnecting…');
+  await expect(page.getByRole('article')).toHaveCount(4);
   await page
     .getByRole('button', { name: 'Mark #0040 done', exact: true })
     .click();

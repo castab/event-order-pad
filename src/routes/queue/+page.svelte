@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { changeOrderStatus } from '$lib/orders/client';
+  import { columnCount, packColumns } from '$lib/orders/pack';
   import {
     sortOrders,
     waitMinutes,
@@ -33,6 +34,83 @@
     open.reduce((n, o) => n + o.ticket.servings.length, 0),
   );
   const oldest = $derived(open.length ? waitMinutes(open[0], now) : 0);
+  const openIds = $derived(open.map((o) => o.ticket.id));
+  const openById = $derived(new Map(open.map((o) => [o.ticket.id, o])));
+  const position = $derived(new Map(open.map((o, i) => [o.ticket.id, i + 1])));
+
+  // Packed columns: cards go oldest first into the shortest column, using
+  // measured heights. Cards that have no height yet are measured in a hidden
+  // row with the same column widths; the visible stacks only change when the
+  // set of open orders or the column count changes, never on the age refresh.
+  let contentWidth = $state(0);
+  const columnTotal = $derived(columnCount(contentWidth));
+  let layout = $state<{ key: string; columns: readonly (readonly string[])[] }>(
+    { key: '', columns: [] },
+  );
+  let measuring = $state<{
+    key: string;
+    columns: number;
+    ids: string[];
+    missing: string[];
+  }>();
+  const stacks = $derived(
+    layout.columns.map((ids) => ids.flatMap((id) => openById.get(id) ?? [])),
+  );
+  const heights = new Map<string, number>();
+  let measuredWidth = 0;
+  let planToken = 0;
+
+  function commit(key: string, columns: number, ids: readonly string[]) {
+    layout = {
+      key,
+      columns: packColumns(
+        ids.map((id) => heights.get(id) ?? 0),
+        columns,
+      ).map((stack) => stack.map((index) => ids[index])),
+    };
+  }
+  function plan(key: string, columns: number, ids: string[]) {
+    if (key === layout.key || measuring?.key === key) return;
+    if (measuredWidth !== contentWidth) {
+      heights.clear();
+      measuredWidth = contentWidth;
+    }
+    for (const id of [...heights.keys()])
+      if (!ids.includes(id)) heights.delete(id);
+    const missing = ids.filter((id) => !heights.has(id));
+    const token = ++planToken;
+    if (!missing.length) {
+      measuring = undefined;
+      commit(key, columns, ids);
+      return;
+    }
+    const start = () => {
+      if (token === planToken && !stopped)
+        measuring = { key, columns, ids, missing };
+    };
+    // Measure with the real font: wait for it, but never longer than a second.
+    if (document.fonts?.status === 'loading')
+      void Promise.race([
+        document.fonts.ready,
+        new Promise((resolve) => setTimeout(resolve, 1000)),
+      ]).then(start);
+    else start();
+  }
+  function measured(id: string, height: number) {
+    const current = measuring;
+    if (!current?.missing.includes(id)) return;
+    heights.set(id, height);
+    if (current.missing.every((missing) => heights.has(missing))) {
+      measuring = undefined;
+      commit(current.key, current.columns, current.ids);
+    }
+  }
+  $effect(() => {
+    const columns = columnTotal;
+    const ids = openIds;
+    if (!contentWidth) return;
+    untrack(() => plan(JSON.stringify([columns, ids]), columns, ids));
+  });
   const clock = (date: string) =>
     new Intl.DateTimeFormat('en-US', {
       hour: 'numeric',
@@ -122,6 +200,80 @@
   /></svelte:head
 >
 
+{#snippet card(order: QueueOrder)}
+  {@const ticket = order.ticket}
+  {@const age = waitMinutes(order, now)}
+  <article
+    class="queue-card"
+    aria-label={`Order #${ticket.reference} · ${ticket.displayName}`}
+    aria-posinset={position.get(ticket.id)}
+    aria-setsize={open.length}
+  >
+    <header>
+      <div class="order-identity">
+        <h2>#{ticket.reference}</h2>
+        <p>{ticket.displayName}</p>
+      </div>
+      <div class="order-wait">
+        <span
+          class="wait-badge"
+          class:moss={waitTone(age) === 'moss'}
+          class:olive={waitTone(age) === 'olive'}
+          class:rust={waitTone(age) === 'rust'}
+          aria-label={`Wait ${waitLabel(age)}`}>{waitLabel(age)}</span
+        ><time datetime={order.submittedAt}>{clock(order.submittedAt)}</time>
+      </div>
+    </header>
+    <ol class="queue-servings">
+      {#each ticket.servings as serving, index}<li>
+          <span class="queue-serving-number">{index + 1}</span>
+          <div class="serving-detail">
+            <strong
+              >{plural(totalScoops(serving), 'scoop')} · {serving.container}</strong
+            >
+            <ul class="chips" aria-label="Flavors">
+              {#each serving.flavors as portion (portion.flavor)}
+                <li class="chip flavor-chip">
+                  <span class="chip-count">{portion.count}</span>
+                  <span class="chip-name">{portion.flavor}</span>
+                </li>
+              {/each}
+            </ul>
+            {#if serving.toppings.length}
+              <ul class="chips" aria-label="Toppings">
+                {#each serving.toppings as topping (topping)}
+                  <li class="chip topping-chip">
+                    <svg
+                      aria-hidden="true"
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg
+                    >
+                    <span class="chip-name">{topping}</span>
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <span class="chip no-toppings">No toppings</span>
+            {/if}
+          </div>
+        </li>{/each}
+    </ol>
+    <div class="done-action">
+      <button
+        class="primary"
+        onclick={() => update(ticket.id, 'done')}
+        disabled={pending.has(ticket.id)}
+        aria-busy={pending.has(ticket.id)}>Mark #{ticket.reference} done</button
+      >
+    </div>
+  </article>
+{/snippet}
+
 <div class="queue-app">
   <header class="queue-header">
     <div class="queue-brand">
@@ -154,7 +306,7 @@
         </div>
       </dl>{/if}
   </header>
-  <main class="queue-content">
+  <main class="queue-content" bind:clientWidth={contentWidth}>
     {#if trackingEnabled === false}
       <section class="queue-empty" aria-label="Order tracking disabled">
         <h2>Order tracking is turned off</h2>
@@ -164,7 +316,11 @@
     {/if}
     {#if error}<div class="queue-error" role="alert">
         <div>
-          <strong>Queue needs attention</strong>
+          <strong
+            >{connectionError && !actionError && loaded
+              ? 'Reconnecting…'
+              : 'Queue needs attention'}</strong
+          >
           <p>{error}</p>
           {#if lastUpdated}<p>
               Showing the last available orders · updated {clock(lastUpdated)}
@@ -189,60 +345,30 @@
         <h2>All caught up</h2>
         <p>New orders show up here the moment they print.</p>
       </div>{/if}
-    <div class="queue-grid" aria-label="Open orders">
-      {#each open as order (order.ticket.id)}
-        {@const ticket = order.ticket}
-        {@const age = waitMinutes(order, now)}
-        <article
-          class="queue-card"
-          aria-label={`Order #${ticket.reference} · ${ticket.displayName}`}
-        >
-          <header>
-            <div class="order-identity">
-              <h2>#{ticket.reference}</h2>
-              <p>{ticket.displayName}</p>
-            </div>
-            <div class="order-wait">
-              <span
-                class="wait-badge"
-                class:moss={waitTone(age) === 'moss'}
-                class:olive={waitTone(age) === 'olive'}
-                class:rust={waitTone(age) === 'rust'}
-                aria-label={`Wait ${waitLabel(age)}`}>{waitLabel(age)}</span
-              ><time datetime={order.submittedAt}
-                >{clock(order.submittedAt)}</time
-              >
-            </div>
-          </header>
-          <ol class="queue-servings">
-            {#each ticket.servings as serving, index}<li>
-                <span class="queue-serving-number">{index + 1}</span>
-                <div>
-                  <strong
-                    >{plural(totalScoops(serving), 'scoop')} · {serving.container}</strong
-                  >
-                  <p class="flavor-mix">
-                    {serving.flavors
-                      .map((portion) => `${portion.count}× ${portion.flavor}`)
-                      .join(', ')}
-                  </p>
-                  <p class="serving-toppings">
-                    {serving.toppings.join(', ') || 'No toppings'}
-                  </p>
-                </div>
-              </li>{/each}
-          </ol>
-          <div class="done-action">
-            <button
-              class="primary"
-              onclick={() => update(ticket.id, 'done')}
-              disabled={pending.has(ticket.id)}
-              aria-busy={pending.has(ticket.id)}
-              >Mark #{ticket.reference} done</button
-            >
-          </div>
-        </article>
+    <div class="queue-columns" role="group" aria-label="Open orders">
+      {#each stacks as stack, column (column)}
+        <div class="queue-column">
+          {#each stack as order (order.ticket.id)}{@render card(order)}{/each}
+        </div>
       {/each}
+      {#if measuring}<div class="queue-measure" aria-hidden="true" inert>
+          {#each { length: measuring.columns } as _, column}
+            <div class="queue-column">
+              {#if column === 0}
+                {#each measuring.missing as id (id)}
+                  {@const order = openById.get(id)}
+                  {#if order}<div
+                      bind:clientHeight={
+                        null, (height) => measured(id, height ?? 0)
+                      }
+                    >
+                      {@render card(order)}
+                    </div>{/if}
+                {/each}
+              {/if}
+            </div>
+          {/each}
+        </div>{/if}
     </div>
   </main>
   {#if done.length}<section class="recently-done" aria-labelledby="done-title">
@@ -337,11 +463,31 @@
     overflow-y: auto;
     padding: 24px 28px;
   }
-  .queue-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .queue-columns {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
     gap: 20px;
-    align-items: start;
+  }
+  .queue-column {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .queue-measure {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
   }
   .queue-card {
     border-radius: var(--radius-card);
@@ -414,8 +560,8 @@
     display: flex;
     flex-direction: column;
   }
-  .queue-servings li {
-    padding: 10px 0;
+  .queue-servings > li {
+    padding: 12px 0;
     display: flex;
     gap: 12px;
     border-bottom: 1px dashed var(--border-soft);
@@ -432,25 +578,86 @@
     display: grid;
     place-items: center;
   }
-  .queue-servings li > div {
+  .serving-detail {
+    flex: 1;
     min-width: 0;
-    overflow-wrap: anywhere;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
-  .queue-servings strong {
+  .serving-detail strong {
     font-size: 15px;
     font-weight: 600;
-    line-height: 1.35;
+    line-height: 26px;
     color: var(--text-heading);
   }
-  .queue-servings p {
-    margin: 2px 0 0;
-    line-height: 1.45;
+  .chips {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
-  .flavor-mix {
-    font-size: 14px;
+  .chip {
+    height: 32px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
   }
-  .serving-toppings {
+  .chip-name {
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .flavor-chip {
+    padding: 0 12px 0 4px;
+    gap: 8px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-page);
+  }
+  .chip-count {
+    min-width: 24px;
+    height: 24px;
+    box-sizing: border-box;
+    padding: 0 6px;
+    border-radius: var(--radius-pill);
+    background: var(--olive-900);
+    color: var(--cream-100);
     font-size: 13px;
+    font-weight: 700;
+    line-height: 24px;
+    text-align: center;
+  }
+  .flavor-chip .chip-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-heading);
+  }
+  .topping-chip {
+    padding: 0 12px 0 8px;
+    gap: 6px;
+    border-radius: 6px;
+    border: 1.5px solid var(--olive-700);
+    background: var(--surface-card);
+    color: var(--olive-700);
+  }
+  .topping-chip svg {
+    flex-shrink: 0;
+  }
+  .topping-chip .chip-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--olive-900);
+  }
+  .no-toppings {
+    align-self: flex-start;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1.5px dashed var(--paper-300);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
     color: var(--text-muted);
   }
   .done-action {
@@ -564,9 +771,6 @@
       flex-wrap: wrap;
       gap: 20px;
     }
-    .queue-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
   @media (max-width: 600px) {
     .queue-header {
@@ -590,9 +794,6 @@
     }
     .queue-content {
       padding: 16px;
-    }
-    .queue-grid {
-      grid-template-columns: minmax(0, 1fr);
     }
     .recently-done {
       padding-left: 16px;
