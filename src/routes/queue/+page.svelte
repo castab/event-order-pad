@@ -126,7 +126,13 @@
   <header class="queue-header">
     <div class="queue-brand">
       <a href="/" aria-label="Order builder"
-        ><img src="/icon.svg" alt="Order Pad" width="36" height="36" /></a
+        ><img
+          class="brand-logo"
+          src="/logo.svg"
+          alt="Fiona's Ice Cream"
+          width="83"
+          height="44"
+        /></a
       ><span class="header-rule" aria-hidden="true"></span>
       <h1>Build queue</h1>
     </div>
@@ -280,13 +286,10 @@
     gap: 20px;
   }
   .queue-brand a {
-    width: 44px;
+    flex-shrink: 0;
     height: 44px;
     display: grid;
     place-items: center;
-  }
-  .queue-brand img {
-    border-radius: 8px;
   }
   .header-rule {
     width: 1px;

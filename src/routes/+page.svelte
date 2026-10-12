@@ -486,11 +486,11 @@
 <div class="builder-app">
   <header class="builder-header">
     <img
-      class="app-icon"
-      src="/icon.svg"
-      alt="Order Pad"
-      width="36"
-      height="36"
+      class="brand-logo"
+      src="/logo.svg"
+      alt="Fiona's Ice Cream"
+      width="83"
+      height="44"
     />
     <div class="header-order">
       <span>Order #{draft?.reference ?? '…'}</span>

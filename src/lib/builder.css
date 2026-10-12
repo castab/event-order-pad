@@ -71,8 +71,11 @@ button:disabled {
   background: var(--surface-inverse);
   color: var(--text-on-inverse);
 }
-.app-icon {
-  border-radius: 8px;
+.brand-logo {
+  display: block;
+  width: auto;
+  height: 44px;
+  flex-shrink: 0;
 }
 .header-order {
   display: flex;
