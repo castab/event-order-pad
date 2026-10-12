@@ -69,7 +69,7 @@ The Mint URL is a different storage origin from the Windows URL. Old browser tic
 - Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
 - The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Simulation/PassPRNT adapters remain available for compatibility tests. Phase 1 resets v1 browser records once, as documented in README; the printer-service journal is unchanged.
 
-Optional variables: `ORDER_PAD_PORT` (4174), `ORDER_PAD_DATA` (`.print-data` relative to repository), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). Keep paths/environment stable across restarts.
+Optional variables: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to disable order tracking), `ORDER_PAD_PORT` (4174), `ORDER_PAD_DATA` (`.print-data` relative to repository), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). Keep paths/environment stable across restarts.
 
 The initial service is foreground-only. Tailscale `--bg` persists the proxy, not Node. After smoke testing, configure systemd with the actual Node path, repository working directory and these variables. Disable host sleep for event use.
 
@@ -94,7 +94,18 @@ The queue now requires the SSE endpoint, so deploy both builds and restart the
 service together. No journal migration or new system tooling is required. Keep
 `.print-data/` intact. The old GET order-list endpoints remain compatible.
 
-After restarting, verify streaming through the existing Mint HTTPS origin:
+To run without order tracking, export `ORDER_PAD_TRACKING_ENABLED=false` before
+starting the service (including when using `./start-printer.local`). Restart and
+reload open browser tabs after changing the setting. Ordinary printing and
+recovery continue working; saved server orders and print attempts remain intact.
+The builder hides the queue link and `/queue/` shows a disabled message. The browser
+discards pending queue publications when it learns tracking is off; orders printed
+while disabled are not backfilled when tracking resumes. Use `true` or unset the
+variable to re-enable tracking. Read the uncached `/api/features` endpoint to verify
+the running setting; `/api/orders` and its SSE endpoint return 404 with
+`ORDER_TRACKING_DISABLED` while disabled.
+
+With tracking enabled, verify streaming through the existing Mint HTTPS origin:
 
 ```sh
 curl --no-buffer --header 'Accept: text/event-stream' 'https://YOUR-MINT-HOST.YOUR-TAILNET.ts.net/api/orders/events'

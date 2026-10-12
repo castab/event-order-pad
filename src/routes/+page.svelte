@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { fetchTrackingEnabled } from '$lib/orders/features';
   import { OrderPublisher } from '$lib/orders/publisher';
   import { formatTicket } from '$lib/tickets/format';
   import { blankNameLabel, cleanCustomerName } from '$lib/tickets/ticket';
@@ -30,6 +31,11 @@
   } from '$lib/printing/adapters/linux-cups';
 
   let queueNotice = $state('');
+  let trackingEnabled = $state(false);
+  let mounted = false;
+  let store: IndexedDbTicketStore | undefined;
+  let featuresCheck: Promise<void> | undefined;
+  let featuresController: AbortController | undefined;
   let publisher: OrderPublisher | undefined;
   let toolsOpen = $state(false);
   let toast = $state<{
@@ -152,11 +158,9 @@
     window.addEventListener('online', updateOnline);
     window.addEventListener('offline', updateOnline);
     let cancelled = false;
+    mounted = true;
     try {
-      const store = new IndexedDbTicketStore();
-      publisher = new OrderPublisher(store, (notice) => {
-        if (!cancelled) queueNotice = notice;
-      });
+      store = new IndexedDbTicketStore(indexedDB, 'order-pad-v1', false);
       session = new PrintSession(store, (next) => {
         viewState = next;
         if (
@@ -166,7 +170,8 @@
           void publisher?.flush();
       });
       void session.initialize().then(() => {
-        if (!cancelled && viewState.phase === 'ready') publisher?.start();
+        if (!cancelled && trackingEnabled && viewState.phase === 'ready')
+          publisher?.start();
       });
     } catch {
       viewState = {
@@ -194,6 +199,8 @@
       void navigator.serviceWorker.ready.then(checkCache);
     return () => {
       cancelled = true;
+      mounted = false;
+      featuresController?.abort();
       clearTimeout(toastTimer);
       publisher?.stop();
       window.removeEventListener('online', updateOnline);
@@ -201,9 +208,54 @@
     };
   });
 
+  function configureTracking(): Promise<void> {
+    if (featuresCheck) return featuresCheck;
+    if (!store || !mounted) return Promise.resolve();
+    featuresController = new AbortController();
+    featuresCheck = (async () => {
+      try {
+        const enabled = await fetchTrackingEnabled(featuresController!.signal);
+        if (!mounted) return;
+        if (!enabled) {
+          publisher?.stop();
+          publisher = undefined;
+          trackingEnabled = false;
+          queueNotice = '';
+        }
+        await store!.setTrackingEnabled(enabled);
+        if (!mounted) return;
+        trackingEnabled = enabled;
+        if (enabled && !publisher) {
+          publisher = new OrderPublisher(
+            store!,
+            (notice) => {
+              if (mounted) queueNotice = notice;
+            },
+            undefined,
+            undefined,
+            () => {
+              if (mounted) {
+                trackingEnabled = false;
+                queueNotice = '';
+                publisher = undefined;
+              }
+            },
+          );
+          if (viewState.phase === 'ready') publisher.start();
+        }
+      } catch {
+        // Optional tracking configuration must never block ordinary printing.
+      } finally {
+        featuresCheck = undefined;
+      }
+    })();
+    return featuresCheck;
+  }
+
   async function checkPrinter() {
     if (working || checkingPrinter) return;
     checkingPrinter = true;
+    void configureTracking();
     printerStatus = {
       ...printerStatus,
       message: 'Checking the server’s USB printer…',
@@ -755,8 +807,10 @@
             ></button
           >
           <div id="order-tools-panel" hidden={!toolsOpen}>
-            <a class="queue-link" href="/queue/">Build queue</a>
-            {#if queueNotice}<p
+            {#if trackingEnabled}<a class="queue-link" href="/queue/"
+                >Build queue</a
+              >{/if}
+            {#if trackingEnabled && queueNotice}<p
                 role="status"
                 aria-label="Queue synchronization"
               >

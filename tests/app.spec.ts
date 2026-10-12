@@ -61,6 +61,9 @@ async function readDraft(page: Page): Promise<OrderDraft> {
 }
 
 async function mockUsb(page: Page) {
+  await page.route('**/api/features', (route) =>
+    route.fulfill({ json: { trackingEnabled: true } }),
+  );
   const submitted: PrintRequest[] = [];
   const lockedDrafts: OrderDraft[] = [];
   await page.route('**/api/orders', (route) => {
@@ -1473,4 +1476,36 @@ test('responsive layouts change at precisely 760 and 1100 pixels', async ({
       ),
     ).toBe(true);
   }
+});
+
+test('unavailable tracking settings do not block printing or reprints', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  let publications = 0;
+  await page.route('**/api/features', (route) =>
+    route.fulfill({ status: 503, json: {} }),
+  );
+  await page.route('**/api/orders', (route) => {
+    publications++;
+    return route.fulfill({ status: 503, json: {} });
+  });
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Order #0001 sent to the printer',
+  );
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  await openTools(page);
+  await expect(
+    page.getByRole('link', { name: 'Build queue', exact: true }),
+  ).toHaveCount(0);
+  expect(submitted).toHaveLength(2);
+  expect(publications).toBe(0);
 });

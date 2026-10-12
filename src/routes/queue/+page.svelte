@@ -8,6 +8,7 @@
     waitTone,
     type QueueOrder,
   } from '$lib/orders/order';
+  import { fetchTrackingEnabled } from '$lib/orders/features';
   import { QueueFeed } from '$lib/orders/stream';
   import { totalScoops } from '$lib/tickets/ticket';
 
@@ -21,7 +22,11 @@
   let lastUpdated = $state<string>();
   let pending = $state(new Set<string>());
   let stopped = false;
-  let feed: QueueFeed;
+  let feed: QueueFeed | undefined;
+  let trackingEnabled = $state<boolean>();
+  let checkingFeatures = false;
+  let featuresController: AbortController | undefined;
+  let ageTimer: ReturnType<typeof setInterval> | undefined;
   const open = $derived(sortOrders(orders, 'open'));
   const done = $derived(sortOrders(orders, 'done').slice(0, 8));
   const servingCount = $derived(
@@ -36,8 +41,48 @@
   const plural = (n: number, word: string) =>
     `${n} ${word}${n === 1 ? '' : 's'}`;
 
+  async function checkFeatures(reconnect: boolean) {
+    if (checkingFeatures || stopped) return;
+    checkingFeatures = true;
+    checking = true;
+    featuresController = new AbortController();
+    try {
+      const enabled = await fetchTrackingEnabled(featuresController.signal);
+      if (stopped) return;
+      trackingEnabled = enabled;
+      if (!enabled) {
+        feed?.stop();
+        feed = undefined;
+        clearInterval(ageTimer);
+        ageTimer = undefined;
+        orders = [];
+        loaded = false;
+        connectionError = '';
+        actionError = '';
+      } else if (!feed) {
+        feed = new QueueFeed((state) => {
+          orders = state.orders;
+          loaded = state.loaded;
+          checking = state.connecting;
+          connectionError = state.error;
+          lastUpdated = state.updatedAt;
+          now = Date.now();
+          if (state.error) void checkFeatures(false);
+        });
+        feed.start();
+        ageTimer = setInterval(() => {
+          now = Date.now();
+        }, 30000);
+      } else if (reconnect) feed.refresh();
+    } catch (failure) {
+      if (!stopped) connectionError = (failure as Error).message;
+    } finally {
+      checkingFeatures = false;
+      if (!stopped) checking = false;
+    }
+  }
   function refresh() {
-    feed?.refresh();
+    void checkFeatures(true);
   }
   async function update(id: string, action: 'done' | 'reopen') {
     if (pending.has(id) || stopped) return;
@@ -45,7 +90,7 @@
     try {
       const change = await changeOrderStatus(id, action);
       if (stopped) return;
-      feed.applyChange(change);
+      feed?.applyChange(change);
       actionError = '';
       now = Date.now();
     } catch (failure) {
@@ -58,23 +103,13 @@
   }
   onMount(() => {
     stopped = false;
-    feed = new QueueFeed((state) => {
-      orders = state.orders;
-      loaded = state.loaded;
-      checking = state.connecting;
-      connectionError = state.error;
-      lastUpdated = state.updatedAt;
-      now = Date.now();
-    });
-    feed.start();
-    const ages = setInterval(() => {
-      now = Date.now();
-    }, 30000);
+    refresh();
     window.addEventListener('online', refresh);
     return () => {
       stopped = true;
-      feed.stop();
-      clearInterval(ages);
+      feed?.stop();
+      clearInterval(ageTimer);
+      featuresController?.abort();
       window.removeEventListener('online', refresh);
     };
   });
@@ -95,22 +130,32 @@
       ><span class="header-rule" aria-hidden="true"></span>
       <h1>Build queue</h1>
     </div>
-    <dl class="queue-metrics" aria-label="Queue totals">
-      <div>
-        <dd>{loaded ? open.length : '—'}</dd>
-        <dt>open</dt>
-      </div>
-      <div>
-        <dd>{loaded ? servingCount : '—'}</dd>
-        <dt>servings to build</dt>
-      </div>
-      <div>
-        <dd>{open.length ? (oldest < 1 ? '<1m' : `${oldest}m`) : '—'}</dd>
-        <dt>oldest wait</dt>
-      </div>
-    </dl>
+    {#if trackingEnabled !== false}<dl
+        class="queue-metrics"
+        aria-label="Queue totals"
+      >
+        <div>
+          <dd>{loaded ? open.length : '—'}</dd>
+          <dt>open</dt>
+        </div>
+        <div>
+          <dd>{loaded ? servingCount : '—'}</dd>
+          <dt>servings to build</dt>
+        </div>
+        <div>
+          <dd>{open.length ? (oldest < 1 ? '<1m' : `${oldest}m`) : '—'}</dd>
+          <dt>oldest wait</dt>
+        </div>
+      </dl>{/if}
   </header>
   <main class="queue-content">
+    {#if trackingEnabled === false}
+      <section class="queue-empty" aria-label="Order tracking disabled">
+        <h2>Order tracking is turned off</h2>
+        <p>Orders still print normally.</p>
+        <a class="queue-link" href="/">Back to order builder</a>
+      </section>
+    {/if}
     {#if error}<div class="queue-error" role="alert">
         <div>
           <strong>Queue needs attention</strong>
@@ -123,11 +168,15 @@
           class="secondary"
           onclick={() => {
             actionError = '';
+            refresh();
           }}
           disabled={checking || !!pending.size}>Refresh queue</button
         >
       </div>{/if}
-    {#if !loaded && !error}<p class="queue-loading" role="status">
+    {#if trackingEnabled !== false && !loaded && !error}<p
+        class="queue-loading"
+        role="status"
+      >
         Loading build queue…
       </p>{/if}
     {#if loaded && !open.length}<div class="queue-empty">

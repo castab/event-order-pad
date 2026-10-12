@@ -186,3 +186,72 @@ it('persists first-print order outbox with intent across reloads; reprints never
   );
   expect(await store.pendingOrders()).toEqual([]);
 });
+
+it('disabling tracking discards only queue metadata and never backfills disabled orders on re-enable', async () => {
+  const factory = new IDBFactory();
+  const store = new IndexedDbTicketStore(factory, 'history');
+  let id = 0;
+  const session = new PrintSession(
+    store,
+    () => {},
+    () => `id-${++id}`,
+  );
+  const printer = new SimulatedPrinter('accepted', 0);
+  await session.initialize();
+  session.updateDraft({ ...session.state.draft!, servings: [serving] });
+  await session.submit(printer);
+  const ticket = session.state.ticket!;
+  const saved = await store.load();
+  const draft = await store.loadDraft();
+  const reference = await counter(factory);
+  expect(await store.pendingOrders()).toEqual([ticket]);
+  await store.setTrackingEnabled(false);
+  expect(await store.pendingOrders()).toEqual([]);
+  expect(await store.load()).toEqual(saved);
+  expect(await store.loadDraft()).toEqual(draft);
+  expect(await counter(factory)).toBe(reference);
+  await session.print(printer, true);
+  session.updateDraft({ ...session.state.draft!, servings: [serving] });
+  await session.submit(printer);
+  const untracked = session.state.ticket!;
+  expect(untracked.reference).toBe('0002');
+  expect(await store.pendingOrders()).toEqual([]);
+  const reload = new IndexedDbTicketStore(factory, 'history', false);
+  expect((await reload.load())?.ticket).toEqual(untracked);
+  await reload.setTrackingEnabled(true);
+  expect(await reload.pendingOrders()).toEqual([]);
+  const resumed = new PrintSession(
+    reload,
+    () => {},
+    () => `id-${++id}`,
+  );
+  await resumed.initialize();
+  await resumed.print(printer, true);
+  expect(await reload.pendingOrders()).toEqual([]);
+  resumed.updateDraft({ ...resumed.state.draft!, servings: [serving] });
+  await resumed.submit(printer);
+  expect(resumed.state.ticket?.reference).toBe('0003');
+  expect(await reload.pendingOrders()).toEqual([resumed.state.ticket]);
+});
+
+it('a store opened with tracking disabled still commits print intent and recovery', async () => {
+  const factory = new IDBFactory();
+  const store = new IndexedDbTicketStore(factory, 'history', false);
+  const session = new PrintSession(store, () => {});
+  await session.initialize();
+  session.updateDraft({ ...session.state.draft!, servings: [serving] });
+  await session.submit(new SimulatedPrinter('outcome-unknown', 0));
+  expect(session.state.phase).toBe('ready');
+  expect((await store.load())?.attempts[0].result?.status).toBe(
+    'outcome-unknown',
+  );
+  expect(await store.pendingOrders()).toEqual([]);
+  const reload = new PrintSession(
+    new IndexedDbTicketStore(factory, 'history', false),
+    () => {},
+  );
+  await reload.initialize();
+  expect(reload.state.ticket).toEqual(session.state.ticket);
+  expect(reload.state.draft).toEqual(session.state.draft);
+  expect(reload.state.attempts).toEqual(session.state.attempts);
+});

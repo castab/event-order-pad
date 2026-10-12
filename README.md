@@ -75,6 +75,30 @@ In the current UI, accepted means CUPS accepted a queue submission, not physical
 
 Every new submission and reprint uses the server USB route; there is no transport fallback. Keep one station tab. There is no background print queue, cloud backup or exactly-once guarantee. Background order updates never invoke a printer. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
 
+## Optional order tracking
+
+Tracking is enabled by default. For an event that only needs printed receipts,
+start the printer service with:
+
+```sh
+export ORDER_PAD_TRACKING_ENABLED=false
+npm run start:printer
+```
+
+The value must be exactly `true` or `false`. Restart the service and reload open
+Order Pad tabs after changing it; no rebuild is needed just to change the setting.
+With tracking off, the builder hides **Build queue**, `/queue/` shows a disabled
+message, and queue APIs and SSE are disabled. Ordinary printing, reprints, draft
+recovery and numeric references continue working. Existing server order history
+and the print-attempt journal stay intact.
+
+When a browser learns tracking is off, it discards pending queue publications
+while preserving tickets, attempts and drafts. Orders printed while disabled are
+not imported later. Set the value to `true` (or remove it), restart and reload to
+resume tracking new orders and view the saved history. An already-open queue stops
+its connection when it detects the disabled service; the builder discovers the
+setting on its next tracking check.
+
 ## Shared build queue
 
 Open **Build queue** in Order tools, or open `/queue/` at the same Mint HTTPS
@@ -118,6 +142,7 @@ The API uses validated schema 2 tickets and same-origin JSON mutations:
 
 | Endpoint                                       | Result                                                                                                |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `GET /api/features`                            | `{ trackingEnabled }`; the current server setting.                                                    |
 | `POST /api/orders` (ticket body)               | `{ order, created }`; 201 for first creation, 200 for an existing ID left unchanged.                  |
 | `GET /api/orders/events`                       | SSE: `orders` events contain `{ orders, instanceId, revision }`; `ping` events keep the stream alive. |
 | `GET /api/orders`                              | `{ orders }`: all open orders oldest first, then the latest eight done orders.                        |
@@ -128,7 +153,8 @@ The API uses validated schema 2 tickets and same-origin JSON mutations:
 Each order contains `ticket`, `submittedAt` (the ticket’s original submission time
 in ISO UTC), `status`, and the server’s `doneAt` when done. Delayed publications
 retain the original time so waiting ages do not reset when a connection recovers.
-Unknown IDs return 404; unavailable order storage returns 503. API
+When tracking is disabled, every `/api/orders` endpoint returns 404 with code
+`ORDER_TRACKING_DISABLED`. Unknown IDs return 404; unavailable order storage returns 503. API
 responses are uncached. References still come from the existing browser counter:
 keep one ordering station. Prisma, Postgres, and shared reference allocation
 are deferred; this phase requires no Docker setup.

@@ -6,6 +6,7 @@ import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
 import { OrderStream } from './order-stream';
+import { trackingDisabledCode } from '../src/lib/orders/features';
 
 class BadRequest extends Error {
   constructor(
@@ -50,6 +51,7 @@ export function createApp({
   cups,
   printing,
   orders,
+  trackingEnabled = true,
 }: {
   origin: URL;
   port: number;
@@ -57,6 +59,7 @@ export function createApp({
   cups: Pick<Cups, 'check' | 'queue'>;
   printing: Pick<Printing, 'print'>;
   orders: Pick<Orders, 'upsert' | 'list' | 'changeStatus' | 'subscribe'>;
+  trackingEnabled?: boolean;
 }) {
   const streams = new Set<OrderStream>();
   const server = createServer(async (req, res) => {
@@ -92,6 +95,20 @@ export function createApp({
           json(403, { error: 'Use the configured same-origin application.' });
           return;
         }
+      }
+      if (req.method === 'GET' && path === '/api/features') {
+        json(200, { trackingEnabled });
+        return;
+      }
+      if (
+        !trackingEnabled &&
+        (path === '/api/orders' || path.startsWith('/api/orders/'))
+      ) {
+        json(404, {
+          error: 'Order tracking is disabled.',
+          code: trackingDisabledCode,
+        });
+        return;
       }
       if (req.method === 'GET' && path === '/api/orders/events') {
         if (
@@ -213,7 +230,7 @@ export function createApp({
           });
           return;
         }
-        if (!request.reprint) {
+        if (trackingEnabled && !request.reprint) {
           try {
             await orders.upsert(request.ticket);
           } catch {

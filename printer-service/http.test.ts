@@ -13,7 +13,7 @@ const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
 });
-async function app() {
+async function app(trackingEnabled = true) {
   const directory = await mkdtemp(join(tmpdir(), 'order-pad-http-'));
   closers.push(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, 'index.html'), '<h1>Order Pad</h1>');
@@ -38,6 +38,7 @@ async function app() {
     cups: { check, queue: 'OrderPad' },
     printing: { print },
     orders,
+    trackingEnabled,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   closers.push(
@@ -449,4 +450,68 @@ it('closing the HTTP server disconnects SSE clients and releases subscriptions',
   await disconnected;
   // The fixture's normal cleanup calls close again; a closed server is already safe.
   closers.splice(closers.length - 2, 1);
+});
+
+it('reports the default enabled flag independently of printer readiness', async () => {
+  const { send, check } = await app();
+  check.mockRejectedValue(new Error('Printer unavailable'));
+  const features = await send('/api/features');
+  expect(features.status).toBe(200);
+  expect(features.cache).toBe('no-store');
+  expect(JSON.parse(features.body)).toEqual({ trackingEnabled: true });
+  expect(check).not.toHaveBeenCalled();
+});
+
+it('disabled tracking gates every queue API without touching history or changing print outcomes', async () => {
+  const { send, print, orders, directory } = await app(false);
+  const ticket = sampleTicket('historical', '2026-10-11T20:00:00.000Z');
+  await orders.upsert(ticket);
+  await orders.changeStatus(ticket.id, 'done');
+  const history = await orders.list();
+  const methods = ['upsert', 'list', 'changeStatus', 'subscribe'] as const;
+  const spies = methods.map((method) => vi.spyOn(orders, method));
+  const features = await send('/api/features');
+  expect(features.cache).toBe('no-store');
+  expect(JSON.parse(features.body)).toEqual({ trackingEnabled: false });
+  for (const [path, body] of [
+    ['/api/orders', undefined],
+    ['/api/orders?status=done', undefined],
+    ['/api/orders/events', undefined],
+    ['/api/orders', JSON.stringify(ticket)],
+    ['/api/orders/historical/done', '{}'],
+    ['/api/orders/historical/reopen', '{}'],
+  ] as const) {
+    const response = await send(path, body, headers);
+    expect(response.status).toBe(404);
+    expect(response.cache).toBe('no-store');
+    expect(JSON.parse(response.body).code).toBe('ORDER_TRACKING_DISABLED');
+  }
+  for (const status of ['accepted', 'failed', 'outcome-unknown'] as const) {
+    for (const reprint of [false, true]) {
+      const result: PrintAttemptResult = {
+        status,
+        simulated: false,
+        message: 'Inspect output.',
+        code: 'printer-error',
+      };
+      print.mockResolvedValueOnce(result);
+      const response = await send(
+        '/api/print',
+        JSON.stringify({ ...JSON.parse(payload), reprint }),
+        headers,
+      );
+      expect(JSON.parse(response.body).result).toEqual(result);
+    }
+  }
+  expect(print).toHaveBeenCalledTimes(6);
+  for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+  expect((await send('/api/print', '{}', headers)).status).toBe(400);
+  expect((await send('/api/orders', '{}')).status).toBe(403);
+  expect(
+    (await send('/api/features', undefined, { Host: 'evil.test' })).status,
+  ).toBe(403);
+  // Disabled APIs cannot alter the journal; a subsequent enabled service reads it intact.
+  const reloaded = new Orders(join(directory, 'orders'));
+  expect(await reloaded.list()).toEqual(history);
+  expect((await send('/queue/')).body).toContain('Build queue');
 });

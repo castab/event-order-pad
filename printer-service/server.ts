@@ -5,6 +5,7 @@ import { Printing } from './printing';
 import { Orders } from './orders';
 import { join } from 'node:path';
 import { createApp } from './http';
+import { parseTrackingEnabled } from './config';
 
 if (process.platform !== 'linux')
   throw new Error(
@@ -25,6 +26,9 @@ if (
 const port = Number(process.env.ORDER_PAD_PORT ?? '4174');
 if (!Number.isInteger(port) || port < 1024 || port > 65535)
   throw new Error('Invalid local port.');
+const trackingEnabled = parseTrackingEnabled(
+  process.env.ORDER_PAD_TRACKING_ENABLED,
+);
 const root = await realpath(resolve('build'));
 const cups = new Cups(process.env.ORDER_PAD_QUEUE ?? 'OrderPad');
 const printing = new Printing(
@@ -36,11 +40,16 @@ const printing = new Printing(
 const orders = new Orders(
   join(resolve(process.env.ORDER_PAD_DATA ?? '.print-data'), 'orders'),
 );
-createApp({ origin, port, root, cups, printing, orders }).listen(
+createApp({
+  origin,
   port,
-  '127.0.0.1',
-  () =>
-    console.log(
-      `Order Pad Linux service listening on 127.0.0.1:${port}; open ${origin.origin}`,
-    ),
+  root,
+  cups,
+  printing,
+  orders,
+  trackingEnabled,
+}).listen(port, '127.0.0.1', () =>
+  console.log(
+    `Order Pad Linux service listening on 127.0.0.1:${port}; open ${origin.origin}`,
+  ),
 );

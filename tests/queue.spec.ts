@@ -103,6 +103,9 @@ async function backend(
   context: BrowserContext,
   initial: readonly QueueOrder[] = [],
 ) {
+  await context.route('**/api/features', (route) =>
+    route.fulfill({ json: { trackingEnabled: true } }),
+  );
   const records = new Map(initial.map((order) => [order.ticket.id, order]));
   const publications: OrderTicket[] = [];
   const prints: { ticket: OrderTicket; reprint: boolean; attemptId: string }[] =
@@ -688,3 +691,44 @@ for (const viewport of [
     });
   });
 }
+
+test('unavailable tracking settings show an error without opening a stream; refresh reads the disabled flag', async ({
+  page,
+  context,
+}) => {
+  await backend(context);
+  let unavailable = true;
+  await context.route('**/api/features', (route) =>
+    route.fulfill(
+      unavailable
+        ? { status: 503, json: {} }
+        : { json: { trackingEnabled: false } },
+    ),
+  );
+  await page.goto('/queue/');
+  await expect(page.getByRole('alert')).toContainText(
+    'Order tracking settings unavailable',
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __queueSources: unknown[] }).__queueSources
+          .length,
+    ),
+  ).toBe(0);
+  unavailable = false;
+  await page
+    .getByRole('button', { name: 'Refresh queue', exact: true })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Order tracking is turned off' }),
+  ).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __queueSources: unknown[] }).__queueSources
+          .length,
+    ),
+  ).toBe(0);
+});
