@@ -64,7 +64,7 @@ The Mint URL is a different storage origin from the Windows URL. Old browser tic
 - Accepted means **CUPS queue submission**, not physical output. Cover/paper/disconnection errors may occur after acceptance; no live hardware sensor claims. A queued job may print later. Pending CUPS jobs block new submissions.
 - Browser IndexedDB saves intent first; the service independently flushes exclusive attempt intent before `lp`. Repeated recorded IDs return existing results; pending intent is unknown and never replayed after restart. Different content with the same ID is rejected. No background print queue or exactly-once guarantee. The order outbox retries only queue metadata updates.
 - Lost/malformed response, interrupted submission or failed outcome persistence is unknown. Reprinting requires an explicit new attempt marked REPRINT with the original ticket ID. Other applications using CUPS are outside the station lock.
-- Build orders persist separately in `.print-data/orders/`; `/queue/` polls the live service. Reprints never add or reopen orders, and completed IDs remain durable after leaving Recently done. Only explicit Undo reopens an order. First submissions can appear before CUPS acceptance, including failed or unknown prints.
+- Build orders persist separately in `.print-data/orders/`; `/queue/` subscribes to live SSE snapshots at `/api/orders/events`. Reprints never add or reopen orders, and completed IDs remain durable after leaving Recently done. Only explicit Undo reopens an order. First submissions can appear before CUPS acceptance, including failed or unknown prints.
 - Preserve `.print-data/` on local persistent storage; it contains tickets/attempts and is Git-ignored. Do not delete it to resolve an ambiguous print.
 - Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
 - The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Simulation/PassPRNT adapters remain available for compatibility tests. Phase 1 resets v1 browser records once, as documented in README; the printer-service journal is unchanged.
@@ -89,6 +89,25 @@ The Galaxy S10e was online in Tailscale. The owner opened the Mint HTTPS URL, se
 ## Update and test the order builder
 
 Rebuild both outputs with `npm run build` and `npm run build:printer`. When no print attempt or CUPS job is pending, stop the old foreground service and restart it with `./start-printer.local` (or the environment above). Both outputs must be updated: the service supplies printer status and the `/api/orders` endpoints used by the builder and `/queue/`. Preserve the entire `.print-data/` directory, including `orders/`. Historical prints are not backfilled into the build queue. Reopening only the browser cannot replace an already running Node process.
+
+The queue now requires the SSE endpoint, so deploy both builds and restart the
+service together. No journal migration or new system tooling is required. Keep
+`.print-data/` intact. The old GET order-list endpoints remain compatible.
+
+After restarting, verify streaming through the existing Mint HTTPS origin:
+
+```sh
+curl --no-buffer --header 'Accept: text/event-stream' 'https://YOUR-MINT-HOST.YOUR-TAILNET.ts.net/api/orders/events'
+```
+
+Expect `retry: 3000`, an immediate `event: orders` with the complete queue, and
+`event: ping` every 15 seconds. Stop this read-only check with Ctrl+C. Saved order
+changes should arrive without waiting for a polling interval. The service sends
+`Cache-Control: no-store, no-transform` and `X-Accel-Buffering: no`; verify the
+existing Tailscale HTTPS proxy forwards the initial event and heartbeat promptly
+before changing proxy configuration. A dropped connection retains the last view,
+shows a warning and reconnects automatically. Mark done/Undo still use the same
+POST APIs and never resend a print.
 
 On the phone, close all Order Pad tabs and reopen the same Mint HTTPS URL to activate the updated cached shell. If the old printer-test screen remains, close/reopen once more after the new service worker has installed. Preserve browser storage and `.print-data/`; clearing either is unnecessary.
 

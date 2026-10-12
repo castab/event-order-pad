@@ -5,6 +5,7 @@ import type { Cups } from './cups';
 import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
+import { OrderStream } from './order-stream';
 
 class BadRequest extends Error {
   constructor(
@@ -55,8 +56,9 @@ export function createApp({
   root: string;
   cups: Pick<Cups, 'check' | 'queue'>;
   printing: Pick<Printing, 'print'>;
-  orders: Pick<Orders, 'upsert' | 'list' | 'setStatus'>;
+  orders: Pick<Orders, 'upsert' | 'list' | 'changeStatus' | 'subscribe'>;
 }) {
+  const streams = new Set<OrderStream>();
   const server = createServer(async (req, res) => {
     const json = (status: number, body: unknown) => {
       res.writeHead(status, {
@@ -90,6 +92,29 @@ export function createApp({
           json(403, { error: 'Use the configured same-origin application.' });
           return;
         }
+      }
+      if (req.method === 'GET' && path === '/api/orders/events') {
+        if (
+          (req.headers.origin && req.headers.origin !== origin.origin) ||
+          req.headers['sec-fetch-site'] === 'cross-site'
+        ) {
+          json(403, { error: 'Use the configured same-origin application.' });
+          return;
+        }
+        const stream = new OrderStream(res, () => streams.delete(stream));
+        streams.add(stream);
+        try {
+          stream.start(await orders.subscribe(stream.snapshot));
+        } catch {
+          // No streaming headers have been sent if journal loading failed.
+          if (!res.destroyed)
+            json(503, {
+              error:
+                'Order journal unavailable. Preserve the journal and restore service storage.',
+            });
+          if (res.destroyed) stream.dispose();
+        }
+        return;
       }
       if (req.method === 'GET' && path === '/api/orders') {
         const status = url.searchParams.get('status');
@@ -143,12 +168,13 @@ export function createApp({
         )
           throw new BadRequest(400, 'Invalid order ID.');
         try {
-          json(200, {
-            order: await orders.setStatus(
+          json(
+            200,
+            await orders.changeStatus(
               id,
               transition[2] === 'done' ? 'done' : 'open',
             ),
-          });
+          );
         } catch (error) {
           json(error instanceof OrderNotFound ? 404 : 503, {
             error:
@@ -248,6 +274,11 @@ export function createApp({
       else res.end();
     }
   });
+  const close = server.close;
+  server.close = function (...args: Parameters<typeof close>) {
+    for (const stream of streams) stream.dispose();
+    return close.apply(this, args);
+  };
   server.requestTimeout = 65000;
   return server;
 }

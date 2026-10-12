@@ -132,3 +132,65 @@ describe('durable build orders', () => {
     expect(await new Orders(directory).list()).toHaveLength(1);
   });
 });
+
+it('subscribes atomically, broadcasts immutable ordered snapshots, and ignores no-ops', async () => {
+  const orders = new Orders(await folder());
+  const seen: import('../src/lib/orders/live').QueueSnapshot[] = [];
+  const other: import('../src/lib/orders/live').QueueSnapshot[] = [];
+  const unsubscribe = await orders.subscribe((s) => seen.push(s));
+  expect(seen[0]).toMatchObject({ revision: 0, orders: [] });
+  await orders.upsert(ticket);
+  const unsubscribeOther = await orders.subscribe((s) => other.push(s));
+  const done = await orders.changeStatus(ticket.id, 'done');
+  expect(done).toMatchObject({
+    instanceId: seen[0].instanceId,
+    revision: 2,
+    order: { status: 'done' },
+  });
+  await orders.upsert(ticket);
+  await orders.setStatus(ticket.id, 'done');
+  expect(seen.map((s) => s.revision)).toEqual([0, 1, 2]);
+  expect(other.map((s) => s.revision)).toEqual([1, 2]);
+  expect(Object.isFrozen(seen[1].orders[0].ticket.servings)).toBe(true);
+  unsubscribe();
+  await orders.setStatus(ticket.id, 'open');
+  expect(seen).toHaveLength(3);
+  expect(other.at(-1)!.revision).toBe(3);
+  unsubscribeOther();
+});
+it('subscriptions queued amid mutations cannot miss commits and failed writes emit nothing', async () => {
+  const directory = await folder();
+  const orders = new Orders(directory);
+  const seen: import('../src/lib/orders/live').QueueSnapshot[] = [];
+  const first = orders.upsert(ticket);
+  const subscription = orders.subscribe((s) => seen.push(s));
+  const done = orders.setStatus(ticket.id, 'done');
+  await first;
+  const unsubscribe = await subscription;
+  await done;
+  expect(seen.map((s) => s.revision)).toEqual([1, 2]);
+  await rm(directory, { recursive: true });
+  await writeFile(directory, 'unwritable');
+  await expect(orders.setStatus(ticket.id, 'open')).rejects.toThrow();
+  expect(seen).toHaveLength(2);
+  unsubscribe();
+});
+it('a restart supplies a fresh instance ID and a complete disk snapshot without historical replay', async () => {
+  const directory = await folder();
+  const orders = new Orders(directory);
+  await orders.upsert(ticket);
+  await orders.setStatus(ticket.id, 'done');
+  let first!: import('../src/lib/orders/live').QueueSnapshot;
+  const stop = await orders.subscribe((s) => {
+    first = s;
+  });
+  stop();
+  let reloaded!: import('../src/lib/orders/live').QueueSnapshot;
+  const unsubscribe = await new Orders(directory).subscribe((s) => {
+    reloaded = s;
+  });
+  unsubscribe();
+  expect(reloaded.instanceId).not.toBe(first.instanceId);
+  expect(reloaded.revision).toBe(0);
+  expect(reloaded.orders).toEqual(first.orders);
+});

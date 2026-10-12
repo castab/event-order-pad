@@ -15,12 +15,21 @@ import {
   type QueueOrder,
 } from '../src/lib/orders/order';
 
+import type {
+  OrderChange,
+  QueueSnapshot,
+  QueueVersion,
+} from '../src/lib/orders/live';
+
 export class OrderNotFound extends Error {}
 
 /** Single service process. Order IDs survive completion; repeat submissions never reopen them. */
 export class Orders {
   private records = new Map<string, QueueOrder>();
   private loaded = false;
+  private readonly instanceId = randomUUID();
+  private revision = 0;
+  private listeners = new Set<(snapshot: QueueSnapshot) => void>();
   private tail: Promise<unknown> = Promise.resolve();
   constructor(
     private directory: string,
@@ -86,6 +95,15 @@ export class Orders {
         }
       }
       this.records.set(record.ticket.id, record);
+      this.revision++;
+      const snapshot = this.snapshot();
+      for (const listener of this.listeners) {
+        try {
+          listener(snapshot);
+        } catch {
+          this.listeners.delete(listener);
+        }
+      }
     } catch (error) {
       this.loaded = false;
       throw error;
@@ -108,28 +126,55 @@ export class Orders {
       return { order, created: true };
     });
   }
+  private version(): QueueVersion {
+    return Object.freeze({
+      instanceId: this.instanceId,
+      revision: this.revision,
+    });
+  }
+  private visible(status?: 'open' | 'done'): readonly QueueOrder[] {
+    const records = [...this.records.values()];
+    return Object.freeze(
+      status === 'open'
+        ? sortOrders(records, 'open')
+        : status === 'done'
+          ? sortOrders(records, 'done').slice(0, 8)
+          : [
+              ...sortOrders(records, 'open'),
+              ...sortOrders(records, 'done').slice(0, 8),
+            ],
+    );
+  }
+  private snapshot(): QueueSnapshot {
+    return Object.freeze({ ...this.version(), orders: this.visible() });
+  }
+  /** Initial delivery and registration share the mutation lock: no missed update. */
+  subscribe(listener: (snapshot: QueueSnapshot) => void): Promise<() => void> {
+    return this.serialize(async () => {
+      await this.load();
+      listener(this.snapshot());
+      this.listeners.add(listener);
+      return () => {
+        this.listeners.delete(listener);
+      };
+    });
+  }
   list(status?: 'open' | 'done'): Promise<readonly QueueOrder[]> {
     return this.serialize(async () => {
       await this.load();
-      const records = [...this.records.values()];
-      return Object.freeze(
-        status === 'open'
-          ? sortOrders(records, 'open')
-          : status === 'done'
-            ? sortOrders(records, 'done').slice(0, 8)
-            : [
-                ...sortOrders(records, 'open'),
-                ...sortOrders(records, 'done').slice(0, 8),
-              ],
-      );
+      return this.visible(status);
     });
   }
-  setStatus(id: string, status: 'open' | 'done'): Promise<QueueOrder> {
+  async setStatus(id: string, status: 'open' | 'done'): Promise<QueueOrder> {
+    return (await this.changeStatus(id, status)).order;
+  }
+  changeStatus(id: string, status: 'open' | 'done'): Promise<OrderChange> {
     return this.serialize(async () => {
       await this.load();
       const existing = this.records.get(id);
       if (!existing) throw new OrderNotFound('Order not found.');
-      if (existing.status === status) return existing;
+      if (existing.status === status)
+        return Object.freeze({ order: existing, ...this.version() });
       const record = parseOrder({
         ticket: existing.ticket,
         submittedAt: existing.submittedAt,
@@ -137,7 +182,7 @@ export class Orders {
         ...(status === 'done' ? { doneAt: this.now() } : {}),
       });
       await this.save(record);
-      return record;
+      return Object.freeze({ order: record, ...this.version() });
     });
   }
 }

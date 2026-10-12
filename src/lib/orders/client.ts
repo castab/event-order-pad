@@ -1,4 +1,5 @@
-import { parseOrder, type QueueOrder } from './order';
+import type { QueueOrder } from './order';
+import { parseQueueOrders, parseChange, type OrderChange } from './live';
 
 export async function fetchOrders(
   signal?: AbortSignal,
@@ -12,17 +13,12 @@ export async function fetchOrders(
       'Build queue unavailable. Check the connection to the Linux service.',
     );
   const data = await response.json();
-  if (!Array.isArray(data.orders))
-    throw new Error('Invalid build queue response.');
-  const orders: QueueOrder[] = data.orders.map(parseOrder);
-  if (new Set(orders.map((o) => o.ticket.id)).size !== orders.length)
-    throw new Error('Duplicate order IDs in queue response.');
-  return Object.freeze(orders);
+  return parseQueueOrders(data.orders);
 }
 export async function changeOrderStatus(
   id: string,
   action: 'done' | 'reopen',
-): Promise<QueueOrder> {
+): Promise<OrderChange> {
   const response = await fetch(
     `/api/orders/${encodeURIComponent(id)}/${action}`,
     {
@@ -37,11 +33,12 @@ export async function changeOrderStatus(
     throw new Error(
       'Could not update the order. Refresh the queue and try again.',
     );
-  const order = parseOrder((await response.json()).order);
+  const change = parseChange(await response.json());
+  const order = change.order;
   if (
     order.ticket.id !== id ||
     order.status !== (action === 'done' ? 'done' : 'open')
   )
     throw new Error('Order update did not match the request.');
-  return order;
+  return change;
 }

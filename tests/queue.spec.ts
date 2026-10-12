@@ -109,6 +109,93 @@ async function backend(
     [];
   const mutations: string[] = [];
   let listFails = false;
+  const instanceId = '00000000-0000-4000-8000-000000000001';
+  let revision = 0;
+  const snapshot = () => ({
+    instanceId,
+    revision,
+    orders: [
+      ...sortOrders([...records.values()], 'open'),
+      ...sortOrders([...records.values()], 'done').slice(0, 8),
+    ],
+  });
+  const broadcast = async (error = false, data: unknown = snapshot()) => {
+    await Promise.all(
+      context.pages().map((page) =>
+        page
+          .evaluate(
+            ({ error, data }) => {
+              const w = window as unknown as {
+                __queueEmit?: (error: boolean, data: unknown) => void;
+              };
+              w.__queueEmit?.(error, data);
+            },
+            { error, data },
+          )
+          .catch(() => {}),
+      ),
+    );
+  };
+  await context.exposeBinding('__queueConnect', () => ({
+    error: listFails,
+    data: snapshot(),
+  }));
+  await context.addInitScript(() => {
+    const w = window as unknown as {
+      __queueConnect: () => Promise<{ error: boolean; data: unknown }>;
+      __queueEmit: (error: boolean, data: unknown) => void;
+      __queueSources: FakeSource[];
+      EventSource: typeof EventSource;
+    };
+    const sources: FakeSource[] = [];
+    class FakeSource extends EventTarget {
+      closed = false;
+      private heartbeat?: ReturnType<typeof setInterval>;
+      private retry?: ReturnType<typeof setTimeout>;
+      constructor(readonly url: string) {
+        super();
+        sources.push(this);
+        void this.connect();
+      }
+      private async connect() {
+        const response = await w.__queueConnect();
+        if (this.closed) return;
+        if (response.error) {
+          this.disconnect();
+          return;
+        }
+        this.dispatchEvent(new Event('open'));
+        this.deliver(response.data);
+        this.heartbeat = setInterval(
+          () => this.dispatchEvent(new MessageEvent('ping', { data: '{}' })),
+          15000,
+        );
+      }
+      deliver(data: unknown) {
+        if (!this.closed)
+          this.dispatchEvent(
+            new MessageEvent('orders', { data: JSON.stringify(data) }),
+          );
+      }
+      disconnect() {
+        clearInterval(this.heartbeat);
+        clearTimeout(this.retry);
+        this.dispatchEvent(new Event('error'));
+        this.retry = setTimeout(() => void this.connect(), 3000);
+      }
+      close() {
+        this.closed = true;
+        clearInterval(this.heartbeat);
+        clearTimeout(this.retry);
+      }
+    }
+    w.__queueSources = sources;
+    w.__queueEmit = (error, data) =>
+      sources
+        .filter((s) => !s.closed)
+        .forEach((s) => (error ? s.disconnect() : s.deliver(data)));
+    w.EventSource = FakeSource as unknown as typeof EventSource;
+  });
   let mutationFails = false;
   let publishFails = false;
   const upsert = (ticket: OrderTicket) => {
@@ -120,6 +207,8 @@ async function backend(
       status: 'open',
     });
     records.set(ticket.id, order);
+    revision++;
+    if (!listFails) void broadcast();
     return { order, created: true };
   };
   await context.route('**/api/orders**', async (route) => {
@@ -168,8 +257,12 @@ async function backend(
       status: match[2] === 'done' ? 'done' : 'open',
       ...(match[2] === 'done' ? { doneAt: now } : {}),
     });
-    records.set(id, updated);
-    return route.fulfill({ json: { order: updated } });
+    if (order.status !== updated.status) {
+      records.set(id, updated);
+      revision++;
+      if (!listFails) void broadcast();
+    }
+    return route.fulfill({ json: { order: updated, instanceId, revision } });
   });
   await context.route('**/api/printer', (route) =>
     route.fulfill({
@@ -201,8 +294,11 @@ async function backend(
     prints,
     mutations,
     upsert,
+    broadcast,
+    snapshot,
     failList: (value: boolean) => {
       listFails = value;
+      if (value) void broadcast(true);
     },
     failMutations: (value: boolean) => {
       mutationFails = value;
@@ -291,7 +387,7 @@ test('done is a single action, Undo restores original ordering and survives a re
   ]);
 });
 
-test('polling finds new orders, ages cross thresholds and empty state keeps recently done Undo', async ({
+test('pushed snapshots find new orders, ages cross thresholds and empty state keeps recently done Undo', async ({
   page,
   context,
 }) => {
@@ -304,7 +400,6 @@ test('polling finds new orders, ages cross thresholds and empty state keeps rece
   await expect(page.getByRole('button', { name: /Undo done/ })).toHaveCount(0);
   const ticket = sampleTicket('new-order', now);
   api.upsert(ticket);
-  await page.clock.fastForward(3001);
   const card = page.getByRole('article');
   await expect(card).toHaveCount(1);
   await expect(card.getByLabel('Wait Just now')).toHaveClass(/moss/);
@@ -380,39 +475,83 @@ test('an unavailable initial queue does not claim all caught up', async ({
   ).toBeVisible();
 });
 
-test('stale polling response cannot restore an order after marking it done', async ({
+test('stale stream snapshots cannot restore an order after marking it done', async ({
   page,
   context,
 }) => {
-  await backend(context, fixtures());
-  await page.clock.install({ time: new Date(now) });
+  const api = await backend(context, fixtures());
   await page.goto('/queue/');
   await expect(page.getByRole('article')).toHaveCount(4);
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let reached!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    reached = resolve;
-  });
-  await page.route('**/api/orders', async (route) => {
-    if (route.request().method() !== 'GET') return route.fallback();
-    reached();
-    await held;
-    await route.fulfill({ json: { orders: fixtures() } });
-  });
-  await page.clock.fastForward(3001);
-  await entered;
+  const stale = api.snapshot();
   await page
     .getByRole('button', { name: 'Mark #0040 done', exact: true })
     .click();
   await expect(page.getByRole('article')).toHaveCount(3);
-  release();
+  await api.broadcast(false, stale);
   await expect(
     page.getByRole('button', { name: 'Undo done for #0040', exact: true }),
   ).toBeVisible();
   await expect(page.getByRole('article')).toHaveCount(3);
+});
+
+test('disconnected queue keeps API actions usable and reconnects to catch up without polling', async ({
+  page,
+  context,
+}) => {
+  const api = await backend(context, fixtures());
+  const reads: string[] = [];
+  page.on('request', (request) => {
+    if (
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === '/api/orders'
+    )
+      reads.push(request.url());
+  });
+  await page.clock.install({ time: new Date(now) });
+  await page.goto('/queue/');
+  await expect(page.getByRole('article')).toHaveCount(4);
+  api.failList(true);
+  await expect(page.getByRole('alert')).toContainText('disconnected');
+  await page
+    .getByRole('button', { name: 'Mark #0040 done', exact: true })
+    .click();
+  await expect(page.getByRole('article')).toHaveCount(3);
+  await expect(page.getByRole('alert')).toContainText('disconnected');
+  api.failList(false);
+  await page.clock.fastForward(3001);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(reads).toEqual([]);
+  await page.getByRole('link', { name: 'Order builder', exact: true }).click();
+  await expect(page.getByLabel('Customer name (optional)')).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      (
+        window as unknown as { __queueSources: { closed: boolean }[] }
+      ).__queueSources.every((s) => s.closed),
+    ),
+  ).toBe(true);
+});
+
+test('malformed live data preserves cards and manual refresh gets a valid snapshot', async ({
+  page,
+  context,
+}) => {
+  const api = await backend(context, fixtures());
+  await page.goto('/queue/');
+  await expect(page.getByRole('article')).toHaveCount(4);
+  await api.broadcast(false, {
+    ...api.snapshot(),
+    orders: [fixtures()[0], fixtures()[0]],
+  });
+  await expect(page.getByRole('alert')).toContainText(
+    'Invalid live queue data',
+  );
+  await expect(page.getByRole('article')).toHaveCount(4);
+  await page
+    .getByRole('button', { name: 'Refresh queue', exact: true })
+    .click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('article')).toHaveCount(4);
 });
 
 test('builder and queue share orders: every reprint leaves one card and never reopens a done order', async ({

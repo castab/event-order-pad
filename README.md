@@ -67,7 +67,7 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
 - `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Structured tickets use schema 2 and IndexedDB version 2; the one-time v1 reset is described below.
 - `src/routes/+page.svelte`: token-styled serving builder, toast and recovery feedback, collapsed Order tools, and direct USB submissions/reprints.
-- `src/lib/orders/` and `printer-service/orders.ts`: shared order records, disk persistence, polling, and a durable publication outbox; order retries cannot resend printing.
+- `src/lib/orders/` and `printer-service/orders.ts`: shared order records, disk persistence, live SSE snapshots, and a durable publication outbox; order retries cannot resend printing.
 - `src/routes/queue/`: oldest-first build cards, age badges, completion and Undo.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
@@ -78,13 +78,24 @@ Every new submission and reprint uses the server USB route; there is no transpor
 ## Shared build queue
 
 Open **Build queue** in Order tools, or open `/queue/` at the same Mint HTTPS
-origin on the build-station tablet. The queue polls the service every three seconds,
-sorts open orders by their first submission, and shows serving totals and wait ages.
+origin on the build-station tablet. The service pushes an initial queue snapshot
+and updates after every saved order change over Server-Sent Events (SSE). The
+queue sorts open orders by their first submission and shows serving totals and wait ages.
 Wait badges use moss below five minutes, olive from five to ten, and rust at ten
 minutes or more. **Mark #… done** takes one tap; the latest eight completed orders
 have **Undo**. Ages refresh at least every 30 seconds. Connection errors preserve
 the last received list and expose a refresh action; a failed initial load does not
-claim the queue is empty.
+claim the queue is empty. Mark done and Undo remain usable while live updates are
+disconnected if their normal API requests still succeed. Action failures remain
+visible until a successful action or manual refresh; live events do not hide them.
+
+The browser reconnects automatically, with a three-second server-advertised delay.
+Every connection receives a complete current snapshot, including after a service
+restart; there is no historical event replay. A 15-second heartbeat keeps the
+connection active, and 45 seconds without an event triggers a reconnect and warning.
+The queue never falls back to polling. Stream revisions and per-service instance
+IDs prevent delayed snapshots or action responses from overwriting newer state.
+These versions are in memory; no order journal migration is needed.
 
 An order is registered on its first print submission, including submissions whose
 print result is failed or unknown. A queue card does not prove physical output.
@@ -105,20 +116,21 @@ Printer submission proceeds if the order registry is temporarily unavailable.
 
 The API uses validated schema 2 tickets and same-origin JSON mutations:
 
-| Endpoint                                       | Result                                                                               |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `POST /api/orders` (ticket body)               | `{ order, created }`; 201 for first creation, 200 for an existing ID left unchanged. |
-| `GET /api/orders`                              | `{ orders }`: all open orders oldest first, then the latest eight done orders.       |
-| `GET /api/orders?status=open` or `status=done` | Open orders or the latest eight done orders.                                         |
-| `POST /api/orders/:id/done` (`{}` body)        | `{ order }`; idempotently marks it done.                                             |
-| `POST /api/orders/:id/reopen` (`{}` body)      | `{ order }`; idempotently reopens it, retaining its first submission time.           |
+| Endpoint                                       | Result                                                                                                |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `POST /api/orders` (ticket body)               | `{ order, created }`; 201 for first creation, 200 for an existing ID left unchanged.                  |
+| `GET /api/orders/events`                       | SSE: `orders` events contain `{ orders, instanceId, revision }`; `ping` events keep the stream alive. |
+| `GET /api/orders`                              | `{ orders }`: all open orders oldest first, then the latest eight done orders.                        |
+| `GET /api/orders?status=open` or `status=done` | Open orders or the latest eight done orders.                                                          |
+| `POST /api/orders/:id/done` (`{}` body)        | `{ order, instanceId, revision }`; idempotently marks it done.                                        |
+| `POST /api/orders/:id/reopen` (`{}` body)      | `{ order, instanceId, revision }`; idempotently reopens it, retaining its first submission time.      |
 
 Each order contains `ticket`, `submittedAt` (the ticket’s original submission time
 in ISO UTC), `status`, and the server’s `doneAt` when done. Delayed publications
 retain the original time so waiting ages do not reset when a connection recovers.
 Unknown IDs return 404; unavailable order storage returns 503. API
 responses are uncached. References still come from the existing browser counter:
-keep one ordering station. Prisma, Postgres, SSE, and shared reference allocation
+keep one ordering station. Prisma, Postgres, and shared reference allocation
 are deferred; this phase requires no Docker setup.
 
 ## Phase 1 storage upgrade

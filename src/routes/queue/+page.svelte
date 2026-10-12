@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fetchOrders, changeOrderStatus } from '$lib/orders/client';
+  import { changeOrderStatus } from '$lib/orders/client';
   import {
     sortOrders,
     waitMinutes,
@@ -8,6 +8,7 @@
     waitTone,
     type QueueOrder,
   } from '$lib/orders/order';
+  import { QueueFeed } from '$lib/orders/stream';
   import { totalScoops } from '$lib/tickets/ticket';
 
   let orders = $state<readonly QueueOrder[]>([]);
@@ -19,9 +20,8 @@
   const error = $derived(actionError || connectionError);
   let lastUpdated = $state<string>();
   let pending = $state(new Set<string>());
-  let generation = 0;
   let stopped = false;
-  let controller: AbortController | undefined;
+  let feed: QueueFeed;
   const open = $derived(sortOrders(orders, 'open'));
   const done = $derived(sortOrders(orders, 'done').slice(0, 8));
   const servingCount = $derived(
@@ -36,36 +36,16 @@
   const plural = (n: number, word: string) =>
     `${n} ${word}${n === 1 ? '' : 's'}`;
 
-  async function refresh() {
-    if (checking || pending.size || stopped) return;
-    checking = true;
-    const revision = ++generation;
-    controller = new AbortController();
-    try {
-      const snapshot = await fetchOrders(
-        AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
-      );
-      if (stopped || revision !== generation) return;
-      orders = snapshot;
-      loaded = true;
-      now = Date.now();
-      lastUpdated = new Date(now).toISOString();
-      connectionError = '';
-    } catch (failure) {
-      if (!stopped && revision === generation)
-        connectionError = (failure as Error).message;
-    } finally {
-      if (!stopped) checking = false;
-    }
+  function refresh() {
+    feed?.refresh();
   }
   async function update(id: string, action: 'done' | 'reopen') {
     if (pending.has(id) || stopped) return;
     pending = new Set([...pending, id]);
-    ++generation; // An older polling response cannot undo this action on screen.
     try {
-      const order = await changeOrderStatus(id, action);
+      const change = await changeOrderStatus(id, action);
       if (stopped) return;
-      orders = [...orders.filter((o) => o.ticket.id !== id), order];
+      feed.applyChange(change);
       actionError = '';
       now = Date.now();
     } catch (failure) {
@@ -73,23 +53,28 @@
     } finally {
       if (!stopped) {
         pending = new Set([...pending].filter((value) => value !== id));
-        void refresh();
       }
     }
   }
   onMount(() => {
     stopped = false;
-    void refresh();
-    const polling = setInterval(() => void refresh(), 3000);
+    feed = new QueueFeed((state) => {
+      orders = state.orders;
+      loaded = state.loaded;
+      checking = state.connecting;
+      connectionError = state.error;
+      lastUpdated = state.updatedAt;
+      now = Date.now();
+    });
+    feed.start();
     const ages = setInterval(() => {
       now = Date.now();
     }, 30000);
     window.addEventListener('online', refresh);
     return () => {
       stopped = true;
-      clearInterval(polling);
+      feed.stop();
       clearInterval(ages);
-      controller?.abort();
       window.removeEventListener('online', refresh);
     };
   });
@@ -138,7 +123,6 @@
           class="secondary"
           onclick={() => {
             actionError = '';
-            void refresh();
           }}
           disabled={checking || !!pending.size}>Refresh queue</button
         >
