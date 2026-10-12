@@ -1,6 +1,6 @@
 # Order Pad
 
-A touch-friendly SvelteKit/TypeScript ice cream order builder with preparation receipts, simulation, USB printing and durable local recovery. Orders contain separately configured servings; there are no prices or payments.
+A touch-friendly SvelteKit/TypeScript ice cream order builder and shared build queue with preparation receipts, USB printing and durable recovery. Orders contain separately configured servings; there are no prices or payments.
 
 The station uses a **Star TSP143IIIU / TSP100IIIU USB printer attached to the Linux server**, with phones, tablets, or the server itself acting as browser clients. The server sends every order to its single configured local CUPS queue. There is no printer selector or simulation/PassPRNT mode in the ordering interface.
 
@@ -67,11 +67,59 @@ Configure the existing local USB CUPS queue with the Star TSP100 Cutter driver, 
 - `src/lib/printing/session.ts`: saves intent first, locks repeated taps, correlates callbacks, completes attempts once and recovers interruptions as unknown.
 - `src/lib/storage/`: IndexedDB; independent drafts, immutable tickets/separate attempts and atomic first-order intent; unavailable storage blocks sends. Structured tickets use schema 2 and IndexedDB version 2; the one-time v1 reset is described below.
 - `src/routes/+page.svelte`: token-styled serving builder, toast and recovery feedback, collapsed Order tools, and direct USB submissions/reprints.
+- `src/lib/orders/` and `printer-service/orders.ts`: shared order records, disk persistence, polling, and a durable publication outbox; order retries cannot resend printing.
+- `src/routes/queue/`: oldest-first build cards, age badges, completion and Undo.
 - `src/service-worker.ts`: versioned same-origin shell caching; no USB send/result caching or forced mid-job updates.
 
 In the current UI, accepted means CUPS accepted a queue submission, not physical verification. The attempt model still supports simulator/PassPRNT results. Pre-send rejection is failed; partial/interrupted/missing results are unknown. Late/repeated callbacks cannot rewrite a final outcome. URL callbacks are correlated external reports, not authenticated physical proof. It also retains the IV adapter identifier; v1 browser history receives the one-time reset below.
 
-Every new submission and reprint uses the server USB route; there is no transport fallback. Keep one station tab. There is no application background queue, cloud backup or exactly-once guarantee. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
+Every new submission and reprint uses the server USB route; there is no transport fallback. Keep one station tab. There is no background print queue, cloud backup or exactly-once guarantee. Background order updates never invoke a printer. Linux uses the existing CUPS spooler; inspect pending jobs before reprinting. Browser cleanup, origin/profile changes and eviction can remove local data.
+
+## Shared build queue
+
+Open **Build queue** in Order tools, or open `/queue/` at the same Mint HTTPS
+origin on the build-station tablet. The queue polls the service every three seconds,
+sorts open orders by their first submission, and shows serving totals and wait ages.
+Wait badges use moss below five minutes, olive from five to ten, and rust at ten
+minutes or more. **Mark #… done** takes one tap; the latest eight completed orders
+have **Undo**. Ages refresh at least every 30 seconds. Connection errors preserve
+the last received list and expose a refresh action; a failed initial load does not
+claim the queue is empty.
+
+An order is registered on its first print submission, including submissions whose
+print result is failed or unknown. A queue card does not prove physical output.
+Orders are keyed by immutable ticket ID, not reference or attempt ID. Repeated
+upserts leave the original ticket and status unchanged. Reprints never create a
+missing order, duplicate an open card, or reopen a completed order. Only explicit
+Undo reopens it. Completed identities remain on disk even after they leave the
+recent-eight strip. Existing print history is not imported into the queue.
+
+The Linux service atomically saves orders in `ORDER_PAD_DATA/orders/` (default
+`.print-data/orders/`), separately from the print-attempt journal. Preserve both
+across service updates and restarts. One service process owns these files. The
+browser also commits a pending order update alongside first-print intent in its
+existing IndexedDB transaction. Failed publications retry every five seconds and
+survive reloads; these retries call only `/api/orders`, never `/api/print`. This
+also covers a future non-CUPS transport without changing the print session or port.
+Printer submission proceeds if the order registry is temporarily unavailable.
+
+The API uses validated schema 2 tickets and same-origin JSON mutations:
+
+| Endpoint                                       | Result                                                                               |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `POST /api/orders` (ticket body)               | `{ order, created }`; 201 for first creation, 200 for an existing ID left unchanged. |
+| `GET /api/orders`                              | `{ orders }`: all open orders oldest first, then the latest eight done orders.       |
+| `GET /api/orders?status=open` or `status=done` | Open orders or the latest eight done orders.                                         |
+| `POST /api/orders/:id/done` (`{}` body)        | `{ order }`; idempotently marks it done.                                             |
+| `POST /api/orders/:id/reopen` (`{}` body)      | `{ order }`; idempotently reopens it, retaining its first submission time.           |
+
+Each order contains `ticket`, `submittedAt` (the ticket’s original submission time
+in ISO UTC), `status`, and the server’s `doneAt` when done. Delayed publications
+retain the original time so waiting ages do not reset when a connection recovers.
+Unknown IDs return 404; unavailable order storage returns 503. API
+responses are uncached. References still come from the existing browser counter:
+keep one ordering station. Prisma, Postgres, SSE, and shared reference allocation
+are deferred; this phase requires no Docker setup.
 
 ## Phase 1 storage upgrade
 
@@ -87,8 +135,7 @@ The printer service's durable `.print-data` journal and CUPS jobs are not reset,
 and the upgrade never sends or retries a print. Browser order numbers restart at
 `#0001`, increase as new drafts are saved, and survive reloads. Reprints retain the
 original number, display name, timestamp, servings, and ticket ID. Abandoned
-orders can leave gaps. Keep one station tab; shared allocation across phones is
-deferred to the shared-store phase.
+orders can leave gaps. Keep one station tab; shared reference allocation across ordering phones remains deferred. The build queue can be viewed from multiple devices, but use one order-taking station.
 
 Prep tickets calculate scoop totals from their servings (the pictured #0043 order
 contains six scoops). Names are optional, sanitized, and limited to 80 printable
@@ -103,4 +150,4 @@ physical layout and cutting verification on the printer.
 
 After an online load, the production service worker caches the app shell. Drafts can be recovered while offline, but printer API requests remain live and uncached; printing requires reaching the server. Serve service-worker.js with revalidation.
 
-Automated checks use mocked printer commands/API responses. Complete the [Linux acceptance checklist](docs/linux-printing.md) on the station to verify the updated interaction flow, physical receipt layout, and cutting. Drafts and history are local to one browser/origin; shared history and cross-device synchronization remain deferred.
+Automated checks use mocked printer commands/API responses. Complete the [Linux acceptance checklist](docs/linux-printing.md) on the station to verify the updated interaction flow, physical receipt layout, and cutting. Drafts and print-attempt history stay local to one browser/origin. Build orders synchronize through the Linux service; shared reference allocation remains deferred.

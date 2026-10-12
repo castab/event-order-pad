@@ -200,11 +200,48 @@ export class IndexedDbTicketStore implements TicketStore {
         tx.objectStore('tickets').add(valid);
         tx.objectStore('settings').put(valid.id, 'latest');
         tx.objectStore('settings').put(locked, 'draft');
+        tx.objectStore('settings').put(valid, `queueOrder:${valid.id}`);
         this.recordReference(tx, valid.reference);
         tx.objectStore('attempts').add(attempt);
         done(undefined);
       },
     );
+  }
+
+  /** First-print queue updates commit with intent; reprints never enter this outbox. */
+  async pendingOrders(): Promise<readonly OrderTicket[]> {
+    return this.transaction(['settings'], 'readonly', (tx, done) => {
+      const tickets: OrderTicket[] = [];
+      const request = tx.objectStore('settings').openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          done(Object.freeze(tickets));
+          return;
+        }
+        if (
+          typeof cursor.key === 'string' &&
+          cursor.key.startsWith('queueOrder:')
+        ) {
+          try {
+            const ticket = parseTicket(cursor.value);
+            if (cursor.key !== `queueOrder:${ticket.id}`)
+              throw new Error('Invalid outbox identity.');
+            tickets.push(ticket);
+          } catch {
+            tx.abort();
+            return;
+          }
+        }
+        cursor.continue();
+      };
+    });
+  }
+  async acknowledgeOrder(id: string): Promise<void> {
+    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
+      tx.objectStore('settings').delete(`queueOrder:${id}`);
+      done(undefined);
+    });
   }
 
   async saveTicket(ticket: OrderTicket): Promise<void> {

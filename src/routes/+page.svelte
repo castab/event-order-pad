@@ -1,9 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import designTokens from '../../design/tokens/tokens.css?raw';
-  // The supplied logo font is unused and absent; retain the shared design tokens.
-  const tokenCss = designTokens.replace(/@font-face\s*\{[^}]*\}/g, '');
-  import '$lib/builder.css';
+  import { OrderPublisher } from '$lib/orders/publisher';
   import { formatTicket } from '$lib/tickets/format';
   import { blankNameLabel, cleanCustomerName } from '$lib/tickets/ticket';
   import {
@@ -32,6 +29,8 @@
     type LinuxPrinterStatus,
   } from '$lib/printing/adapters/linux-cups';
 
+  let queueNotice = $state('');
+  let publisher: OrderPublisher | undefined;
   let toolsOpen = $state(false);
   let toast = $state<{
     title: string;
@@ -151,10 +150,21 @@
     window.addEventListener('offline', updateOnline);
     let cancelled = false;
     try {
-      session = new PrintSession(new IndexedDbTicketStore(), (next) => {
-        viewState = next;
+      const store = new IndexedDbTicketStore();
+      publisher = new OrderPublisher(store, (notice) => {
+        if (!cancelled) queueNotice = notice;
       });
-      void session.initialize();
+      session = new PrintSession(store, (next) => {
+        viewState = next;
+        if (
+          next.phase === 'printing' &&
+          next.attempts.at(-1)?.reprint === false
+        )
+          void publisher?.flush();
+      });
+      void session.initialize().then(() => {
+        if (!cancelled && viewState.phase === 'ready') publisher?.start();
+      });
     } catch {
       viewState = {
         phase: 'blocked',
@@ -182,6 +192,7 @@
     return () => {
       cancelled = true;
       clearTimeout(toastTimer);
+      publisher?.stop();
       window.removeEventListener('online', updateOnline);
       window.removeEventListener('offline', updateOnline);
     };
@@ -365,7 +376,6 @@
 </script>
 
 <svelte:head>
-  {@html `<style>${tokenCss}</style>`}
   <title>Order Pad · Build an order</title>
   <meta
     name="description"
@@ -708,6 +718,10 @@
         ></button
       >
       <div id="order-tools-panel" hidden={!toolsOpen}>
+        <a class="queue-link" href="/queue/">Build queue</a>
+        {#if queueNotice}<p role="status" aria-label="Queue synchronization">
+            {queueNotice}
+          </p>{/if}
         <section aria-labelledby="usb-title" class="tools-card">
           <h2 id="usb-title">Printer settings</h2>
           <p>

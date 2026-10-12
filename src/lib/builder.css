@@ -628,3 +628,9 @@ dt {
     scroll-behavior: auto !important;
   }
 }
+.queue-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--brand-strong);
+}

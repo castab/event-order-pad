@@ -2,6 +2,8 @@ import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Cups } from './cups';
 import { Printing } from './printing';
+import { Orders } from './orders';
+import { join } from 'node:path';
 import { createApp } from './http';
 
 if (process.platform !== 'linux')
@@ -31,7 +33,10 @@ const printing = new Printing(
   process.env.ORDER_PAD_FONT ??
     '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
 );
-createApp({ origin, port, root, cups, printing }).listen(
+const orders = new Orders(
+  join(resolve(process.env.ORDER_PAD_DATA ?? '.print-data'), 'orders'),
+);
+createApp({ origin, port, root, cups, printing, orders }).listen(
   port,
   '127.0.0.1',
   () =>

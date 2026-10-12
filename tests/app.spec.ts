@@ -63,6 +63,15 @@ async function readDraft(page: Page): Promise<OrderDraft> {
 async function mockUsb(page: Page) {
   const submitted: PrintRequest[] = [];
   const lockedDrafts: OrderDraft[] = [];
+  await page.route('**/api/orders', (route) => {
+    const ticket = route.request().postDataJSON() as OrderTicket;
+    return route.fulfill({
+      json: {
+        created: true,
+        order: { ticket, status: 'open', submittedAt: ticket.createdAt },
+      },
+    });
+  });
   await page.route('**/api/printer', (route) =>
     route.fulfill({
       json: {

@@ -155,5 +155,34 @@ describe('v2 browser storage and numeric references', () => {
     expect(await counter(factory)).toBe(43);
     expect((await store.load())?.attempts).toEqual([]);
     expect((await store.load())?.ticket).toEqual(ticket);
+    expect(await store.pendingOrders()).toEqual([]);
   });
+});
+
+it('persists first-print order outbox with intent across reloads; reprints never add an outbox entry', async () => {
+  const factory = new IDBFactory();
+  const store = new IndexedDbTicketStore(factory, 'history');
+  let id = 0;
+  const session = new PrintSession(
+    store,
+    () => {},
+    () => `id-${++id}`,
+  );
+  const printer = new SimulatedPrinter('accepted', 0);
+  await session.initialize();
+  session.updateDraft({ ...session.state.draft!, servings: [serving] });
+  expect(await store.pendingOrders()).toEqual([]);
+  await session.submit(printer);
+  const ticket = session.state.ticket!;
+  const reload = new IndexedDbTicketStore(factory, 'history');
+  expect(await reload.pendingOrders()).toEqual([ticket]);
+  await session.print(printer, true);
+  expect(await reload.pendingOrders()).toEqual([ticket]);
+  await reload.acknowledgeOrder(ticket.id);
+  await session.print(printer, true);
+  expect(await store.pendingOrders()).toEqual([]);
+  await store.saveTicket(
+    sampleTicket('historical-ticket', '2026-10-11T20:00:00.000Z'),
+  );
+  expect(await store.pendingOrders()).toEqual([]);
 });
