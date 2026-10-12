@@ -1,0 +1,245 @@
+# Order builder, prep ticket & build queue — implementation brief
+
+This folder is the design handoff for the next milestone: touch order entry that prints a
+preparation ticket, plus a second screen where the build station tracks open orders and marks
+them done. It replaces handwritten notepad orders with a fixed, repeatable format.
+
+## What's in here
+
+| Path | What it is |
+| --- | --- |
+| `screens/order-builder.dc.html` | Order-taking screen, phone (S10e, designed at 390×844). |
+| `screens/prep-ticket.dc.html` | The printed ticket, 80 mm roll, designed at 576 px wide (72 mm printable at 203 dpi). |
+| `screens/build-queue.dc.html` | Build-station queue, landscape tablet (designed at 1180×820). |
+| `tokens/tokens.json`, `tokens/tokens.css`, `tokens/bundle.css` | Fiona's Ice Cream design system values: colors, type, spacing, radii, shadows. |
+
+**The `.dc.html` files are reference designs, not code to ship.** They were made in a design
+canvas and use its template syntax (`<x-dc>`, `<sc-for>`, `<sc-if>`, `{{ hole }}`,
+`<x-import component-from-global-scope=…>` for design-system components, `./support.js`). They
+will not render on their own. Read them for:
+
+- exact layout, spacing, colors and copy (inline `style` attributes use the token CSS variables);
+- states and conditional UI (`<sc-if>` blocks);
+- behavior: the `<script type="text/x-dc">` block at the bottom of each file is a working
+  reference implementation of the screen logic (validation, editing, toast, queue).
+
+Rebuild them as Svelte components in this app. Do not import the `.dc.html` files or add a
+React runtime. The design system's `Button`, `Badge`, `Input`, `Card` and `Wordmark` are React
+components in the source system; recreate their look in Svelte from the tokens (pill buttons,
+16 px cards, 10 px inputs, Poppins). The Wordmark is supplied logo art — ask the owner for
+`logo.svg` rather than typesetting the brand name.
+
+Keep everything in `README.md` → "Boundaries and reliability" true. In particular: tickets stay
+immutable, intent is saved before any send, real mode never falls back to simulation, and
+reprints keep the original ticket ID.
+
+## Ordering rules (source of truth)
+
+Soft serve is not offered for now.
+
+**A serving is one cup or cone.**
+
+- **Flavors:** Chocolate, Vanilla, Strawberry, Chocolate Chip. Each flavor has its own − and +
+  controls, so flavors can be mixed in one serving.
+- **Scoops:** 1–5 total per serving, counted across all flavors (2 Chocolate Chip + 1 Strawberry
+  = 3). The editor starts at 0; at least one scoop is required. At 5, every + is disabled until a
+  scoop is removed.
+- **Container:** exactly one of Cup, Cake Cone, Sugar Cone. None is preselected.
+- **Toppings:** optional, any combination of Whipped cream, Gummy Bears, Caramel Sauce,
+  Chocolate Sauce, Sliced Almonds, Maraschino Cherries. With none selected the ticket prints
+  "No toppings".
+
+**Orders.**
+
+- Up to 30 servings per order, also subject to the ticket's maximum printable length.
+- Single-serving order: configure the serving and press **Print order**. Printing includes the
+  serving currently being edited.
+- Multi-serving order: press **Add serving** after each serving to save it and start the next;
+  configure the last one, then **Print order**.
+- Saved servings can be edited or removed before printing. While editing, **Save serving**
+  replaces that serving, and **Print order** prints the replacement (never a duplicate).
+- **Cancel serving** clears the unfinished serving. While editing, it becomes **Cancel edit** and
+  discards the edit, leaving the saved serving as it was.
+- **Validation:** every serving needs ≥1 scoop and a container. An incomplete serving blocks
+  Add serving and Print order and must be finished or cancelled. Show what's missing
+  ("To finish this serving: add at least one scoop and choose a container.").
+- **Customer name:** optional, ≤80 printable characters (strip control characters). If blank,
+  use a stable two-word label (below).
+- No prices or payments anywhere.
+- After printing, **Reprint last order** prints the previous ticket again with the REPRINT marker
+  and the same ticket ID.
+
+### Blank-name label
+
+Friendly adjective + ice-cream noun, derived from the order reference number `n` so it is
+stable across reprints and reloads:
+
+```ts
+const ADJ = ['Happy','Sunny','Jolly','Cheery','Lucky','Cozy','Breezy','Bouncy','Friendly','Merry','Peppy','Snazzy'];
+const NOUN = ['Sprinkle','Waffle','Cherry','Scoop','Sundae','Cone','Swirl','Fudge','Gumdrop','Almond','Caramel','Gummy Bear'];
+const label = (n: number) => `${ADJ[(n * 7) % ADJ.length]} ${NOUN[(n * 3 + 1) % NOUN.length]}`;
+// #43 → "Sunny Caramel", #44 → "Friendly Waffle"
+```
+
+Store the resolved display name on the ticket at creation so it never depends on recomputing.
+
+## Domain changes (`src/lib/tickets/`)
+
+The current `TicketItem { name, quantity, modifiers[], instructions? }` can't express the
+servings rules. Replace it with structured servings. Keep `parseTicket` as the single validating
+entry point and keep everything frozen.
+
+```ts
+export const FLAVORS = ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'] as const;
+export const CONTAINERS = ['Cup', 'Cake Cone', 'Sugar Cone'] as const;
+export const TOPPINGS = ['Whipped cream', 'Gummy Bears', 'Caramel Sauce', 'Chocolate Sauce',
+  'Sliced Almonds', 'Maraschino Cherries'] as const;
+
+export interface Serving {
+  readonly flavors: readonly { flavor: Flavor; count: number }[]; // menu order, counts ≥1, sum 1–5
+  readonly container: Container;
+  readonly toppings: readonly Topping[];                          // menu order, no duplicates
+}
+
+export interface OrderTicket {
+  readonly id: string;
+  readonly createdAt: string;      // ISO UTC, as today
+  readonly reference: string;      // e.g. "0043"
+  readonly customerName?: string;  // what was typed, ≤80
+  readonly displayName: string;    // customerName or the blank-name label
+  readonly servings: readonly Serving[]; // 1–30
+}
+```
+
+- Validation in `parseTicket`: known values only; scoop totals 1–5; 1–30 servings; flavors and
+  toppings normalized to menu order so identical orders always serialize identically.
+- Tickets already stored in IndexedDB use the old `items` shape. Either version the schema
+  (`schema: 2`) and keep a read-only parser for v1 history, or document a one-time reset. Don't
+  let old records crash history.
+- `sampleTicket()` should become the #0043 order shown in `screens/prep-ticket.dc.html`.
+- The order reference needs a persistent, increasing counter (IndexedDB now; the shared store
+  later, see the build queue).
+
+## The prep ticket (`formatTicket` and the PassPRNT/PDF renderers)
+
+Layout, top to bottom (see `screens/prep-ticket.dc.html`):
+
+1. REPRINT banner (reprints only): inverse block, "REPRINT", "Check for the first copy before
+   building".
+2. "PREP TICKET" and the local date/time (e.g. `Sun 10/11 · 7:42 PM`, station local time
+   rather than UTC).
+3. Order number, very large (`#0043`).
+4. Display name, large, uppercase.
+5. Totals box: `3 SERVINGS | 7 SCOOPS`.
+6. Heavy rule, then one block per serving, always in this field order:
+   - tick box + `SERVING 1 OF 3`
+   - scoop total in an inverse tag + container: `[3] SCOOPS · SUGAR CONE`
+   - one line per flavor: `2 × Chocolate Chip`
+   - `TOPPINGS` + comma list, or `No toppings`
+   - dashed rule between servings, heavy rule after the last
+7. `END OF TICKET` and the ticket ID.
+
+Black on white only (thermal). The 42-column text layout should follow the same order using
+ASCII separators, e.g.:
+
+```
+PREP TICKET               SUN 10/11 7:42 PM
+ORDER #0043
+MARIA
+3 SERVINGS | 7 SCOOPS
+==========================================
+[ ] SERVING 1 OF 3
+    3 SCOOPS - SUGAR CONE
+    2 x Chocolate Chip
+    1 x Strawberry
+    TOPPINGS: Whipped cream, Chocolate Sauce
+------------------------------------------
+```
+
+Enforce a maximum ticket length (lines or rendered height) and block **Print order** with a
+clear message when an order would exceed it, even under 30 servings.
+
+## Order builder screen (`src/routes/+page.svelte` or a new route)
+
+See `screens/order-builder.dc.html`. Structure:
+
+- **Header** (olive): logo, `ORDER #0043`, and a reprint icon button (disabled until something
+  has printed; `aria-label="Reprint last order"`).
+- **Customer name** input with hint "Left blank, the ticket says “Sunny Caramel”" (live label).
+- **Saved servings** list: number, `3 scoops · Sugar Cone`, flavor mix + topping count; tap to
+  edit (highlighted "Editing now"), trash button to remove. Shows `n of 30`. Hidden when empty.
+- **Serving editor** card titled "Serving N":
+  - Flavors: four rows, name + − count + (44 px round buttons); 5-dot scoop meter and
+    `3 / 5 scoops`; at 5, the note "5 scoops is the most per serving. Remove one to change the mix."
+  - Container: three equal toggle buttons.
+  - Toppings: 2-column toggle grid, marked Optional.
+- **Bottom bar**: red status line when the serving is incomplete; row of
+  `Cancel serving | Add serving` (or `Cancel edit | Save serving`); full-width **Print order**
+  (`Print order · 3 servings` when more than one).
+- Tapping a saved serving while a new serving is half-built does nothing (protects the draft);
+  finish or cancel it first.
+- **On print:** don't navigate. Save intent and send through the existing session/port, then
+  immediately reset to a new order (next reference, blank name, no servings) and show a toast
+  under the header: "Order #0043 sent to the printer" / "Maria · 3 servings · 7 scoops", with
+  **Reprint** and dismiss, auto-hiding after ~6 s. A reprint shows "Reprint of #0043 sent /
+  Marked REPRINT on the ticket".
+
+  Real printing results are accepted/failed/unknown. The design shows the accepted case. A
+  failed or unknown result must not silently vanish: keep the existing recovery UI and show the
+  toast in an error tone with the recovery action instead.
+
+- Touch targets ≥44 px; every toggle is a real `<button aria-pressed>`; the scoop count is
+  announced (`aria-live`).
+
+## Build queue screen (new route, e.g. `/queue`)
+
+See `screens/build-queue.dc.html`.
+
+- **Header:** logo, "BUILD QUEUE", and counts: open orders, servings to build, oldest wait.
+- **Grid of open orders**, oldest first, three columns on a landscape tablet. Each card shows:
+  - order number, display name, time placed;
+  - a wait badge that names the time and is tinted by age (moss under 5 min, olive 5–10, rust
+    10+);
+  - servings listed in ticket order;
+  - **Mark #0043 done**, a single tap with no confirmation.
+- **Recently done** strip along the bottom (last ~8) with **Undo** to reopen a mistaken tap.
+- **Empty state:** "All caught up / New orders show up here the moment they print."
+- Ages refresh at least every 30 s.
+
+**Rules:**
+
+- An order appears when it is first submitted for printing.
+- A reprint never adds a card and never reopens a done order.
+- Key everything by ticket ID; the first print upserts, later ones are no-ops.
+
+### Shared order store
+
+The builder (phone) and the queue (tablet) are different devices, so IndexedDB can't be the
+source of truth for the queue. Use the Linux printer service, which already serves the app and
+keeps a durable journal:
+
+- `POST /api/orders` — idempotent upsert by ticket ID; body is the validated ticket. Created as
+  `open`. An existing ID is left unchanged, which covers reprints.
+- `GET /api/orders?status=open` (plus recent `done`) — for the queue; poll every 2–5 s, or use
+  Server-Sent Events.
+- `POST /api/orders/:id/done` and `POST /api/orders/:id/reopen` (undo).
+- Persist to disk like the existing attempt journal so a restart doesn't lose the queue.
+- The CUPS path can record the order when the print is submitted. The PassPRNT path never touches
+  the service, so the builder must also `POST /api/orders` (same origin) when it saves print
+  intent. If that call fails, the ticket still prints; retry the upsert in the background.
+- Consider moving reference-number assignment to the service so two order-taking phones can't
+  issue the same number.
+
+## Suggested phases
+
+1. **Domain + ticket:** new `Serving`/`OrderTicket` model, validation, blank-name label,
+   `formatTicket` and the PassPRNT/PDF layouts, legacy history handling. Unit tests for every rule
+   above.
+2. **Order builder UI:** editor, saved servings, edit/cancel/save, print + toast + reprint,
+   wired to the existing session and port. Playwright tests for single-serving, multi-serving,
+   edit-then-print (no duplicate), incomplete-blocks-print, 5-scoop cap, 30-serving cap.
+3. **Build queue:** service endpoints and persistence, `/queue` route, reprint-doesn't-reopen
+   test, undo test.
+
+Keep `npm run check`, `lint`, `test`, `build`, `build:printer` and `test:e2e` passing at every
+phase.
