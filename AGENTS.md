@@ -13,7 +13,7 @@ The service imports domain code from `src/lib/` directly, so the browser and the
 
 ## Setup and verification
 
-Node 22.12 or later (CI uses Node 24) and npm. Everything except _running_ the service works on Windows, macOS and Linux. The service refuses to start on anything other than Linux.
+Node 22.17 or later (CI uses Node 24) and npm. Everything except _running_ the service works on Windows, macOS and Linux. The service refuses to start on anything other than Linux.
 
 ```sh
 npm ci
@@ -23,7 +23,7 @@ npx playwright install chromium   # once
 **Definition of done.** Run all of these and make sure they pass. Order matters: `test:e2e` serves `build/`, so `build` has to run first.
 
 ```sh
-npm run check          # svelte-check (0 errors, 0 warnings) + tsc for printer-service
+npm run check          # svelte-check (0 errors, 0 warnings) + tsc for printer-service and the service worker
 npm run lint           # Prettier, including Markdown; fix with `npm run format`
 npm test               # Vitest: src/**/*.test.ts and printer-service/**/*.test.ts
 npm run build          # build/
@@ -60,7 +60,7 @@ npx playwright test --project=builder-390x844  # app.spec.ts at phone size only
 | `src/lib/orders/order.ts`                                   | `QueueOrder`, `parseOrder`, `sortOrders`, and wait-time helpers (`waitMinutes`, `waitTone`).                                                                                                                  |
 | `src/lib/orders/{live,client,stream,features,publisher}.ts` | Snapshot and version parsing, REST client, `QueueFeed` (EventSource with a 45 s watchdog), the tracking flag, and `OrderPublisher` (5 s outbox retry).                                                        |
 | `src/lib/orders/pack.ts`                                    | `columnCount` and `packColumns`: shortest-column card packing for the queue.                                                                                                                                  |
-| `src/lib/app-update.ts`, `src/service-worker.ts`            | Network-first shell cache and update reloads that wait until `holdUpdates()` is released.                                                                                                                     |
+| `src/lib/app-update.ts`, `src/service-worker/index.ts`      | Network-first shell cache and update reloads that wait until `holdUpdates()` is released.                                                                                                                     |
 | `src/routes/+page.svelte`                                   | Order builder UI. It wires `PrintSession`, `LinuxCupsPrinter`, `OrderPublisher`, the toast, recovery and Order tools together.                                                                                |
 | `src/routes/queue/+page.svelte`                             | Now Scooping UI: measured column packing, chips, Done and Undo, and handling of the tracking-disabled state.                                                                                                  |
 | `src/routes/+layout.svelte`, `+layout.ts`                   | Injects `design/tokens/tokens.css` (with `@font-face` stripped), loads `src/lib/builder.css`, starts update checks, and sets `prerender = true`.                                                              |
@@ -88,7 +88,7 @@ Each rule exists to prevent a duplicate or lost ticket during service. Tests enf
 8. **Tracking is optional and never blocks printing.** Failures of `/api/features` or `/api/orders` must not disable the print button. `POST /api/print` registers the order on a best-effort basis and prints regardless.
 9. **No caching of `/api`, and no reload mid-send.** The service worker ignores `/api/*`. `+page.svelte` holds updates while working, awaiting acknowledgment, loading or blocked. Any new long-running UI operation must take a `holdUpdates()` hold too.
 10. **Same-origin only.** The service accepts only its configured Host values. POSTs to `/api/print` and `/api/orders*` require `Origin === ORDER_PAD_ORIGIN` and JSON. Do not add CORS. **A new POST route must be added to the guard in `http.ts` explicitly**, because the guard matches paths and new routes are not covered automatically.
-11. **Shared modules stay portable.** `src/lib/tickets/*`, `src/lib/orders/{order,live,features}.ts` and `src/lib/printing/port.ts` are bundled into the Node service. Use relative imports there, not `#lib` (the printer build has no SvelteKit aliases), and do not touch the DOM, `window` or SvelteKit modules at import time. `src/lib/tickets/` stays pure: no I/O, transport or prices.
+11. **Shared modules stay portable.** `src/lib/tickets/*`, `src/lib/orders/{order,live,features}.ts` and `src/lib/printing/port.ts` are bundled into the Node service. Use relative imports there, not the app's `#lib` import alias (the shared code must not depend on app-level aliases), and do not touch the DOM, `window` or SvelteKit modules at import time. `src/lib/tickets/` stays pure: no I/O, transport or prices.
 12. **Browser storage is station data.** Never rename the `order-pad-v1` database or its stores. Any change to its shape needs a version bump and an `onupgradeneeded` path in `ticket-store.ts`, plus a note in README's upgrade section. The v1 to v2 reset is a one-time, owner-approved exception.
 13. **Accessibility and touch.** Use real `<button>` toggles with `aria-pressed`, keep the `aria-live` scoop total, keep touch targets of at least 44 px, keep DOM order equal to reading order (layout uses `grid-template-areas`, not CSS `order`), and keep `aria-posinset`/`aria-setsize` on queue cards. The Playwright tests find elements by role and accessible name, so renaming a label means updating the tests.
 

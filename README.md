@@ -35,7 +35,7 @@ The only supported print path from the UI is the Linux service. The repository a
 
 ## Quick start (development)
 
-Requirements: Node 22.12 or later (CI uses Node 24) and npm.
+Requirements: Node 22.17 or later (CI uses Node 24) and npm.
 
 ```sh
 npm ci
@@ -95,7 +95,7 @@ src/
   routes/+layout.*    Prerendering, design-token injection, update checks
   routes/+page.svelte         Order builder (/)
   routes/queue/+page.svelte   Now Scooping (/queue/)
-  service-worker.ts   Versioned offline shell cache
+  service-worker/     Versioned offline shell cache (own tsconfig; excluded from the root project)
 printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, print journal, order store, SSE
 tests/                Playwright specs (app.spec.ts, queue.spec.ts, queue-live.spec.ts)
 static/               Poppins fonts, logo, icons, web app manifest

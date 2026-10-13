@@ -9,15 +9,12 @@
     "build:printer": "vite build --config vite.printer.config.ts",
     "start:printer": "node build-printer/server.mjs",
     "preview": "vite preview --host 0.0.0.0",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && tsc -p tsconfig.printer.json",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && tsc -p tsconfig.printer.json && tsc -p src/service-worker/tsconfig.json",
     "lint": "prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"
-  },
-  "overrides": {
-    "cookie": "0.7.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

@@ -6,7 +6,7 @@ The service hosts the static app and accepts same-origin print requests. The pho
 
 ## Start on Mint
 
-Prerequisites: a working local USB CUPS queue with **Star TSP100 Cutter (en)**, Node **22.12+ or 24**, Git, Tailscale connected to the phone's tailnet. Check `node --version`; distribution Node packages may be older. Use the [official Node installation guide](https://nodejs.org/en/download) if needed. Run the app as your normal user. Use the existing queue's exact name; creating or renaming a queue is unnecessary.
+Prerequisites: a working local USB CUPS queue with **Star TSP100 Cutter (en)**, Node **22.17+ or 24**, Git, Tailscale connected to the phone's tailnet. Check `node --version`; distribution Node packages may be older. Use the [official Node installation guide](https://nodejs.org/en/download) if needed. Run the app as your normal user. Use the existing queue's exact name; creating or renaming a queue is unnecessary.
 
 Confirm the queue and options:
 
