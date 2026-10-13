@@ -8,5 +8,20 @@ export default defineConfig({
     url: 'http://localhost:4175',
     reuseExistingServer: false,
   },
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  projects: [
+    {
+      name: 'chromium',
+      testIgnore: 'app.spec.ts',
+      use: { browserName: 'chromium' },
+    },
+    ...[
+      { width: 390, height: 844 },
+      { width: 820, height: 1180 },
+      { width: 1280, height: 800 },
+    ].map((viewport) => ({
+      name: `builder-${viewport.width}x${viewport.height}`,
+      testMatch: 'app.spec.ts',
+      use: { browserName: 'chromium' as const, viewport },
+    })),
+  ],
 });

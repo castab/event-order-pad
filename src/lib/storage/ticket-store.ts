@@ -1,5 +1,6 @@
 import { parseTicket, type OrderTicket } from '../tickets/ticket';
 import type { PrintAttempt } from '../printing/port';
+import { newDraft, parseDraft, type OrderDraft } from '../tickets/order';
 
 export interface SavedSession {
   readonly ticket: OrderTicket;
@@ -9,7 +10,14 @@ export interface TicketStore {
   load(): Promise<SavedSession | undefined>;
   saveTicket(ticket: OrderTicket): Promise<void>;
   startAttempt(attempt: PrintAttempt): Promise<void>;
-  finishAttempt(attempt: PrintAttempt): Promise<void>;
+  finishAttempt(attempt: PrintAttempt, nextDraft?: OrderDraft): Promise<void>;
+  loadDraft(): Promise<OrderDraft | undefined>;
+  saveDraft(draft: OrderDraft): Promise<void>;
+  startOrder(
+    ticket: OrderTicket,
+    draft: OrderDraft,
+    attempt: PrintAttempt,
+  ): Promise<void>;
 }
 
 /** One latest ticket, with append-only attempt IDs and individual final outcomes. */
@@ -18,15 +26,26 @@ export class IndexedDbTicketStore implements TicketStore {
   constructor(
     private factory: IDBFactory = indexedDB,
     private name = 'order-pad-v1',
+    private trackingEnabled = true,
   ) {}
 
   private open(): Promise<IDBDatabase> {
     this.database ??= new Promise((resolve, reject) => {
-      const request = this.factory.open(this.name, 1);
-      request.onupgradeneeded = () => {
-        request.result.createObjectStore('tickets', { keyPath: 'id' });
-        request.result.createObjectStore('attempts', { keyPath: 'id' });
-        request.result.createObjectStore('settings');
+      const request = this.factory.open(this.name, 2);
+      request.onupgradeneeded = (event) => {
+        if (event.oldVersion === 0) {
+          request.result.createObjectStore('tickets', { keyPath: 'id' });
+          request.result.createObjectStore('attempts', { keyPath: 'id' });
+          request.result.createObjectStore('settings');
+        } else {
+          // Authorized one-time reset: v1 items cannot describe structured servings.
+          request.transaction!.objectStore('tickets').clear();
+          request.transaction!.objectStore('attempts').clear();
+          const settings = request.transaction!.objectStore('settings');
+          settings.delete('latest');
+          settings.delete('draft');
+        }
+        request.transaction!.objectStore('settings').put(0, 'referenceCounter');
       };
       request.onsuccess = () => {
         request.result.onversionchange = () => {
@@ -108,6 +127,147 @@ export class IndexedDbTicketStore implements TicketStore {
     );
   }
 
+  async loadDraft(): Promise<OrderDraft | undefined> {
+    return this.transaction(['settings'], 'readonly', (tx, done) => {
+      const request = tx.objectStore('settings').get('draft');
+      request.onsuccess = () => {
+        try {
+          if (request.result) done(parseDraft(request.result));
+          else {
+            const counter = tx.objectStore('settings').get('referenceCounter');
+            counter.onsuccess = () => {
+              try {
+                if (!Number.isSafeInteger(counter.result) || counter.result < 0)
+                  throw new Error('Invalid reference counter.');
+                done(
+                  counter.result ? newDraft(String(counter.result)) : undefined,
+                );
+              } catch {
+                tx.abort();
+              }
+            };
+          }
+        } catch {
+          tx.abort();
+        }
+      };
+    });
+  }
+
+  /** High-water counter commits in the same transaction as each draft/ticket. */
+  private recordReference(tx: IDBTransaction, reference: string): void {
+    const settings = tx.objectStore('settings');
+    const counter = settings.get('referenceCounter');
+    counter.onsuccess = () => {
+      if (!Number.isSafeInteger(counter.result) || counter.result < 0) {
+        tx.abort();
+        return;
+      }
+      settings.put(
+        Math.max(counter.result, Number(reference)),
+        'referenceCounter',
+      );
+    };
+  }
+
+  async saveDraft(draft: OrderDraft): Promise<void> {
+    const valid = parseDraft(draft);
+    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
+      tx.objectStore('settings').put(valid, 'draft');
+      this.recordReference(tx, valid.reference);
+      done(undefined);
+    });
+  }
+
+  /** Commit a new order, its locked draft and first intent together. */
+  async startOrder(
+    ticket: OrderTicket,
+    draft: OrderDraft,
+    attempt: PrintAttempt,
+  ): Promise<void> {
+    const valid = parseTicket(ticket);
+    const locked = parseDraft(draft);
+    if (
+      attempt.ticketId !== valid.id ||
+      locked.submittedTicketId !== valid.id ||
+      attempt.reprint ||
+      attempt.result
+    )
+      throw new Error('Invalid first order attempt.');
+    await this.transaction<void>(
+      ['tickets', 'settings', 'attempts'],
+      'readwrite',
+      (tx, done) => {
+        tx.objectStore('tickets').add(valid);
+        tx.objectStore('settings').put(valid.id, 'latest');
+        tx.objectStore('settings').put(locked, 'draft');
+        if (this.trackingEnabled)
+          tx.objectStore('settings').put(valid, `queueOrder:${valid.id}`);
+        this.recordReference(tx, valid.reference);
+        tx.objectStore('attempts').add(attempt);
+        done(undefined);
+      },
+    );
+  }
+
+  /** Disabling tracking drops only unpublished queue metadata, never print history. */
+  async setTrackingEnabled(enabled: boolean): Promise<void> {
+    this.trackingEnabled = enabled;
+    if (enabled) return;
+    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
+      const request = tx.objectStore('settings').openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          done(undefined);
+          return;
+        }
+        if (
+          typeof cursor.key === 'string' &&
+          cursor.key.startsWith('queueOrder:')
+        )
+          cursor.delete();
+        cursor.continue();
+      };
+    });
+  }
+
+  /** First-print queue updates commit with intent; reprints never enter this outbox. */
+  async pendingOrders(): Promise<readonly OrderTicket[]> {
+    return this.transaction(['settings'], 'readonly', (tx, done) => {
+      const tickets: OrderTicket[] = [];
+      const request = tx.objectStore('settings').openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          done(Object.freeze(tickets));
+          return;
+        }
+        if (
+          typeof cursor.key === 'string' &&
+          cursor.key.startsWith('queueOrder:')
+        ) {
+          try {
+            const ticket = parseTicket(cursor.value);
+            if (cursor.key !== `queueOrder:${ticket.id}`)
+              throw new Error('Invalid outbox identity.');
+            tickets.push(ticket);
+          } catch {
+            tx.abort();
+            return;
+          }
+        }
+        cursor.continue();
+      };
+    });
+  }
+  async acknowledgeOrder(id: string): Promise<void> {
+    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
+      tx.objectStore('settings').delete(`queueOrder:${id}`);
+      done(undefined);
+    });
+  }
+
   async saveTicket(ticket: OrderTicket): Promise<void> {
     const valid = parseTicket(ticket);
     await this.transaction<void>(
@@ -128,6 +288,7 @@ export class IndexedDbTicketStore implements TicketStore {
           }
           store.put(valid);
           tx.objectStore('settings').put(valid.id, 'latest');
+          this.recordReference(tx, valid.reference);
           done(undefined);
         };
       },
@@ -152,27 +313,55 @@ export class IndexedDbTicketStore implements TicketStore {
     );
   }
 
-  async finishAttempt(attempt: PrintAttempt): Promise<void> {
-    await this.transaction<void>(['attempts'], 'readwrite', (tx, done) => {
-      const store = tx.objectStore('attempts');
-      const existing = store.get(attempt.id);
-      existing.onsuccess = () => {
-        const before = existing.result as PrintAttempt | undefined;
-        if (
-          !before ||
-          before.result ||
-          !attempt.result ||
-          before.ticketId !== attempt.ticketId ||
-          before.startedAt !== attempt.startedAt ||
-          before.reprint !== attempt.reprint ||
-          before.mode !== attempt.mode
-        ) {
-          tx.abort();
-          return;
-        }
-        store.put(attempt);
-        done(undefined);
-      };
-    });
+  async finishAttempt(
+    attempt: PrintAttempt,
+    nextDraft?: OrderDraft,
+  ): Promise<void> {
+    const next = nextDraft ? parseDraft(nextDraft) : undefined;
+    if (
+      next &&
+      (next.submittedTicketId || attempt.result?.status !== 'accepted')
+    )
+      throw new Error('Only an accepted attempt can advance to a new draft.');
+    await this.transaction<void>(
+      next ? ['attempts', 'settings'] : ['attempts'],
+      'readwrite',
+      (tx, done) => {
+        const store = tx.objectStore('attempts');
+        const existing = store.get(attempt.id);
+        existing.onsuccess = () => {
+          const before = existing.result as PrintAttempt | undefined;
+          if (
+            !before ||
+            before.result ||
+            !attempt.result ||
+            before.ticketId !== attempt.ticketId ||
+            before.startedAt !== attempt.startedAt ||
+            before.reprint !== attempt.reprint ||
+            before.mode !== attempt.mode
+          ) {
+            tx.abort();
+            return;
+          }
+          if (next) {
+            const settings = tx.objectStore('settings');
+            const current = settings.get('draft');
+            current.onsuccess = () => {
+              if (current.result?.submittedTicketId !== attempt.ticketId) {
+                tx.abort();
+                return;
+              }
+              store.put(attempt);
+              settings.put(next, 'draft');
+              this.recordReference(tx, next.reference);
+              done(undefined);
+            };
+          } else {
+            store.put(attempt);
+            done(undefined);
+          }
+        };
+      },
+    );
   }
 }

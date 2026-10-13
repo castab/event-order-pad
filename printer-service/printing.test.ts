@@ -40,14 +40,14 @@ describe('Linux CUPS printing', () => {
     expect(() => parseRequest({ ...request, attemptId: 1 })).toThrow();
     expect(() => parseRequest({ ...request, reprint: 'false' })).toThrow();
     expect(() =>
-      parseRequest({ ...request, ticket: { ...ticket, items: [] } }),
+      parseRequest({ ...request, ticket: { ...ticket, servings: [] } }),
     ).toThrow();
     expect(() => new Cups('-h remote')).toThrow();
     expect(parseRequest(request).ticket).toEqual(ticket);
   });
   it('selects the smallest supported receipt size without scaling or truncation', async () => {
     const cups = new Cups('OrderPad', runner());
-    expect(await cups.prepare(120)).toEqual({
+    expect(await cups.prepare(120)).toMatchObject({
       media: 'X72MMY200MM',
       heightMm: 200,
     });
@@ -60,7 +60,7 @@ describe('Linux CUPS printing', () => {
           ? ''
           : 'device: usb://Star/TSP143IIIU',
     );
-    expect(await new Cups('OrderPad', run).prepare(120)).toEqual({
+    expect(await new Cups('OrderPad', run).prepare(120)).toMatchObject({
       media: 'Custom.72x120mm',
       heightMm: 120,
     });
@@ -89,6 +89,44 @@ describe('Linux CUPS printing', () => {
     await expect(new Cups('OrderPad', run).check()).rejects.toThrow(
       'Star TSP100',
     );
+  });
+  it('uses the actual Mint Star driver keywords and supported 72 mm stock', async () => {
+    const installed =
+      'PageSize/Media Size: X50D8MMY200MM *X72MMY100MM X72MMY180MM X72MMY2000MM Custom.WIDTHxHEIGHT\nPageType/2. Page Type: *0Variable 1Fixed\nPageCutType/1. Page Cut Type: *0NoCutPage 1PartialCutPage\nDocCutType/2. Document Cut Type: 0NoCutDoc *1PartialCutDoc';
+    const run = runner();
+    const original = run.getMockImplementation()!;
+    run.mockImplementation((program, args, input) =>
+      program === 'lpoptions'
+        ? Promise.resolve(installed)
+        : original(program, args, input),
+    );
+    const cups = new Cups('OrderPad', run);
+    const paper = await cups.prepare(171);
+    expect(paper).toMatchObject({
+      media: 'X72MMY180MM',
+      heightMm: 180,
+    });
+    await cups.check(); // A concurrent readiness check cannot alter this prepared job.
+    await cups.submit(
+      Buffer.from('%PDF-test'),
+      paper.media,
+      'attempt-1',
+      paper.jobOptions,
+    );
+    const args = run.mock.calls.find(([program]) => program === 'lp')![1];
+    expect(args).toContain('PageType=0Variable');
+    expect(args).toContain('PageCutType=0NoCutPage');
+    expect(args).toContain('DocCutType=1PartialCutDoc');
+    expect(args).not.toContain('PageType=Variable0');
+    await expect(cups.prepare(2001)).rejects.toThrow('2000 mm');
+    run.mockImplementation(async (program, args) =>
+      program === 'lpoptions'
+        ? installed.replace('1PartialCutDoc', '1Unsupported')
+        : args.includes('-o')
+          ? ''
+          : 'device: usb://Star/TSP',
+    );
+    await expect(cups.prepare(171)).rejects.toThrow('Star TSP100');
   });
   it('persists intent before lp, passes PDF on stdin, submits one copy with documented cut options', async () => {
     const dir = await directory();
@@ -226,9 +264,9 @@ describe('Linux CUPS printing', () => {
   it('renders one receipt PDF including a reprint without changing the ticket', async () => {
     const layout = receiptLayout(ticket, true);
     expect(layout.lines[0].text).toBe('REPRINT');
-    expect(layout.lines.some((line) => line.text === 'ORDER #0042')).toBe(true);
-    expect(layout.heightMm).toBeLessThan(200);
-    const pdf = await receiptPdf(ticket, true, 'Courier', 200);
+    expect(layout.lines.some((line) => line.text === 'ORDER #0043')).toBe(true);
+    expect(layout.heightMm).toBeLessThan(400);
+    const pdf = await receiptPdf(ticket, true, 'Courier', layout.heightMm);
     expect(pdf.toString('ascii').startsWith('%PDF-')).toBe(true);
     expect(pdf.toString('ascii').match(/\/Type \/Page\b/g)).toHaveLength(1);
     await expect(receiptPdf(ticket, false, 'Courier', 30)).rejects.toThrow(

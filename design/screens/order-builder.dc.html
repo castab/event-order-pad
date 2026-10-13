@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order builder</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/fionasicecreamdesignsystem_65d2e1/styles.css">
+<script src="ds/fionasicecreamdesignsystem_65d2e1/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#4a4733}a:hover{color:#3d3a2b}
+button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
+button:disabled{cursor:default}
+/* Layout only. Phone first: one scrolling column, actions pinned to the bottom. */
+.ob-body{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
+.ob-panel{display:contents}
+.ob-panel-top{order:1;padding:16px 16px 0}
+.ob-editor{order:2;padding:20px 16px 24px}
+.ob-actions{order:3;position:sticky;bottom:0;margin-top:auto}
+.ob-editor-inner{max-width:880px;margin:0 auto}
+.ob-flavors{grid-template-columns:minmax(0,1fr)}
+.ob-toppings{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ob-wide-only{display:none}
+.ob-toast{left:12px;right:12px}
+/* Tablet and up: editor on the left, the order as a side panel on the right. */
+@media (min-width:760px){
+.ob-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,400px);overflow:hidden}
+.ob-editor{overflow-y:auto;padding:24px 28px 32px}
+.ob-panel{display:flex;flex-direction:column;min-height:0;border-left:1px solid rgba(61,58,43,0.16);background:#f6f1e4}
+.ob-panel-top{flex:1 1 auto;min-height:0;overflow-y:auto;padding:20px 20px 16px}
+.ob-actions{position:static;margin-top:0;box-shadow:none !important}
+.ob-wide-only{display:block}
+.ob-phone-only{display:none}
+.ob-toast{left:auto;right:16px;width:380px}
+}
+/* Laptop and up: give the editor more columns. */
+@media (min-width:1100px){
+.ob-flavors{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ob-toppings{grid-template-columns:repeat(3,minmax(0,1fr))}
+.ob-editor{padding:28px 40px 40px}
+}
+</style>
+</helmet>
+<div style="position: relative; width: 100%; height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; background: var(--surface-page); color: var(--ink-700); font-family: var(--font-sans); overflow: hidden">
+
+<div style="height: 60px; flex-shrink: 0; box-sizing: border-box; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; background: var(--surface-inverse); color: var(--text-on-inverse)">
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Wordmark" size="{{ wmSize }}" tone="cream"></x-import>
+<span style="display: flex; align-items: center; gap: 6px">
+<span style="font: 600 13px/1 var(--font-sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--cream-200)">Order #{{ refLabel }}</span>
+<button type="button" aria-label="Reprint last order" title="Reprint last order" onClick="{{ reprint }}" disabled="{{ noLast }}" style="width: 44px; height: 44px; margin-right: -8px; border: none; border-radius: 999px; background: transparent; color: var(--cream-200); display: flex; align-items: center; justify-content: center; cursor: pointer; opacity: {{ reprintOpacity }}"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"></path><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><path d="M6 14h12v7H6z"></path></svg></button>
+</span>
+</div>
+
+<sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+<div class="ob-toast" role="status" aria-live="polite" style="position: absolute; z-index: 10; top: 68px; box-sizing: border-box; padding: 12px 8px 12px 14px; border-radius: 16px; background: var(--olive-900); color: var(--cream-100); box-shadow: var(--shadow-card); display: flex; align-items: center; gap: 12px">
+<span style="width: 36px; height: 36px; flex-shrink: 0; border-radius: 999px; background: var(--moss-600); display: flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+<span style="font: 600 15px/1.3 var(--font-sans)">{{ toastTitle }}</span>
+<span style="font: 400 13px/1.4 var(--font-sans); color: var(--cream-300)">{{ toastDetail }}</span>
+</span>
+<sc-if value="{{ toastCanReprint }}" hint-placeholder-val="{{ true }}">
+<button type="button" onClick="{{ reprint }}" style="min-height: 44px; padding: 0 10px; border: none; border-radius: 999px; background: transparent; color: var(--cream-100); font: 600 12px/1 var(--font-sans); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">Reprint</button>
+</sc-if>
+<button type="button" aria-label="Dismiss" onClick="{{ dismissToast }}" style="width: 40px; height: 44px; flex-shrink: 0; border: none; background: transparent; color: var(--cream-300); display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</div>
+</sc-if>
+
+<div class="ob-body">
+
+<div class="ob-editor">
+<div class="ob-editor-inner">
+<section style="display: flex; flex-direction: column; gap: 20px; padding: 16px; border-radius: 16px; background: var(--cream-100); box-shadow: var(--shadow-card)">
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+<h2 style="margin: 0; font: 700 22px/1.2 var(--font-sans); letter-spacing: -0.015em; color: var(--text-heading)">Serving {{ editorNum }}</h2>
+<sc-if value="{{ isEditing }}" hint-placeholder-val="{{ false }}">
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Badge" tone="olive">Editing</x-import>
+</sc-if>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; align-items: center; justify-content: space-between">
+<h3 style="margin: 0; font: 600 12px/1.4 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--text-muted)">Flavors</h3>
+<span style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: flex; gap: 4px">
+<sc-for list="{{ meter }}" as="m" hint-placeholder-count="5">
+<sc-if value="{{ m.on }}" hint-placeholder-val="{{ false }}"><span style="width: 10px; height: 10px; border-radius: 999px; background: var(--olive-700)"></span></sc-if>
+<sc-if value="{{ m.off }}" hint-placeholder-val="{{ true }}"><span style="width: 10px; height: 10px; box-sizing: border-box; border-radius: 999px; border: 1.5px solid var(--olive-300)"></span></sc-if>
+</sc-for>
+</span>
+<span aria-live="polite" style="font: 600 13px/1 var(--font-sans); color: var(--text-heading)">{{ scoopLabel }}</span>
+</span>
+</div>
+<div class="ob-flavors" style="display: grid; gap: 8px">
+<sc-for list="{{ flavorRows }}" as="f" hint-placeholder-count="4">
+<div style="min-height: 56px; box-sizing: border-box; padding: 6px 6px 6px 14px; border-radius: 10px; background: var(--surface-page); display: flex; align-items: center; justify-content: space-between; gap: 8px">
+<span style="font: 500 16px/1.3 var(--font-sans); color: var(--text-heading)">{{ f.name }}</span>
+<span style="display: flex; align-items: center; gap: 4px">
+<button type="button" aria-label="{{ f.decLabel }}" onClick="{{ f.dec }}" disabled="{{ f.noDec }}" style="width: 44px; height: 44px; border-radius: 999px; border: 1.5px solid var(--olive-300); background: var(--surface-card); color: var(--olive-900); display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+<sc-if value="{{ f.hasAny }}" hint-placeholder-val="{{ false }}"><span style="min-width: 36px; text-align: center; font: 700 20px/1 var(--font-sans); color: var(--text-heading)">{{ f.count }}</span></sc-if>
+<sc-if value="{{ f.isZero }}" hint-placeholder-val="{{ true }}"><span style="min-width: 36px; text-align: center; font: 500 20px/1 var(--font-sans); color: var(--ink-500)">0</span></sc-if>
+<button type="button" aria-label="{{ f.incLabel }}" onClick="{{ f.inc }}" disabled="{{ f.noInc }}" style="width: 44px; height: 44px; border-radius: 999px; border: none; background: var(--olive-700); color: var(--cream-100); display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg></button>
+</span>
+</div>
+</sc-for>
+</div>
+<sc-if value="{{ atMax }}" hint-placeholder-val="{{ false }}">
+<p style="margin: 0; font: 400 13px/1.45 var(--font-sans); color: var(--text-muted)">5 scoops is the most per serving. Remove one to change the mix.</p>
+</sc-if>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<h3 style="margin: 0; font: 600 12px/1.4 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--text-muted)">Container</h3>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+<sc-for list="{{ containers }}" as="c" hint-placeholder-count="3">
+<sc-if value="{{ c.isSelected }}" hint-placeholder-val="{{ false }}">
+<button type="button" aria-pressed="true" onClick="{{ c.pick }}" style="min-height: 52px; padding: 6px; border-radius: 10px; border: 2px solid var(--olive-800); background: var(--olive-700); color: var(--cream-100); font: 600 15px/1.2 var(--font-sans); cursor: pointer">{{ c.label }}</button>
+</sc-if>
+<sc-if value="{{ c.isOpen }}" hint-placeholder-val="{{ true }}">
+<button type="button" aria-pressed="false" onClick="{{ c.pick }}" style="min-height: 52px; padding: 6px; border-radius: 10px; border: 1.5px solid var(--olive-300); background: var(--surface-card); color: var(--ink-700); font: 500 15px/1.2 var(--font-sans); cursor: pointer">{{ c.label }}</button>
+</sc-if>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; align-items: baseline; justify-content: space-between">
+<h3 style="margin: 0; font: 600 12px/1.4 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--text-muted)">Toppings</h3>
+<span style="font: 400 13px/1.4 var(--font-sans); color: var(--text-muted)">Optional</span>
+</div>
+<div class="ob-toppings" style="display: grid; gap: 8px">
+<sc-for list="{{ toppings }}" as="t" hint-placeholder-count="8">
+<sc-if value="{{ t.isSelected }}" hint-placeholder-val="{{ false }}">
+<button type="button" aria-pressed="true" onClick="{{ t.pick }}" style="min-height: 48px; padding: 6px 10px; border-radius: 10px; border: 2px solid var(--olive-800); background: var(--olive-700); color: var(--cream-100); font: 500 14px/1.25 var(--font-sans); display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0"><path d="M20 6 9 17l-5-5"></path></svg>{{ t.label }}</button>
+</sc-if>
+<sc-if value="{{ t.isOpen }}" hint-placeholder-val="{{ true }}">
+<button type="button" aria-pressed="false" onClick="{{ t.pick }}" style="min-height: 48px; padding: 6px 10px; border-radius: 10px; border: 1.5px solid var(--olive-300); background: var(--surface-card); color: var(--ink-700); font: 500 14px/1.25 var(--font-sans); display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="flex-shrink: 0"><path d="M12 5v14M5 12h14"></path></svg>{{ t.label }}</button>
+</sc-if>
+</sc-for>
+</div>
+</div>
+</section>
+</div>
+</div>
+
+<div class="ob-panel">
+<div class="ob-panel-top" style="display: flex; flex-direction: column; gap: 20px">
+<div class="ob-wide-only">
+<div style="display: flex; align-items: baseline; justify-content: space-between">
+<h2 style="margin: 0; font: 700 22px/1.2 var(--font-sans); letter-spacing: -0.015em; color: var(--text-heading)">This order</h2>
+<span style="font: 500 13px/1.4 var(--font-sans); color: var(--text-muted)">{{ orderSummary }}</span>
+</div>
+</div>
+
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Input" label="Customer name (optional)" hint="{{ nameHint }}" placeholder="{{ fallbackName }}" value="{{ name }}" on-change="{{ onName }}"></x-import>
+
+<sc-if value="{{ hasSaved }}" hint-placeholder-val="{{ true }}">
+<section style="display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; align-items: baseline; justify-content: space-between">
+<h2 style="margin: 0; font: 600 12px/1.4 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--text-muted)">Saved servings</h2>
+<span style="font: 500 13px/1.4 var(--font-sans); color: var(--text-muted)">{{ savedCount }} of 30</span>
+</div>
+<sc-for list="{{ saved }}" as="s" hint-placeholder-count="2">
+<div style="display: flex; align-items: stretch; gap: 6px">
+<sc-if value="{{ s.isEditing }}" hint-placeholder-val="{{ false }}">
+<button type="button" aria-pressed="true" onClick="{{ s.edit }}" style="flex-grow: 1; min-height: 56px; padding: 8px 12px; border-radius: 16px; border: 2px solid var(--olive-800); background: var(--olive-700); color: var(--cream-100); display: flex; align-items: center; gap: 12px; text-align: left; font-family: var(--font-sans); cursor: pointer">
+<span style="width: 28px; height: 28px; flex-shrink: 0; border-radius: 999px; background: var(--cream-200); color: var(--olive-900); font: 700 13px/28px var(--font-sans); text-align: center">{{ s.num }}</span>
+<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+<span style="font: 600 15px/1.3 var(--font-sans)">{{ s.headline }}</span>
+<span style="font: 400 13px/1.35 var(--font-sans); color: var(--cream-300)">Editing now</span>
+</span>
+</button>
+</sc-if>
+<sc-if value="{{ s.notEditing }}" hint-placeholder-val="{{ true }}">
+<button type="button" aria-label="{{ s.editLabel }}" onClick="{{ s.edit }}" style="flex-grow: 1; min-height: 56px; padding: 8px 12px; border-radius: 16px; border: 2px solid transparent; background: var(--surface-card); box-shadow: var(--shadow-raised); color: var(--text-heading); display: flex; align-items: center; gap: 12px; text-align: left; font-family: var(--font-sans); cursor: pointer">
+<span style="width: 28px; height: 28px; flex-shrink: 0; border-radius: 999px; background: var(--olive-700); color: var(--cream-100); font: 700 13px/28px var(--font-sans); text-align: center">{{ s.num }}</span>
+<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+<span style="font: 600 15px/1.3 var(--font-sans)">{{ s.headline }}</span>
+<span style="font: 400 13px/1.35 var(--font-sans); color: var(--text-muted)">{{ s.detail }}</span>
+</span>
+</button>
+</sc-if>
+<button type="button" aria-label="{{ s.removeLabel }}" onClick="{{ s.remove }}" style="width: 48px; flex-shrink: 0; border-radius: 16px; border: 1.5px solid var(--border-soft); background: transparent; color: var(--rust-600); display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path></svg></button>
+</div>
+</sc-for>
+</section>
+</sc-if>
+
+<sc-if value="{{ noSaved }}" hint-placeholder-val="{{ false }}">
+<p class="ob-wide-only" style="margin: 0; padding: 20px 16px; border-radius: 16px; border: 1.5px dashed var(--paper-300); text-align: center; font: 400 14px/1.55 var(--font-sans); color: var(--text-muted)">Servings you add show up here. For a one-serving order, just press Print order.</p>
+</sc-if>
+</div>
+
+<div class="ob-actions" style="flex-shrink: 0; box-sizing: border-box; padding: 10px 16px 16px; display: flex; flex-direction: column; gap: 8px; background: var(--surface-card); border-top: 1px solid var(--border-soft); box-shadow: 0 -8px 20px rgba(61,58,43,0.06)">
+<sc-if value="{{ hasProblem }}" hint-placeholder-val="{{ false }}">
+<p role="status" style="margin: 0; text-align: center; font: 500 13px/1.4 var(--font-sans); color: var(--rust-600)">{{ problemText }}</p>
+</sc-if>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Button" variant="ghost" size="md" disabled="{{ cannotCancel }}" on-click="{{ cancel }}" style="width: 100%">{{ cancelLabel }}</x-import>
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Button" variant="secondary" size="md" disabled="{{ cannotSave }}" on-click="{{ save }}" style="width: 100%">{{ saveLabel }}</x-import>
+</div>
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Button" variant="primary" size="lg" disabled="{{ cannotPrint }}" on-click="{{ print }}" style="width: 100%">{{ printLabel }}</x-import>
+</div>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+var FLAVORS = ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'];
+var CONTAINERS = ['Cup', 'Cake Cone', 'Sugar Cone'];
+var TOPPINGS = ['Whipped cream', 'Gummy Bears', 'Caramel Sauce', 'Chocolate Sauce', 'Sliced Almonds', 'Maraschino Cherries', 'Rainbow Sprinkles', 'Chocolate Sprinkles'];
+var MAX_SCOOPS = 5;
+var MAX_SERVINGS = 30;
+var ADJ = ['Happy', 'Sunny', 'Jolly', 'Cheery', 'Lucky', 'Cozy', 'Breezy', 'Bouncy', 'Friendly', 'Merry', 'Peppy', 'Snazzy'];
+var NOUN = ['Sprinkle', 'Waffle', 'Cherry', 'Scoop', 'Sundae', 'Cone', 'Swirl', 'Fudge', 'Gumdrop', 'Almond', 'Caramel', 'Gummy Bear'];
+
+function emptyServing() { return { counts: { 'Chocolate': 0, 'Vanilla': 0, 'Strawberry': 0, 'Chocolate Chip': 0 }, container: null, toppings: [] }; }
+function copyServing(s) { return { counts: Object.assign({}, s.counts), container: s.container, toppings: s.toppings.slice() }; }
+function total(s) { return FLAVORS.reduce(function (n, f) { return n + s.counts[f]; }, 0); }
+function started(s) { return total(s) > 0 || !!s.container || s.toppings.length > 0; }
+function complete(s) { return total(s) >= 1 && !!s.container; }
+function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+function fallbackName(ref) { return ADJ[(ref * 7) % ADJ.length] + ' ' + NOUN[(ref * 3 + 1) % NOUN.length]; }
+function mixText(s) {
+  return FLAVORS.filter(function (f) { return s.counts[f] > 0; }).map(function (f) { return s.counts[f] + ' ' + f; }).join(' + ');
+}
+function missing(s) {
+  var m = [];
+  if (total(s) < 1) m.push('add at least one scoop');
+  if (!s.container) m.push('choose a container');
+  return m;
+}
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      ref: 43,
+      name: 'Maria',
+      saved: [
+        { counts: { 'Chocolate': 0, 'Vanilla': 0, 'Strawberry': 1, 'Chocolate Chip': 2 }, container: 'Sugar Cone', toppings: ['Whipped cream', 'Chocolate Sauce'] },
+        { counts: { 'Chocolate': 0, 'Vanilla': 1, 'Strawberry': 0, 'Chocolate Chip': 0 }, container: 'Cup', toppings: [] }
+      ],
+      draft: { counts: { 'Chocolate': 1, 'Vanilla': 1, 'Strawberry': 0, 'Chocolate Chip': 0 }, container: null, toppings: ['Gummy Bears'] },
+      editing: null,
+      last: null,
+      toast: null
+    };
+  }
+  componentWillUnmount() { clearTimeout(this.toastTimer); }
+  showToast(toast) {
+    var self = this;
+    clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(function () { self.setState({ toast: null }); }, 6000);
+    return toast;
+  }
+  setDraft(patch) { this.setState({ draft: Object.assign({}, this.state.draft, patch) }); }
+  renderVals() {
+    var self = this;
+    var st = this.state;
+    var d = st.draft;
+    var n = total(d);
+    var editing = st.editing !== null;
+    var fb = fallbackName(st.ref);
+
+    var flavorRows = FLAVORS.map(function (f) {
+      var c = d.counts[f];
+      return {
+        name: f, count: c, hasAny: c > 0, isZero: c === 0,
+        noDec: c === 0, noInc: n >= MAX_SCOOPS,
+        decLabel: 'Remove a ' + f + ' scoop', incLabel: 'Add a ' + f + ' scoop',
+        dec: function () { if (c > 0) { var k = Object.assign({}, d.counts); k[f] = c - 1; self.setDraft({ counts: k }); } },
+        inc: function () { if (n < MAX_SCOOPS) { var k = Object.assign({}, d.counts); k[f] = c + 1; self.setDraft({ counts: k }); } }
+      };
+    });
+    var meter = [0, 1, 2, 3, 4].map(function (i) { return { on: i < n, off: i >= n }; });
+    var containers = CONTAINERS.map(function (c) {
+      var sel = d.container === c;
+      return { label: c, isSelected: sel, isOpen: !sel, pick: function () { self.setDraft({ container: c }); } };
+    });
+    var toppings = TOPPINGS.map(function (t) {
+      var on = d.toppings.indexOf(t) >= 0;
+      return {
+        label: t, isSelected: on, isOpen: !on,
+        pick: function () {
+          var next = on ? d.toppings.filter(function (x) { return x !== t; }) : d.toppings.concat([t]);
+          self.setDraft({ toppings: TOPPINGS.filter(function (x) { return next.indexOf(x) >= 0; }) });
+        }
+      };
+    });
+
+    var saved = st.saved.map(function (s, i) {
+      var isEd = st.editing === i;
+      return {
+        num: i + 1,
+        headline: plural(total(s), 'scoop') + ' · ' + s.container,
+        detail: mixText(s) + ' · ' + (s.toppings.length ? plural(s.toppings.length, 'topping') : 'No toppings'),
+        isEditing: isEd, notEditing: !isEd,
+        editLabel: 'Edit serving ' + (i + 1),
+        removeLabel: 'Remove serving ' + (i + 1),
+        edit: function () {
+          if (isEd) return;
+          if (!editing && started(d)) return;
+          self.setState({ editing: i, draft: copyServing(s) });
+        },
+        remove: function () {
+          var next = st.saved.filter(function (_, j) { return j !== i; });
+          var ed = st.editing;
+          var patch = { saved: next };
+          if (ed === i) { patch.editing = null; patch.draft = emptyServing(); }
+          else if (ed !== null && ed > i) { patch.editing = ed - 1; }
+          self.setState(patch);
+        }
+      };
+    });
+
+    var draftStarted = started(d);
+    var draftDone = complete(d);
+    var toPrint;
+    if (editing) {
+      toPrint = draftDone ? st.saved.map(function (s, i) { return i === st.editing ? d : s; }) : null;
+    } else if (draftStarted && !draftDone) {
+      toPrint = null;
+    } else {
+      toPrint = st.saved.concat(draftDone ? [d] : []);
+    }
+    var canPrint = !!toPrint && toPrint.length > 0 && toPrint.length <= MAX_SERVINGS;
+    var full = !editing && st.saved.length >= MAX_SERVINGS;
+
+    var problem = '';
+    if (draftStarted && !draftDone) {
+      problem = 'To finish this serving: ' + missing(d).join(' and ') + '.';
+    } else if (full) {
+      problem = '30 servings is the most per order.';
+    }
+
+    var printCount = toPrint ? toPrint.length : 0;
+    var savedScoops = st.saved.reduce(function (a, s) { return a + total(s); }, 0);
+
+    function doPrint() {
+      if (!canPrint) return;
+      var servings = toPrint.map(copyServing);
+      var scoops = servings.reduce(function (a, s) { return a + total(s); }, 0);
+      var last = { ref: st.ref, name: st.name.trim() || fb, servings: servings, scoops: scoops };
+      self.setState({
+        last: last,
+        toast: self.showToast({ reprint: false }),
+        ref: st.ref + 1, name: '', saved: [], draft: emptyServing(), editing: null
+      });
+    }
+
+    var last = st.last;
+    var lastRef = last ? String(last.ref).padStart(4, '0') : '';
+    var lastLine = last ? last.name + ' · ' + plural(last.servings.length, 'serving') + ' · ' + plural(last.scoops, 'scoop') : '';
+    var toast = st.toast;
+
+    return {
+      wmSize: 18,
+      refLabel: String(st.ref).padStart(4, '0'),
+      hasToast: !!(toast && last),
+      toastTitle: toast && last ? (toast.reprint ? 'Reprint of #' + lastRef + ' sent' : 'Order #' + lastRef + ' sent to the printer') : '',
+      toastDetail: toast && last ? (toast.reprint ? 'Marked REPRINT on the ticket' : lastLine) : '',
+      toastCanReprint: !!(toast && !toast.reprint),
+      dismissToast: function () { clearTimeout(self.toastTimer); self.setState({ toast: null }); },
+      noLast: !last,
+      reprintOpacity: last ? 1 : 0.4,
+      reprint: function () { if (last) self.setState({ toast: self.showToast({ reprint: true }) }); },
+      name: st.name,
+      fallbackName: fb,
+      nameHint: 'Left blank, the ticket says “' + fb + '”',
+      onName: function (e) { var v = e && e.target ? e.target.value : e; self.setState({ name: String(v || '').replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) }); },
+      orderSummary: st.saved.length ? plural(st.saved.length, 'serving') + ' · ' + plural(savedScoops, 'scoop') : 'Nothing saved yet',
+      hasSaved: st.saved.length > 0,
+      noSaved: st.saved.length === 0,
+      savedCount: st.saved.length,
+      saved: saved,
+      isEditing: editing,
+      editorNum: editing ? st.editing + 1 : st.saved.length + 1,
+      flavorRows: flavorRows,
+      meter: meter,
+      scoopLabel: n + ' / 5 scoops',
+      atMax: n >= MAX_SCOOPS,
+      containers: containers,
+      toppings: toppings,
+      hasProblem: !!problem,
+      problemText: problem,
+      cancelLabel: editing ? 'Cancel edit' : 'Cancel serving',
+      cannotCancel: !editing && !draftStarted,
+      cancel: function () { self.setState(editing ? { editing: null, draft: emptyServing() } : { draft: emptyServing() }); },
+      saveLabel: editing ? 'Save serving' : 'Add serving',
+      cannotSave: !draftDone || full || (editing && same(d, st.saved[st.editing])),
+      save: function () {
+        if (!draftDone) return;
+        if (editing) {
+          var next = st.saved.slice(); next[st.editing] = copyServing(d);
+          self.setState({ saved: next, editing: null, draft: emptyServing() });
+        } else if (!full) {
+          self.setState({ saved: st.saved.concat([copyServing(d)]), draft: emptyServing() });
+        }
+      },
+      printLabel: printCount > 1 ? 'Print order · ' + printCount + ' servings' : 'Print order',
+      cannotPrint: !canPrint,
+      print: doPrint
+    };
+  }
+}
+</script>
+</body>
+</html>

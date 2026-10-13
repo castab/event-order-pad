@@ -1,0 +1,38 @@
+/* Fiona's Ice Cream — what tokens.json does not hold: the Poppins webfont, the typography
+   shorthands, letter-spacing and motion variables, and the base page rules.
+   Colors, spacing, radii, shadows and --font-sans come from tokens.css.
+   Poppins (Google Fonts) is the only typeface: headings 700, caps 600, body 400/500.
+   No script webfont — the logo is supplied art (assets/logo.svg), outlined, rendered by Wordmark. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+
+:root {
+  --text-display: 700 clamp(2.5rem, 5.5vw, 4rem)/1.1 var(--font-sans);
+  --text-h1: 700 2.5rem/1.15 var(--font-sans);
+  --text-h2: 700 1.625rem/1.25 var(--font-sans);
+  --text-caps-lg: 600 1rem/1.4 var(--font-sans);   /* letter-spacing: var(--track-caps) */
+  --text-caps-sm: 600 0.75rem/1.4 var(--font-sans);
+  --text-body: 400 1rem/1.65 var(--font-sans);
+  --text-body-sm: 400 0.875rem/1.6 var(--font-sans);
+  --text-price: 600 1rem/1.4 var(--font-sans);
+
+  --track-heading: -0.015em;  /* pair with display / h1 / h2 — Poppins 700 sets loose at size */
+  --track-caps: 0.26em;       /* "I C E   C R E A M" spacing */
+  --track-caps-tight: 0.13em;
+
+  /* Motion — gentle, no bounces */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+}
+
+/* Minimal base rules for pages using the system */
+body {
+  margin: 0;
+  background: var(--surface-page);
+  color: var(--text-body);
+  font: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--brand-strong); text-decoration-color: rgba(95, 91, 64, 0.4); }
+a:hover { color: var(--olive-900); }
+::selection { background: var(--olive-300); color: var(--ink-900); }

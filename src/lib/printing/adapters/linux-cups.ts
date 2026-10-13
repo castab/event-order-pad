@@ -4,6 +4,7 @@ import type { PrintAttemptResult, TicketPrinter } from '../port';
 export interface LinuxPrinterStatus {
   readonly ready: boolean;
   readonly message: string;
+  readonly queue?: string;
 }
 
 export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
@@ -18,7 +19,11 @@ export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
       typeof data.ready === 'boolean' &&
       typeof data.message === 'string'
     )
-      return data;
+      return {
+        ready: data.ready,
+        message: data.message,
+        queue: typeof data.queue === 'string' ? data.queue : undefined,
+      };
   } catch {
     /* A static host has no Linux printing service. */
   }
@@ -33,7 +38,10 @@ export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
 export class LinuxCupsPrinter implements TicketPrinter {
   readonly mode = 'linux-cups' as const;
   readonly label = 'Star USB via Linux CUPS';
-  constructor(private send: typeof fetch = fetch) {}
+  // Native fetch needs its global receiver when called in a browser.
+  constructor(
+    private send: typeof fetch = (input, init) => fetch(input, init),
+  ) {}
 
   async print(
     ticket: OrderTicket,

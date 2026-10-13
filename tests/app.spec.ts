@@ -1,344 +1,955 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
+import type { OrderDraft } from '../src/lib/tickets/order';
 
-test('Linux printing stays in the page, saves intent, recovers and explicitly reprints', async ({
-  page,
-}) => {
+type PrintRequest = {
+  ticket: OrderTicket;
+  attemptId: string;
+  reprint: boolean;
+};
+const printButton = (page: Page) =>
+  page.getByRole('button', { name: /^Print order/ });
+
+async function openTools(page: Page) {
+  const tools = page.getByRole('button', { name: 'Order tools', exact: true });
+  if ((await tools.getAttribute('aria-expanded')) !== 'true')
+    await tools.click();
+}
+
+async function chooseServing(
+  page: Page,
+  flavor = 'Vanilla',
+  container = 'Cup',
+  toppings: string[] = [],
+) {
+  await page
+    .getByRole('button', { name: `Add a ${flavor} scoop`, exact: true })
+    .click();
+  await page.getByRole('button', { name: container, exact: true }).click();
+  for (const topping of toppings)
+    await page.getByRole('button', { name: topping, exact: true }).click();
+}
+async function addServing(
+  page: Page,
+  flavor = 'Vanilla',
+  container = 'Cup',
+  toppings: string[] = [],
+) {
+  await chooseServing(page, flavor, container, toppings);
+  await page.getByRole('button', { name: 'Add serving', exact: true }).click();
+}
+async function readDraft(page: Page): Promise<OrderDraft> {
+  return page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open('order-pad-v1');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    try {
+      return await new Promise<OrderDraft>((resolve, reject) => {
+        const req = db
+          .transaction('settings')
+          .objectStore('settings')
+          .get('draft');
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    } finally {
+      db.close();
+    }
+  });
+}
+
+async function mockUsb(page: Page) {
+  await page.route('**/api/features', (route) =>
+    route.fulfill({ json: { trackingEnabled: true } }),
+  );
+  const submitted: PrintRequest[] = [];
+  const lockedDrafts: OrderDraft[] = [];
+  await page.route('**/api/orders', (route) => {
+    const ticket = route.request().postDataJSON() as OrderTicket;
+    return route.fulfill({
+      json: {
+        created: true,
+        order: { ticket, status: 'open', submittedAt: ticket.createdAt },
+      },
+    });
+  });
   await page.route('**/api/printer', (route) =>
     route.fulfill({
       json: {
         ready: true,
-        message: 'CUPS USB queue configured; physical status unverified.',
+        queue: 'Star_TSP143',
+        message:
+          'CUPS queue Star_TSP143 is configured for USB. Physical printer status is unverified.',
       },
     }),
   );
-  const submitted: {
-    ticket: { id: string };
-    attemptId: string;
-    reprint: boolean;
-  }[] = [];
   await page.route('**/api/print', async (route) => {
-    const body = route.request().postDataJSON();
+    const body = route.request().postDataJSON() as PrintRequest;
     submitted.push(body);
-    const intentSaved = await page.evaluate(async (attemptId) => {
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const saved = await page.evaluate(async (attemptId) => {
+      const db = await new Promise<IDBDatabase>((resolve) => {
         const req = indexedDB.open('order-pad-v1');
         req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
       });
       try {
-        return await new Promise<boolean>((resolve, reject) => {
-          const req = db
-            .transaction('attempts')
-            .objectStore('attempts')
-            .get(attemptId);
-          req.onsuccess = () => resolve(!!req.result && !req.result.result);
-          req.onerror = () => reject(req.error);
-        });
+        return await new Promise<{ id: string; result?: unknown }>(
+          (resolve) => {
+            const req = db
+              .transaction('attempts')
+              .objectStore('attempts')
+              .get(attemptId);
+            req.onsuccess = () => resolve(req.result);
+          },
+        );
       } finally {
         db.close();
       }
     }, body.attemptId);
-    expect(intentSaved).toBe(true);
+    expect(saved.id).toBe(body.attemptId);
+    expect(saved.result).toBeUndefined();
+    if (!body.reprint) {
+      const draft = await readDraft(page);
+      expect(draft.submittedTicketId).toBe(body.ticket.id);
+      expect(draft.editor).toEqual({
+        flavors: [],
+        container: '',
+        toppings: [],
+      });
+      lockedDrafts.push(draft);
+    }
     await route.fulfill({
       json: {
         attemptId: body.attemptId,
         result: {
           status: 'accepted',
           simulated: false,
-          message: 'CUPS accepted job OrderPad-42. Queue submission only.',
+          message: 'CUPS accepted test job. Queue submission only.',
+        },
+      },
+    });
+  });
+  return { submitted, lockedDrafts };
+}
+
+test('USB is automatic, Print includes the current serving, and the next order is immediately ready', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await expect(printButton(page)).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole('combobox')).toHaveCount(0);
+  await expect(page.getByText('Server setup', { exact: true })).toBeHidden();
+  await expect(printButton(page)).toBeDisabled();
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('0');
+  await expect(
+    page.getByRole('button', { name: 'Cup', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'false');
+  await page
+    .getByLabel('Customer name (optional)')
+    .pressSequentially('  María & Pat  ');
+  await chooseServing(page, 'Chocolate Chip', 'Sugar Cone', [
+    'Gummy Bears',
+    'Caramel Sauce',
+  ]);
+  await expect(page.getByLabel('Order servings')).toHaveCount(0);
+  await expect(page.getByLabel('Preparation ticket preview')).toBeHidden();
+  await openTools(page);
+  await page.getByText('Ticket preview', { exact: true }).click();
+  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+    'MARÍA & PAT',
+  );
+  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+    'SUGAR CONE',
+  );
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Order #0001 sent to the printer',
+  );
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Cup', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'false');
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('0');
+  await expect(printButton(page)).toBeDisabled();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0].ticket.reference).toBe('0001');
+  expect(submitted[0].ticket.displayName).toBe('María & Pat');
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Sugar Cone',
+      flavors: [{ flavor: 'Chocolate Chip', count: 1 }],
+      toppings: ['Gummy Bears', 'Caramel Sauce'],
+    },
+  ]);
+
+  await openTools(page);
+  await page.getByText('View last receipt', { exact: true }).click();
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    'MARÍA & PAT',
+  );
+  await expect(
+    page.getByText('Print attempts (1)', { exact: true }),
+  ).toBeVisible();
+});
+
+test('prints 3 mixed scoops as one serving and reprints the exact original distribution', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Cup', exact: true }).click();
+  await page.getByRole('button', { name: 'Gummy Bears', exact: true }).click();
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('2');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByText('3 / 5 scoops', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Order servings')).toHaveCount(0);
+  await openTools(page);
+  await page.getByText('Ticket preview', { exact: true }).click();
+  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+    '3 SCOOPS - CUP',
+  );
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Cup',
+      flavors: [
+        { flavor: 'Strawberry', count: 1 },
+        { flavor: 'Chocolate Chip', count: 2 },
+      ],
+      toppings: ['Gummy Bears'],
+    },
+  ]);
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('0');
+  await chooseServing(page, 'Vanilla', 'Sugar Cone');
+  await page
+    .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  expect(submitted[1].ticket).toEqual(submitted[0].ticket);
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('2');
+  await openTools(page);
+  await page.getByText('View last receipt', { exact: true }).click();
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    '2 x Chocolate Chip',
+  );
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    'REPRINT',
+  );
+});
+
+test('five-scoop total applies across flavors, removing scoops frees capacity, and mixed edits survive reload', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page, 'Chocolate Chip', 'Cake Cone');
+  await page
+    .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      '5 scoops is the most per serving. Remove one to change the mix.',
+      { exact: true },
+    ),
+  ).toContainText('Remove one to change the mix');
+  for (const flavor of ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'])
+    await expect(
+      page.getByRole('button', { name: `Add a ${flavor} scoop`, exact: true }),
+    ).toBeDisabled();
+  await page
+    .getByRole('button', { name: 'Remove a Vanilla scoop', exact: true })
+    .click();
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('0');
+  await expect(
+    page.getByRole('button', { name: 'Remove a Vanilla scoop', exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole('button', { name: 'Add a Chocolate scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Add serving', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Remove a Strawberry scoop', exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await readDraft(page)).editor.flavors.find(
+          (f) => f.flavor === 'Strawberry',
+        )?.count,
+    )
+    .toBe(1);
+  await page.reload();
+  await expect(
+    page.getByLabel('Chocolate Chip scoop count', { exact: true }),
+  ).toHaveText('2');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByText('4 / 5 scoops', { exact: true })).toBeVisible();
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Cake Cone',
+      flavors: [
+        { flavor: 'Chocolate', count: 1 },
+        { flavor: 'Strawberry', count: 1 },
+        { flavor: 'Chocolate Chip', count: 2 },
+      ],
+      toppings: [],
+    },
+  ]);
+});
+
+test('removing the last scoop blocks printing without dropping the selected container', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page);
+  await page
+    .getByRole('button', { name: 'Remove a Vanilla scoop', exact: true })
+    .click();
+  await expect(printButton(page)).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Cup', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText('0 / 5 scoops', { exact: true })).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await expect(printButton(page)).toBeEnabled();
+});
+
+test('v1 browser tickets, attempts and drafts reset once before a new structured order', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.addInitScript(async () => {
+    if (sessionStorage.getItem('seeded-v1')) return;
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('order-pad-v1', 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('tickets', { keyPath: 'id' });
+        req.result.createObjectStore('attempts', { keyPath: 'id' });
+        req.result.createObjectStore('settings');
+        const tx = req.transaction!;
+        tx.objectStore('tickets').put({ id: 'old-ticket', items: [] });
+        tx.objectStore('attempts').put({
+          id: 'old-attempt',
+          ticketId: 'old-ticket',
+        });
+        tx.objectStore('settings').put('old-ticket', 'latest');
+        tx.objectStore('settings').put(
+          { name: 'Legacy draft', reference: 'Sundae Sprinkle' },
+          'draft',
+        );
+      };
+      req.onsuccess = () => {
+        req.result.close();
+        sessionStorage.setItem('seeded-v1', 'yes');
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
+  await page.goto('/');
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeDisabled();
+  expect((await readDraft(page)).reference).toBe('0001');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  expect(submitted[0].ticket.schema).toBe(2);
+  expect(submitted[0].ticket.reference).toBe('0001');
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  expect((await readDraft(page)).reference).toBe('0002');
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeEnabled();
+});
+
+test('tools preserve the draft, show the queue and support keyboard disclosure', async ({
+  page,
+}) => {
+  let checks = 0;
+  await mockUsb(page);
+  await page.route('**/api/printer', (route) => {
+    checks++;
+    return route.fulfill({
+      json: {
+        ready: true,
+        queue: 'Star_TSP143',
+        message: 'Configured USB queue.',
+      },
+    });
+  });
+  await page.goto('/');
+  await chooseServing(page, 'Strawberry', 'Cake Cone', ['Whipped cream']);
+  await page.getByLabel('Customer name (optional)').fill('Alex');
+  const tools = page.getByRole('button', { name: 'Order tools', exact: true });
+  await tools.focus();
+  await page.keyboard.press('Enter');
+  await expect(tools).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByText('Star_TSP143', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Check printer', exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole('button', { name: 'Check printer', exact: true })
+    .click();
+  await expect.poll(() => checks).toBe(3);
+  await tools.focus();
+  await page.keyboard.press('Space');
+  await expect(tools).toBeFocused();
+  await expect(tools).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('Alex');
+  await expect(
+    page.getByRole('button', { name: 'Cake Cone', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(
+    page.getByRole('button', { name: 'Whipped cream', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(printButton(page)).toBeEnabled();
+});
+
+test('multi-serving edits replace rather than duplicate, and incomplete servings block printing until canceled', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await addServing(page, 'Vanilla', 'Cup');
+  await addServing(page, 'Strawberry', 'Cake Cone');
+  await page
+    .getByRole('button', { name: 'Add a Chocolate scoop', exact: true })
+    .click();
+  await expect(printButton(page)).toBeDisabled();
+  await expect(printButton(page)).toHaveText('Print order');
+  await expect(page.getByRole('status')).toContainText(
+    'To finish this serving: choose a container.',
+  );
+  await page
+    .getByRole('button', { name: 'Cancel serving', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Edit serving 2', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Remove a Strawberry scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Gummy Bears', exact: true }).click();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(2);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      container: 'Cup',
+      flavors: [{ flavor: 'Vanilla', count: 1 }],
+      toppings: [],
+    },
+    {
+      container: 'Cake Cone',
+      flavors: [{ flavor: 'Chocolate Chip', count: 1 }],
+      toppings: ['Gummy Bears'],
+    },
+  ]);
+});
+
+test('explicit Add, Save and Remove remain available and New order clears an active draft', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  await addServing(page);
+  await addServing(page, 'Strawberry', 'Cake Cone');
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Remove a Vanilla scoop', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Chocolate scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Save serving', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Remove serving 2', exact: true })
+    .click();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(1);
+  await expect(page.getByLabel('Order servings')).toContainText('Chocolate');
+  await openTools(page);
+  await page.getByRole('button', { name: 'New order', exact: true }).click();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(0);
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('0');
+});
+
+test('reprints preserve original identity while a different incomplete draft is in progress', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page.getByLabel('Customer name (optional)').fill('First customer');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  await page.getByLabel('Customer name (optional)').fill('Next customer');
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Gummy Bears', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  expect(submitted).toHaveLength(2);
+  expect(submitted[1].ticket).toEqual(submitted[0].ticket);
+  expect(submitted[1].attemptId).not.toBe(submitted[0].attemptId);
+  expect(submitted[1].reprint).toBe(true);
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Next customer',
+  );
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await openTools(page);
+  await page.getByText('View last receipt', { exact: true }).click();
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    'REPRINT',
+  );
+  await expect(page.getByLabel('Last submitted ticket preview')).toContainText(
+    'FIRST CUSTOMER',
+  );
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Next customer',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Gummy Bears', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
+  ).toBeEnabled();
+});
+
+test('incomplete drafts reload, and blank-name fallback stays stable through submit and reprint', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page.getByLabel('Customer name (optional)').fill('   ');
+  await page
+    .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Gummy Bears', exact: true }).click();
+  await expect
+    .poll(async () => (await readDraft(page)).editor.toppings.join(','))
+    .toBe('Gummy Bears');
+  const reference = (await readDraft(page)).reference;
+  await openTools(page);
+  await page.reload();
+  await expect(
+    page.getByRole('button', { name: 'Order tools', exact: true }),
+  ).toHaveAttribute('aria-expanded', 'false');
+  await expect(
+    page.getByLabel('Strawberry scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(printButton(page)).toBeDisabled();
+  await page.getByRole('button', { name: 'Cup', exact: true }).click();
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    `Order #${reference} sent to the printer`,
+  );
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  expect(submitted[0].ticket.reference).toBe(reference);
+  expect(submitted[1].ticket.reference).toBe(reference);
+});
+
+test('unavailable USB service blocks printing and manual check restores readiness without setup confirmation', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  let ready = false;
+  await page.route('**/api/printer', (route) =>
+    route.fulfill({
+      json: {
+        ready,
+        queue: 'Star_TSP143',
+        message: ready ? 'Configured.' : 'Service unavailable.',
+      },
+    }),
+  );
+  await page.goto('/');
+  await chooseServing(page);
+  await expect(printButton(page)).toBeDisabled();
+  await expect(page.getByRole('alert')).toContainText('Service unavailable');
+  ready = true;
+  await page
+    .getByRole('alert')
+    .getByRole('button', { name: 'Check printer', exact: true })
+    .click();
+  await expect(printButton(page)).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+});
+
+test('failed submissions retain their receipt until a deliberate successful reprint', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  let failed = true;
+  await page.route('**/api/print', async (route) => {
+    if (!failed) return route.fallback();
+    const body = route.request().postDataJSON() as PrintRequest;
+    await route.fulfill({
+      json: {
+        attemptId: body.attemptId,
+        result: {
+          status: 'failed',
+          simulated: false,
+          code: 'printer-busy',
+          message: 'A CUPS job is pending. No job was submitted.',
         },
       },
     });
   });
   await page.goto('/');
-  await page.getByLabel('Printer mode').selectOption('linux-cups');
-  await expect(
-    page.getByText('Linux queue configured', { exact: true }),
-  ).toBeVisible();
-  await page
-    .getByLabel('I verified a CUPS test print on the Linux machine.')
-    .check();
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
-  await expect(page.getByRole('status')).toContainText('LINUX CUPS');
-  await expect(page.getByRole('status')).toContainText('Queue submission only');
-  await expect(
-    page.getByRole('link', { name: 'Open PassPRNT and print' }),
-  ).toHaveCount(0);
-  await page.reload();
-  await page.getByLabel('Printer mode').selectOption('linux-cups');
-  await page
-    .getByLabel('I verified a CUPS test print on the Linux machine.')
-    .check();
-  await page
-    .getByRole('button', { name: 'Reprint Last Ticket', exact: true })
-    .click();
-  await expect(page.locator('.attempts > li')).toHaveCount(2);
-  expect(submitted[1].ticket.id).toBe(submitted[0].ticket.id);
-  expect(submitted[1].attemptId).not.toBe(submitted[0].attemptId);
-  expect(submitted[1].reprint).toBe(true);
-  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'REPRINT',
+  await page.getByLabel('Customer name (optional)').fill('Keep this order');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Order submission failed',
   );
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Keep this order',
+  );
+  await expect(page.getByLabel('Customer name (optional)')).toBeDisabled();
+  await expect(
+    page.getByRole('heading', { name: 'Submitted order', exact: true }),
+  ).toBeVisible();
+  failed = false;
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
+  expect(submitted[0].reprint).toBe(true);
+  expect(submitted[0].ticket.displayName).toBe('Keep this order');
 });
 
-test('Linux mode blocks unavailable service and never retries a lost response', async ({
+test('lost responses never retry, remain unknown on reload and require acknowledgment', async ({
   page,
 }) => {
-  await page.route('**/api/printer', (route) =>
-    route.fulfill({ json: { ready: false, message: 'Service unavailable.' } }),
-  );
-  await page.goto('/');
-  await page.getByLabel('Printer mode').selectOption('linux-cups');
-  await expect(
-    page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
-  ).toBeDisabled();
-  await page.route('**/api/printer', (route) =>
-    route.fulfill({ json: { ready: true, message: 'Configured.' } }),
-  );
-  await page.getByRole('button', { name: 'Check Linux service' }).click();
-  await page
-    .getByLabel('I verified a CUPS test print on the Linux machine.')
-    .check();
+  await mockUsb(page);
   let sends = 0;
   await page.route('**/api/print', (route) => {
     sends++;
     return route.abort();
   });
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
-  await expect(page.getByRole('status')).toContainText('Outcome unknown');
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
+  );
   await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket', exact: true }),
+    page.getByRole('button', { name: 'New order', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
   ).toBeDisabled();
   await page.reload();
-  await expect(page.getByRole('status')).toContainText('Outcome unknown');
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
+  );
+  expect(sends).toBe(1);
+  await page
+    .getByLabel('I checked the output and am ready to continue.')
+    .check();
+  await openTools(page);
+  await page.getByRole('button', { name: 'New order', exact: true }).click();
+  await chooseServing(page, 'Chocolate', 'Cup');
+  await expect(printButton(page)).toBeEnabled();
+  // The acknowledgment also survives tools disclosure in this session.
+  await openTools(page);
+  await page.getByRole('button', { name: 'Order tools', exact: true }).click();
+  await expect(printButton(page)).toBeEnabled();
+});
+
+test('pending requests block repeated taps and tools disclosure preserve the running submission', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  let sends = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/print', async (route) => {
+    sends++;
+    await held;
+    const body = route.request().postDataJSON();
+    await route.fulfill({
+      json: {
+        attemptId: body.attemptId,
+        result: { status: 'accepted', simulated: false, message: 'Accepted.' },
+      },
+    });
+  });
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(
+    page.getByRole('button', { name: 'Submitting…', exact: true }),
+  ).toBeDisabled();
+  await openTools(page);
+  await expect(
+    page.getByRole('button', { name: 'Check printer', exact: true }),
+  ).toBeDisabled();
+  await page.getByRole('button', { name: 'Order tools', exact: true }).click();
+  release();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
   expect(sends).toBe(1);
 });
 
-test('PassPRNT link follows saved intent; correlated callback survives offline and cannot rewrite history', async ({
-  browser,
-}, testInfo) => {
-  // Desktop browser with Android UA + mapped HTTPS assets. This validates the
-  // web handoff/recovery only; it never opens PassPRNT or sends USB data.
-  const context = await browser.newContext({
-    viewport: { width: 390, height: 844 },
-    userAgent:
-      'Mozilla/5.0 (Linux; Android 12; SM-G970U) Chrome/140.0.0.0 Mobile Safari/537.36',
-  });
-  const page = await context.newPage();
-  await context.route('https://order-pad.test/**', async (route) => {
-    const path = new URL(route.request().url());
-    const response = await route.fetch({
-      url: `http://127.0.0.1:4175${path.pathname}${path.search}`,
-    });
-    await route.fulfill({ response });
-  });
-  await page.goto('https://order-pad.test/');
-  await page.getByLabel('Printer mode').selectOption('star-passprnt');
-  await page
-    .getByLabel('I completed USB permission and printer selection.')
-    .check();
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
-  const link = page.getByRole('link', { name: 'Open PassPRNT and print' });
-  await expect(link).toBeVisible();
-  await expect(page.getByRole('status')).toContainText(
-    'awaiting PassPRNT result',
-  );
-  await expect(page.locator('.attempts > li')).toHaveCount(1);
-  const uri = new URL((await link.getAttribute('href'))!);
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.screenshot({
-    path: testInfo.outputPath('phone-handoff.png'),
-    fullPage: true,
-  });
-  const receipt = await context.newPage();
-  await receipt.setViewportSize({ width: 620, height: 1100 });
-  await receipt.setContent(uri.searchParams.get('html')!);
-  expect(
-    await receipt.locator('body').evaluate((body) => body.scrollWidth),
-  ).toBe(576);
-  expect(
-    await receipt.locator('body').evaluate((body) => body.scrollHeight),
-  ).toBeLessThan(8000);
-  await expect(receipt.locator('.reference')).toContainText('ORDER #0042');
-  await receipt.screenshot({
-    path: testInfo.outputPath('passprnt-html.png'),
-    fullPage: true,
-  });
-  await receipt.close();
-  const back = new URL(uri.searchParams.get('back')!);
-  back.searchParams.set('passprnt_code', '0');
-  await expect(
-    page.getByText('App assets cached · test reopening offline on this device'),
-  ).toBeVisible();
-  // The cached shell serves a callback navigation with query data offline.
-  await context.unroute('https://order-pad.test/**');
-  await context.setOffline(true);
-  await page.goto(back.href);
-  await expect(page.getByRole('status')).toContainText(
-    'Star PassPRNT reported success',
-  );
-  await expect(page.locator('.attempts > li')).toHaveCount(1);
-  expect(new URL(page.url()).search).toBe('');
-  back.searchParams.set('passprnt_code', '7');
-  await page.goto(back.href);
-  await expect(page.getByRole('status')).toContainText(
-    'Star PassPRNT reported success',
-  );
-  await context.close();
-});
-
-test('missing PassPRNT return recovers unknown without offering another launch', async ({
-  browser,
+test('reload during a request recovers an unknown locked order without another send', async ({
+  page,
 }) => {
-  const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Linux; Android 12) Chrome/140 Mobile Safari/537.36',
-    serviceWorkers: 'block',
+  await mockUsb(page);
+  let sends = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
   });
-  const page = await context.newPage();
-  await page.route('https://order-pad.test/**', async (route) => {
-    const path = new URL(route.request().url());
-    await route.fulfill({
-      response: await route.fetch({
-        url: `http://127.0.0.1:4175${path.pathname}${path.search}`,
-      }),
-    });
+  await page.route('**/api/print', async (route) => {
+    sends++;
+    await held;
+    await route.abort();
   });
-  await page.goto('https://order-pad.test/');
-  await page.getByLabel('Printer mode').selectOption('star-passprnt');
-  await page
-    .getByLabel('I completed USB permission and printer selection.')
-    .check();
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByRole('status')).toContainText('Submitting');
+  await expect.poll(() => sends).toBe(1);
+  await page.reload();
+  release();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
+  );
   await expect(
-    page.getByRole('link', { name: 'Open PassPRNT and print' }),
-  ).toBeVisible();
-  await page.getByRole('button', { name: 'Recover without resending' }).click();
-  await expect(page.getByRole('status')).toContainText('Outcome unknown');
-  await expect(
-    page.getByRole('link', { name: 'Open PassPRNT and print' }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
   ).toBeDisabled();
-  await expect(page.locator('.attempts > li')).toHaveCount(1);
-  await context.close();
+  expect(sends).toBe(1);
 });
 
-test('simulate, recover, explicitly reprint, and reopen offline', async ({
+test('older accepted locked drafts advance on reload without resubmission', async ({
+  page,
+}) => {
+  const { submitted, lockedDrafts } = await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  await page.evaluate(async (draft) => {
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = indexedDB.open('order-pad-v1');
+      req.onsuccess = () => resolve(req.result);
+    });
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction('settings', 'readwrite');
+      tx.objectStore('settings').put(draft, 'draft');
+      tx.oncomplete = () => resolve();
+    });
+    db.close();
+  }, lockedDrafts[0]);
+  await page.reload();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(0);
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  await expect(page.getByLabel('Print notification')).toHaveCount(0);
+  await openTools(page);
+  await expect(
+    page.getByText('Order submitted — Bouncy Sundae', { exact: true }),
+  ).toBeVisible();
+  expect(submitted).toHaveLength(1);
+});
+
+test('overlength orders block printing with a clear message and recover after removing servings', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  const current = await readDraft(page);
+  await page.evaluate(async (draft) => {
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const request = indexedDB.open('order-pad-v1');
+      request.onsuccess = () => resolve(request.result);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('settings', 'readwrite');
+        tx.objectStore('settings').put(
+          {
+            ...draft,
+            servings: Array(30).fill({
+              flavors: [
+                'Chocolate',
+                'Vanilla',
+                'Strawberry',
+                'Chocolate Chip',
+              ].map((flavor) => ({ flavor, count: 1 })),
+              container: 'Cup',
+              toppings: [
+                'Whipped cream',
+                'Gummy Bears',
+                'Caramel Sauce',
+                'Chocolate Sauce',
+                'Sliced Almonds',
+                'Maraschino Cherries',
+              ],
+            }),
+          },
+          'draft',
+        );
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }, current);
+  await page.reload();
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(30);
+  await expect(printButton(page)).toBeDisabled();
+  await expect(page.getByRole('status')).toContainText('length limit');
+  expect(submitted).toHaveLength(0);
+  for (let n = 30; n > 20; n--)
+    await page
+      .getByRole('button', { name: `Remove serving ${n}`, exact: true })
+      .click();
+  await expect(printButton(page)).toBeEnabled();
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'sent to the printer',
+  );
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0].ticket.servings).toHaveLength(20);
+});
+
+test('cached app reopens offline with recovered draft but cannot print without its host', async ({
   page,
   context,
 }) => {
+  await mockUsb(page);
   await page.goto('/');
-  await expect(
-    page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
-  ).toBeEnabled();
-  await expect(
-    page.getByText('SIMULATED · NO PHYSICAL PRINT', { exact: true }),
-  ).toBeVisible();
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
-  await expect(page.getByRole('status')).toContainText(
-    'Nothing was physically printed.',
-  );
-  await page.reload();
-  await expect(
-    page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
-  ).toBeDisabled();
-  await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
-  ).toBeEnabled();
-  await page.getByRole('button', { name: 'Reprint Last Ticket' }).click();
-  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'REPRINT',
-  );
-  await expect(page.getByRole('status')).toContainText(
-    'Nothing was physically printed.',
-  );
-  await expect(
-    page.getByText('App assets cached · test reopening offline on this device'),
-  ).toBeVisible();
+  await chooseServing(page, 'Chocolate', 'Cup');
+  await expect
+    .poll(async () => (await readDraft(page)).editor.flavors[0]?.flavor)
+    .toBe('Chocolate');
+  await openTools(page);
+  await page.getByText('Connection and local storage', { exact: true }).click();
+  await expect(page.getByText(/App assets cached/)).toBeVisible();
+  await page.unroute('**/api/printer');
   await context.setOffline(true);
   await page.reload();
   await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
-  ).toBeEnabled();
-  await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-    'REPRINT',
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(page.getByRole('alert')).toContainText(
+    'printing service unavailable',
   );
+  await expect(printButton(page)).toBeDisabled();
 });
-
-test('unknown requires deliberate confirmation and never falls back from real mode', async ({
-  page,
-}) => {
-  await page.goto('/');
-  await page.getByLabel('Simulate an outcome').selectOption('outcome-unknown');
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
-    .click();
-  await expect(page.getByRole('status')).toContainText('Outcome unknown');
-  await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
-  ).toBeDisabled();
-  await page
-    .getByLabel('I checked the output and want another ticket.')
-    .check();
-  await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
-  ).toBeEnabled();
-  await page.getByLabel('Printer mode').selectOption('star-passprnt');
-  await expect(
-    page.getByText('Unsupported runtime', { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
-  ).toBeDisabled();
-});
-
-for (const viewport of [
-  { width: 1024, height: 768 },
-  { width: 768, height: 1024 },
-  { width: 390, height: 844 },
-]) {
-  test(`tablet/readability layout ${viewport.width}x${viewport.height}`, async ({
-    page,
-  }, testInfo) => {
-    await page.setViewportSize(viewport);
-    await page.goto('/');
-    await expect(
-      page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
-    ).toBeEnabled();
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
-      ),
-    ).toBe(true);
-    await expect(page.getByLabel('Preparation ticket preview')).toContainText(
-      'ORDER #0042',
-    );
-    await page.screenshot({
-      path: testInfo.outputPath('ticket-screen.png'),
-      fullPage: true,
-    });
-  });
-}
 
 test('unsupported IndexedDB blocks sends with an actionable notice', async ({
   page,
 }) => {
+  await mockUsb(page);
   await page.addInitScript(() => {
     Object.defineProperty(window, 'indexedDB', {
       get: () => {
@@ -347,41 +958,556 @@ test('unsupported IndexedDB blocks sends with an actionable notice', async ({
     });
   });
   await page.goto('/');
-  await expect(page.getByRole('status')).toContainText(
+  await expect(page.getByRole('alert')).toContainText(
     'IndexedDB is unavailable',
   );
+  await expect(printButton(page)).toBeDisabled();
+});
+
+for (const viewport of [
+  { width: 360, height: 780 },
+  { width: 1024, height: 768 },
+  { width: 768, height: 1024 },
+  { width: 390, height: 844 },
+  { width: 820, height: 1180 },
+  { width: 1280, height: 800 },
+]) {
+  test(`responsive order and settings layout ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }, testInfo) => {
+    await mockUsb(page);
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    await page.getByLabel('Customer name (optional)').fill('Alex');
+    const emptyOrder = page.getByText(
+      'Servings you add show up here. For a one-serving order, just press Print order.',
+      { exact: true },
+    );
+    if (viewport.width >= 760) await expect(emptyOrder).toBeVisible();
+    else await expect(emptyOrder).toBeHidden();
+    await addServing(page);
+    await chooseServing(page, 'Chocolate Chip', 'Sugar Cone', ['Gummy Bears']);
+    await page
+      .getByRole('button', { name: 'Add a Chocolate Chip scoop', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Add a Strawberry scoop', exact: true })
+      .click();
+    await expect(printButton(page)).toBeEnabled();
+    const layout = await page.evaluate(() => {
+      const app = document.querySelector('.builder-app')!;
+      const order = document.querySelector('.order-panel')!;
+      const editor = document.querySelector('.editor-pane')!;
+      const actions = document.querySelector('.builder-actions')!;
+      const rect = (element: Element) =>
+        element.getBoundingClientRect().toJSON();
+      return {
+        areas: getComputedStyle(app).gridTemplateAreas,
+        order: rect(order),
+        editor: rect(editor),
+        actions: rect(actions),
+        flavorColumns: getComputedStyle(
+          document.querySelector('.flavor-rows')!,
+        ).gridTemplateColumns.split(' ').length,
+        toppingColumns: getComputedStyle(
+          document.querySelector('.topping-grid')!,
+        ).gridTemplateColumns.split(' ').length,
+        domReadingOrder:
+          !!(
+            order.compareDocumentPosition(editor) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+          ) &&
+          !!(
+            editor.compareDocumentPosition(actions) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+          ),
+      };
+    });
+    expect(layout.domReadingOrder).toBe(true);
+    expect(layout.flavorColumns).toBe(viewport.width >= 1100 ? 2 : 1);
+    expect(layout.toppingColumns).toBe(viewport.width >= 1100 ? 3 : 2);
+    if (viewport.width >= 760) {
+      expect(layout.areas).toBe(
+        '"header header" "editor order" "editor actions"',
+      );
+      expect(layout.editor.right).toBeLessThanOrEqual(layout.order.left);
+      expect(layout.order.width).toBeGreaterThanOrEqual(340);
+      expect(layout.order.width).toBeLessThanOrEqual(400);
+      expect(layout.actions.x).toBe(layout.order.x);
+      await expect(page.locator('.order-heading')).toContainText(
+        '1 serving · 1 scoop',
+      );
+    } else {
+      expect(layout.areas).toBe('"header" "content" "actions"');
+      expect(layout.order.bottom).toBeLessThanOrEqual(layout.editor.top);
+    }
+    const bounds = await printButton(page).boundingBox();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    const targets = await page
+      .locator(
+        '.builder-header button, .serving-card button, .builder-actions button',
+      )
+      .evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const bounds = button.getBoundingClientRect();
+          return {
+            label: button.getAttribute('aria-label') || button.textContent,
+            width: bounds.width,
+            height: bounds.height,
+          };
+        }),
+      );
+    for (const target of targets) {
+      expect(target.width, `${target.label} width`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${target.label} height`).toBeGreaterThanOrEqual(
+        44,
+      );
+    }
+    await page.evaluate(() => document.fonts.ready);
+    expect(
+      await page.evaluate(() => document.fonts.check('16px Poppins')),
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath('order-screen.png'),
+      fullPage: true,
+    });
+    await openTools(page);
+    await page.getByText('Ticket preview', { exact: true }).click();
+    await expect(page.getByLabel('Preparation ticket preview')).toContainText(
+      'ALEX',
+    );
+    await openTools(page);
+    await expect(
+      page.getByRole('button', { name: 'Check printer', exact: true }),
+    ).toBeEnabled();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath('printer-settings.png'),
+      fullPage: true,
+    });
+    await printButton(page).click();
+    const toast = page.getByLabel('Print notification');
+    await expect(toast).toContainText('Order #0001 sent to the printer');
+    const toastBounds = (await toast.boundingBox())!;
+    expect(toastBounds.y).toBe(68);
+    if (viewport.width >= 760) {
+      expect(toastBounds.width).toBe(380);
+      expect(toastBounds.x + toastBounds.width).toBe(viewport.width - 16);
+    } else {
+      expect(toastBounds.x).toBe(12);
+      expect(toastBounds.width).toBe(viewport.width - 24);
+    }
+    await toast.getByRole('button', { name: 'Reprint', exact: true }).click();
+    await expect(toast).toContainText('Reprint of #0001 sent');
+  });
+}
+
+test('saved rows protect a started new serving, switch edits, cancel changes and track removals', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
   await expect(
-    page.getByRole('button', { name: 'Print Test Ticket', exact: true }),
+    page.getByRole('heading', { name: 'Saved servings', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('heading', { name: 'Serving 1', exact: true }),
+  ).toBeVisible();
+  await addServing(page);
+  await addServing(page, 'Chocolate', 'Cake Cone');
+  await page.getByRole('button', { name: 'Gummy Bears', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  expect((await readDraft(page)).editingIndex).toBeUndefined();
+  await expect(
+    page.getByRole('button', { name: 'Gummy Bears', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await page
+    .getByRole('button', { name: 'Cancel serving', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  await expect(
+    page.getByRole('button', { name: 'Save serving', exact: true }),
+  ).toBeDisabled();
+  await expect(printButton(page)).toHaveText('Print order · 2 servings');
+  await expect(printButton(page)).toBeEnabled();
+  await page
+    .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
+    .click();
+  await expect(
+    page.getByRole('button', { name: 'Save serving', exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole('button', { name: 'Edit serving 1', exact: true })
+    .click();
+  await expect(
+    page.getByLabel('Vanilla scoop count', { exact: true }),
+  ).toHaveText('2');
+  await page
+    .getByRole('button', { name: 'Edit serving 2', exact: true })
+    .click();
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  await expect(
+    page.getByRole('button', { name: 'Save serving', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Edit serving 2', exact: true }),
+  ).toContainText('Editing now');
+  await page
+    .getByRole('button', { name: 'Add a Chocolate scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Cancel edit', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Edit serving 2', exact: true }),
+  ).toContainText('1 scoop · Cake Cone');
+  await page
+    .getByRole('button', { name: 'Edit serving 2', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Remove serving 1', exact: true })
+    .click();
+  await expect(
+    page.getByRole('button', { name: 'Edit serving 1', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(
+    page.getByRole('heading', { name: 'Serving 1', exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Remove serving 1', exact: true })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Saved servings', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Cancel serving', exact: true }),
   ).toBeDisabled();
 });
 
-test('reload during an attempt recovers unknown without resending', async ({
+test('30 simple servings print, additions stop at the cap and editing remains available', async ({
   page,
 }) => {
-  // Hold only the simulator's completion timer so this recovery test does not
-  // race against the speed of the browser or CI machine. No hardware is involved.
-  await page.addInitScript(() => {
-    const originalTimeout = window.setTimeout.bind(window);
-    window.setTimeout = ((
-      handler: TimerHandler,
-      delay?: number,
-      ...args: unknown[]
-    ) =>
-      originalTimeout(
-        handler,
-        delay === 350 ? 5000 : delay,
-        ...args,
-      )) as typeof window.setTimeout;
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  for (let n = 0; n < 30; n++) await addServing(page);
+  await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(30);
+  await expect(page.getByText('30 of 30', { exact: true })).toBeVisible();
+  await expect(printButton(page)).toHaveText('Print order · 30 servings');
+  await expect(printButton(page)).toBeEnabled();
+  if (page.viewportSize()!.width >= 760) {
+    await openTools(page);
+    const scrolling = await page.evaluate(() => {
+      const order = document.querySelector('.order-panel')!;
+      const editor = document.querySelector('.editor-pane')!;
+      editor.scrollTop = 0;
+      order.scrollTop = order.scrollHeight;
+      const orderTop = order.scrollTop;
+      const editorBefore = editor.scrollTop;
+      editor.scrollTop = editor.scrollHeight;
+      return {
+        orderTop,
+        editorBefore,
+        editorAfter: editor.scrollTop,
+        orderAfter: order.scrollTop,
+      };
+    });
+    expect(scrolling.orderTop).toBeGreaterThan(0);
+    expect(scrolling.editorBefore).toBe(0);
+    expect(scrolling.editorAfter).toBeGreaterThan(0);
+    expect(scrolling.orderAfter).toBe(scrolling.orderTop);
+    await expect(printButton(page)).toBeInViewport();
+    await page
+      .getByRole('button', { name: 'Order tools', exact: true })
+      .click();
+  }
+
+  await chooseServing(page, 'Chocolate');
+  await expect(
+    page.getByRole('button', { name: 'Add serving', exact: true }),
+  ).toBeDisabled();
+  await expect(printButton(page)).toBeDisabled();
+  await page
+    .getByRole('button', { name: 'Cancel serving', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Edit serving 30', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
+    .click();
+  await expect(
+    page.getByRole('button', { name: 'Save serving', exact: true }),
+  ).toBeEnabled();
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    '30 servings · 31 scoops',
+  );
+  expect(submitted[0].ticket.servings).toHaveLength(30);
+  expect(submitted[0].ticket.servings[29].flavors[0].count).toBe(2);
+});
+
+test('success toasts use ticket totals, dismiss and expire, and reprint resets the timer', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page.clock.install();
+  await page.getByLabel('Customer name (optional)').fill('Maria');
+  await addServing(page, 'Chocolate');
+  await chooseServing(page, 'Vanilla');
+  await printButton(page).click();
+  const toast = page.getByLabel('Print notification');
+  await expect(toast).toContainText('Order #0001 sent to the printer');
+  await expect(toast).toContainText('Maria · 2 servings · 2 scoops');
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
+  await expect(page.getByText('Order #0002', { exact: true })).toBeVisible();
+  await page.clock.fastForward(5000);
+  await toast.getByRole('button', { name: 'Reprint', exact: true }).click();
+  await expect(toast).toContainText('Reprint of #0001 sent');
+  await expect(toast).toContainText('Marked REPRINT on the ticket');
+  await expect(
+    toast.getByRole('button', { name: 'Reprint', exact: true }),
+  ).toHaveCount(0);
+  expect(submitted[1].ticket).toEqual(submitted[0].ticket);
+  expect(submitted[1].reprint).toBe(true);
+  await page.clock.fastForward(1001);
+  await expect(toast).toBeVisible();
+  await page.clock.fastForward(5000);
+  await expect(toast).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(toast).toBeVisible();
+  await toast.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(toast).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  await expect(toast).toHaveCount(0);
+});
+
+test('failed and unknown error toasts persist and focus recovery without hiding it on dismissal', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  let sends = 0;
+  await page.route('**/api/print', (route) => {
+    sends++;
+    const body = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        attemptId: body.attemptId,
+        result: {
+          status: sends === 1 ? 'failed' : 'outcome-unknown',
+          code: 'printer-error',
+          simulated: false,
+          message: 'Inspect paper and physical output.',
+        },
+      },
+    });
   });
   await page.goto('/');
-  await page
-    .getByRole('button', { name: 'Print Test Ticket', exact: true })
+  await page.clock.install();
+  await chooseServing(page);
+  await printButton(page).click();
+  const toast = page.getByLabel('Print notification');
+  await expect(toast).toHaveAttribute('role', 'alert');
+  await expect(toast).toContainText('Order submission failed');
+  await page.clock.fastForward(10000);
+  await expect(toast).toBeVisible();
+  await toast
+    .getByRole('button', { name: 'Review print', exact: true })
     .click();
-  await expect(page.getByRole('status')).toContainText('Attempt saved');
-  await page.reload();
-  await expect(page.getByRole('status')).toContainText('Outcome unknown');
+  await expect(page.getByLabel('Print recovery')).toBeFocused();
+  await toast.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(page.getByLabel('Print recovery')).toBeVisible();
   await expect(
-    page.getByRole('button', { name: 'Reprint Last Ticket' }),
+    page.getByRole('heading', { name: 'Submitted order', exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(toast).toContainText('Outcome unknown');
+  await expect(
+    page.getByRole('button', { name: 'Reprint last order', exact: true }),
   ).toBeDisabled();
-  await expect(page.locator('.attempts > li')).toHaveCount(1);
+  await expect(
+    page.getByRole('button', { name: 'New order', exact: true }),
+  ).toBeDisabled();
+  await page.clock.fastForward(10000);
+  await expect(toast).toBeVisible();
+  await toast.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await page.reload();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
+  );
+  expect(sends).toBe(2);
+});
+
+test('live blank-name hint, printable name limit and button toggle semantics', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  const name = page.getByLabel('Customer name (optional)');
+  await expect(name).toHaveAttribute('placeholder', blankNameLabel(1));
+  await expect(
+    page.getByText(`Left blank, the ticket says “${blankNameLabel(1)}”`, {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await name.fill('A'.repeat(81));
+  await expect(name).toHaveValue('A'.repeat(80));
+  await name.pressSequentially('B');
+  await expect(name).toHaveValue('A'.repeat(80));
+  await expect
+    .poll(async () => (await readDraft(page)).name)
+    .toBe('A'.repeat(80));
+  await name.fill('');
+  await chooseServing(page);
+  await printButton(page).click();
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(name).toHaveAttribute('placeholder', blankNameLabel(2));
+  for (const container of ['Cup', 'Cake Cone', 'Sugar Cone']) {
+    await page.getByRole('button', { name: container, exact: true }).click();
+    for (const other of ['Cup', 'Cake Cone', 'Sugar Cone'])
+      await expect(
+        page.getByRole('button', { name: other, exact: true }),
+      ).toHaveAttribute('aria-pressed', String(other === container));
+  }
+  for (const toppingName of ['Rainbow Sprinkles', 'Chocolate Sprinkles']) {
+    const topping = page.getByRole('button', {
+      name: toppingName,
+      exact: true,
+    });
+    await topping.click();
+    await expect(topping).toHaveAttribute('aria-pressed', 'true');
+    await topping.click();
+    await expect(topping).toHaveAttribute('aria-pressed', 'false');
+  }
+  await expect(page.getByLabel('Total scoops')).toHaveAttribute(
+    'aria-live',
+    'polite',
+  );
+});
+
+test('failed intent-save transaction shows recovery and never sends or resets the order', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await page.getByLabel('Customer name (optional)').fill('Preserve this draft');
+  await chooseServing(page);
+  await expect
+    .poll(async () => (await readDraft(page)).editor.container)
+    .toBe('Cup');
+  await page.evaluate(() => {
+    const transaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (storeNames, mode, options) {
+      if (
+        mode === 'readwrite' &&
+        Array.isArray(storeNames) &&
+        storeNames.includes('attempts')
+      )
+        throw new DOMException('Injected quota failure', 'QuotaExceededError');
+      return transaction.call(this, storeNames, mode, options);
+    };
+  });
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Printing needs attention',
+  );
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save print intent. No data was sent.',
+  );
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Preserve this draft',
+  );
+  await expect(printButton(page)).toBeDisabled();
+  expect(submitted).toHaveLength(0);
+  await page.getByRole('button', { name: 'Review print', exact: true }).click();
+  await expect(page.getByLabel('Print recovery')).toBeFocused();
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(page.getByLabel('Print recovery')).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Preserve this draft',
+  );
+  await expect(printButton(page)).toBeEnabled();
+  expect(submitted).toHaveLength(0);
+});
+
+test('responsive layouts change at precisely 760 and 1100 pixels', async ({
+  page,
+}) => {
+  await mockUsb(page);
+  await page.goto('/');
+  await expect(page.getByLabel('Customer name (optional)')).toBeVisible();
+  for (const width of [759, 760, 1099, 1100]) {
+    await page.setViewportSize({ width, height: 1180 });
+    const columns = await page.evaluate(() => {
+      const count = (selector: string) =>
+        getComputedStyle(
+          document.querySelector(selector)!,
+        ).gridTemplateColumns.split(' ').length;
+      return {
+        shell: count('.builder-app'),
+        flavors: count('.flavor-rows'),
+        toppings: count('.topping-grid'),
+      };
+    });
+    expect(columns.shell).toBe(width >= 760 ? 2 : 1);
+    expect(columns.flavors).toBe(width >= 1100 ? 2 : 1);
+    expect(columns.toppings).toBe(width >= 1100 ? 3 : 2);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  }
+});
+
+test('unavailable tracking settings do not block printing or reprints', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  let publications = 0;
+  await page.route('**/api/features', (route) =>
+    route.fulfill({ status: 503, json: {} }),
+  );
+  await page.route('**/api/orders', (route) => {
+    publications++;
+    return route.fulfill({ status: 503, json: {} });
+  });
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Order #0001 sent to the printer',
+  );
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Reprint of #0001 sent',
+  );
+  await openTools(page);
+  await expect(
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
+  ).toHaveCount(0);
+  expect(submitted).toHaveLength(2);
+  expect(publications).toBe(0);
 });
