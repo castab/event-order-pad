@@ -188,6 +188,7 @@ describe('successive orders and draft recovery', () => {
     await session.submit(accepted());
     await store.saveDraft({
       ...locked,
+      reference: session.state.ticket!.reference,
       submittedTicketId: session.state.ticket!.id,
     });
     const reload = new PrintSession(store, () => {});
@@ -285,17 +286,13 @@ describe('successive orders and draft recovery', () => {
       ),
     ).rejects.toThrow();
     await expect(
-      store.startOrder(
-        saved!.ticket,
-        { ...draft!, submittedTicketId: saved!.ticket.id },
-        {
-          id: 'new-attempt',
-          ticketId: saved!.ticket.id,
-          mode: 'simulated',
-          reprint: false,
-          startedAt: saved!.ticket.createdAt,
-        },
-      ),
+      store.startOrder({
+        id: 'new-attempt',
+        ticketId: saved!.ticket.id,
+        mode: 'simulated',
+        reprint: false,
+        startedAt: saved!.ticket.createdAt,
+      }),
     ).rejects.toThrow();
     expect(await store.load()).toEqual(saved);
     expect(await store.loadDraft()).toEqual(draft);

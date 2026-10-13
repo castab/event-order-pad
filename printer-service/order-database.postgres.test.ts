@@ -25,11 +25,7 @@ beforeAll(async () => {
   expect(Number(version.version)).toBeLessThan(190000);
 });
 beforeEach(async () => {
-  await database.printDispatch.deleteMany();
-  await database.attempt.deleteMany();
-  await database.station.deleteMany();
-  await database.ticket.deleteMany();
-  await database.orderEvent.deleteMany();
+  await database.$executeRaw`TRUNCATE workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
 });
 afterAll(async () => {
   await database.$disconnect();
@@ -239,6 +235,7 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
       server.listen(0, '127.0.0.1', resolve),
     );
     const port = (server.address() as { port: number }).port;
+    let cookie = '';
     const send = (path: string, body?: unknown) =>
       new Promise<{ status: number; body: any }>((resolve, reject) => {
         const req = request(
@@ -249,11 +246,13 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
             method: body ? 'POST' : 'GET',
             headers: {
               Host: 'mint.test',
+              ...(cookie ? { Cookie: cookie } : {}),
               Origin: 'https://mint.test',
               'Content-Type': 'application/json',
             },
           },
           (res) => {
+            cookie = res.headers['set-cookie']?.[0].split(';')[0] ?? cookie;
             let text = '';
             res.on('data', (chunk) => {
               text += chunk;
@@ -283,13 +282,39 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
       status: 200,
       body: { excluded: true, ticketId: old.id },
     });
-    await live.send('/api/orders', ticket);
+    let state = (await live.send('/api/station')).body;
+    state = (
+      await live.send('/api/station', {
+        operation: 'saveDraft',
+        revision: state.revision,
+        draft: {
+          ...state.draft,
+          name: ticket.customerName,
+          servings: ticket.servings,
+        },
+      })
+    ).body;
+    const firstAttempt = {
+      id: 'first',
+      ticketId: ticket.id,
+      mode: 'linux-cups',
+      reprint: false,
+      startedAt: cutoff,
+    };
+    state = (
+      await live.send('/api/station', {
+        operation: 'startOrder',
+        revision: state.revision,
+        attempt: firstAttempt,
+      })
+    ).body;
+    const committedTicket = state.saved.ticket;
     expect(
       (
         await live.send('/api/print', {
           attemptId: 'first',
           reprint: false,
-          ticket,
+          ticket: committedTicket,
         })
       ).body.result.status,
     ).toBe('accepted');
@@ -300,12 +325,19 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
     expect(
       (await live.send(`/api/orders/${ticket.id}/reopen`, {})).status,
     ).toBe(200);
+    state = (
+      await live.send('/api/station', {
+        operation: 'startAttempt',
+        revision: state.revision,
+        attempt: { ...firstAttempt, id: 'second', reprint: true },
+      })
+    ).body;
     expect(
       (
         await live.send('/api/print', {
           attemptId: 'second',
           reprint: true,
-          ticket,
+          ticket: committedTicket,
         })
       ).body.result.status,
     ).toBe('accepted');

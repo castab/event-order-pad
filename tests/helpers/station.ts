@@ -18,46 +18,80 @@ import type {
 import type { PrintAttemptResult } from '../../src/lib/printing/port';
 
 export class MemoryStationRepository implements StationRepository {
-  readonly store = new MemoryTicketStore();
-  revision = 0;
+  private high = 0;
+  readonly store = new MemoryTicketStore(() => String(++this.high));
+  private readonly workspaces = new Map<
+    string,
+    { store: MemoryTicketStore; revision: number }
+  >();
   constructor(private orders?: MemoryOrderRepository) {}
+  private workspace(id?: string) {
+    if (!id && this.workspaces.size)
+      return this.workspaces.values().next().value!;
+    const key = id ?? 'test-workspace';
+    let state = this.workspaces.get(key);
+    if (!state) {
+      state = {
+        store: this.workspaces.size
+          ? new MemoryTicketStore(() => String(++this.high))
+          : this.store,
+        revision: 0,
+      };
+      this.workspaces.set(key, state);
+    }
+    return state;
+  }
   async check() {}
-  async load() {
+  async load(id?: string) {
+    const state = this.workspace(id);
     return parseStationSnapshot({
-      revision: this.revision,
-      draft: (await this.store.loadDraft()) ?? newDraft(),
-      saved: await this.store.load(),
+      revision: state.revision,
+      draft: (await state.store.loadDraft()) ?? newDraft(),
+      saved: await state.store.load(),
     });
   }
-  async mutate(value: StationCommand) {
+  async mutate(value: StationCommand, id?: string) {
     const cmd = parseStationCommand(value);
-    if (cmd.revision !== this.revision)
-      throw new StationConflict('Stale station revision.');
+    const state = this.workspace(id);
+    const store = state.store;
+    if (cmd.revision !== state.revision)
+      throw new StationConflict(
+        'The station changed in another tab. Reload before continuing.',
+      );
     switch (cmd.operation) {
       case 'saveDraft':
         if (
-          JSON.stringify((await this.load()).draft) ===
+          JSON.stringify((await this.load(id)).draft) ===
           JSON.stringify(cmd.draft)
         )
-          return this.load();
-        await this.store.saveDraft(cmd.draft);
+          return this.load(id);
+        await store.saveDraft(cmd.draft);
         break;
       case 'saveTicket':
-        await this.store.saveTicket(cmd.ticket);
+        await store.saveTicket(cmd.ticket);
         break;
-      case 'startOrder':
-        await this.store.startOrder(cmd.ticket, cmd.draft, cmd.attempt);
-        await this.orders?.upsert(cmd.ticket);
+      case 'startOrder': {
+        const snapshot = await store.startOrder(cmd.attempt);
+        await this.orders?.upsert(snapshot.saved!.ticket);
         break;
+      }
       case 'startAttempt':
-        await this.store.startAttempt(cmd.attempt);
+        await store.startAttempt(cmd.attempt);
         break;
       case 'finishAttempt':
-        await this.store.finishAttempt(cmd.attempt, cmd.draft);
+        await store.finishAttempt(cmd.attempt, cmd.draft);
         break;
     }
-    this.revision++;
-    return this.load();
+    state.revision++;
+    return this.load(id);
+  }
+  async authorizePrint(request: Request, id: string) {
+    const store = this.workspace(id).store;
+    if (
+      !store.tickets.has(request.ticket.id) ||
+      store.attempts.get(request.attemptId)?.ticketId !== request.ticket.id
+    )
+      throw new StationConflict('Print intent belongs to another workspace.');
   }
 }
 export class MemoryPrintJournal implements PrintJournal {
@@ -69,6 +103,10 @@ export class MemoryPrintJournal implements PrintJournal {
     if (this.records.has(request.attemptId))
       throw new Error('Duplicate dispatch.');
     this.records.set(request.attemptId, { request });
+  }
+  async assertPending(request: Request) {
+    const record = this.records.get(request.attemptId);
+    if (!record || record.result) throw new Error('Final dispatch.');
   }
   async finish(request: Request, result: PrintAttemptResult) {
     const before = this.records.get(request.attemptId);

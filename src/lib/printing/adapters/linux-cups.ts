@@ -53,7 +53,7 @@ export class LinuxCupsPrinter implements TicketPrinter {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ticket, ...options }),
         cache: 'no-store',
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(240000),
       });
       const data = await response.json();
       if (
@@ -61,6 +61,14 @@ export class LinuxCupsPrinter implements TicketPrinter {
         data?.attemptId === undefined &&
         data?.result === undefined
       ) {
+        if (response.status === 409)
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'Workspace or print intent changed. No job was submitted. Reload before continuing.',
+          };
         if (response.status === 503 && data?.code === 'database-unavailable')
           return {
             status: 'failed',

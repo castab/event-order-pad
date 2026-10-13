@@ -1,5 +1,5 @@
 import { expect, test, type Page, type BrowserContext } from '@playwright/test';
-import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
+import { type OrderTicket } from '../src/lib/tickets/ticket';
 import { mockStationApi } from './helpers/station-api';
 import type { OrderDraft } from '../src/lib/tickets/order';
 
@@ -370,7 +370,9 @@ test('orders work without any browser persistence APIs', async ({ page }) => {
   );
   expect(submitted).toHaveLength(1);
   await page.reload();
-  await expect(page.getByText('Order #0002', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('banner').getByText('New order', { exact: true }),
+  ).toBeVisible();
 });
 
 test('tools preserve the draft, show the queue and support keyboard disclosure', async ({
@@ -559,7 +561,8 @@ test('incomplete drafts reload, and blank-name fallback stays stable through sub
   await expect
     .poll(async () => (await readDraft(page)).editor.toppings.join(','))
     .toBe('Gummy Bears');
-  const reference = (await readDraft(page)).reference;
+  expect((await readDraft(page)).reference).toBeUndefined();
+  const reference = '0001';
   await openTools(page);
   await page.reload();
   await expect(
@@ -1190,7 +1193,9 @@ test('success toasts use ticket totals, dismiss and expire, and reprint resets t
   await expect(toast).toContainText('Order #0001 sent to the printer');
   await expect(toast).toContainText('Maria · 2 servings · 2 scoops');
   await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
-  await expect(page.getByText('Order #0002', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('banner').getByText('New order', { exact: true }),
+  ).toBeVisible();
   await page.clock.fastForward(5000);
   await toast.getByRole('button', { name: 'Reprint', exact: true }).click();
   await expect(toast).toContainText('Reprint of #0001 sent');
@@ -1279,9 +1284,9 @@ test('live blank-name hint, printable name limit and button toggle semantics', a
   await mockUsb(page);
   await page.goto('/');
   const name = page.getByLabel('Customer name (optional)');
-  await expect(name).toHaveAttribute('placeholder', blankNameLabel(1));
+  await expect(name).toHaveAttribute('placeholder', 'Assigned when printed');
   await expect(
-    page.getByText(`Left blank, the ticket says “${blankNameLabel(1)}”`, {
+    page.getByText('Left blank, a name is assigned when printed.', {
       exact: true,
     }),
   ).toBeVisible();
@@ -1296,7 +1301,7 @@ test('live blank-name hint, printable name limit and button toggle semantics', a
   await chooseServing(page);
   await printButton(page).click();
   await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
-  await expect(name).toHaveAttribute('placeholder', blankNameLabel(2));
+  await expect(name).toHaveAttribute('placeholder', 'Assigned when printed');
   for (const container of ['Cup', 'Cake Cone', 'Sugar Cone']) {
     await page.getByRole('button', { name: container, exact: true }).click();
     for (const other of ['Cup', 'Cake Cone', 'Sugar Cone'])
@@ -1345,7 +1350,7 @@ test('failed intent-save transaction shows recovery and never sends or resets th
     'Printing needs attention',
   );
   await expect(page.getByLabel('Print recovery')).toContainText(
-    'Could not save print intent. No data was sent.',
+    'Could not save print intent. No job was sent by this browser.',
   );
   await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
     'Preserve this draft',
@@ -1477,7 +1482,13 @@ test('tabs share a database draft and stale edits cannot overwrite newer station
     .toBe('Newer saved draft');
   await page.getByLabel('Customer name (optional)').fill('Stale change');
   await expect(page.getByLabel('Print recovery')).toContainText(
-    'Could not save the order draft',
+    'The station changed in another tab. Reload before continuing.',
+  );
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Open in another tab',
+  );
+  await expect(page.getByLabel('Print recovery')).not.toContainText(
+    'Database needs attention',
   );
   await expect(printButton(page)).toBeDisabled();
   expect((await readDraft(second)).name).toBe('Newer saved draft');

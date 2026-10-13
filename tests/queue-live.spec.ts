@@ -82,8 +82,8 @@ const test = base.extend<{ service: Service }>({
       activeStreams: () => active,
       loseNextCommitReply: () => {
         const persist = station.mutate.bind(station);
-        station.mutate = async (value) => {
-          const result = await persist(value);
+        station.mutate = async (value, workspaceId) => {
+          const result = await persist(value, workspaceId);
           if (value.operation !== 'startOrder') return result;
           station.mutate = persist;
           throw new Error('Commit reply lost');
@@ -351,7 +351,7 @@ test('a lost database commit reply reconnects the live queue without duplicating
   await page.getByRole('button', { name: 'Cup', exact: true }).click();
   await page.getByRole('button', { name: 'Print order', exact: true }).click();
   await expect(page.getByLabel('Print recovery')).toContainText(
-    'Could not save print intent. No data was sent.',
+    'Could not save print intent. No job was sent by this browser.',
   );
   await page.reload();
   await expect(page.getByLabel('Print recovery')).toContainText(

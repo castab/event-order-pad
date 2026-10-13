@@ -1,10 +1,13 @@
 import type {
   TicketStore,
   SavedSession,
+  StationSnapshot,
 } from '../../src/lib/storage/ticket-store';
 import { parseTicket, type OrderTicket } from '../../src/lib/tickets/ticket';
 import {
   newDraft,
+  draftTicket,
+  prepareDraftForPrint,
   parseDraft,
   type OrderDraft,
 } from '../../src/lib/tickets/order';
@@ -17,6 +20,7 @@ export class MemoryTicketStore implements TicketStore {
   private latest?: string;
   private draft?: OrderDraft;
   private high = 0;
+  constructor(private allocate?: () => string) {}
   async load(): Promise<SavedSession | undefined> {
     if (!this.latest) return undefined;
     return {
@@ -30,11 +34,10 @@ export class MemoryTicketStore implements TicketStore {
     };
   }
   async loadDraft() {
-    return this.draft ?? (this.high ? newDraft(String(this.high)) : undefined);
+    return this.draft;
   }
   async saveDraft(value: OrderDraft) {
     this.draft = parseDraft(value);
-    this.high = Math.max(this.high, Number(value.reference));
   }
   async saveTicket(value: OrderTicket) {
     const ticket = parseTicket(value);
@@ -55,26 +58,34 @@ export class MemoryTicketStore implements TicketStore {
       throw new Error('Invalid pending attempt.');
     this.attempts.set(attempt.id, attempt);
   }
-  async startOrder(
-    ticket: OrderTicket,
-    draft: OrderDraft,
-    attempt: PrintAttempt,
-  ) {
-    parseTicket(ticket);
-    parseDraft(draft);
+  async startOrder(attempt: PrintAttempt): Promise<StationSnapshot> {
     parseAttempt(attempt);
+    const current = this.draft ?? newDraft();
     if (
-      this.tickets.has(ticket.id) ||
+      current.submittedTicketId ||
+      this.tickets.has(attempt.ticketId) ||
       this.attempts.has(attempt.id) ||
-      attempt.ticketId !== ticket.id ||
-      draft.submittedTicketId !== ticket.id ||
       attempt.reprint ||
       attempt.result
     )
       throw new Error('Invalid first intent.');
+    const reference = this.allocate?.() ?? String(this.high + 1);
+    const prepared = prepareDraftForPrint(current);
+    const ticket = draftTicket(
+      prepared,
+      attempt.ticketId,
+      attempt.startedAt,
+      reference,
+    );
+    const draft = parseDraft({
+      ...prepared,
+      reference: ticket.reference,
+      submittedTicketId: ticket.id,
+    });
     await this.saveTicket(ticket);
     await this.saveDraft(draft);
     await this.startAttempt(attempt);
+    return { revision: 0, draft, saved: (await this.load())! };
   }
   async finishAttempt(value: PrintAttempt, next?: OrderDraft) {
     const attempt = parseAttempt(value);
@@ -96,6 +107,11 @@ export class MemoryTicketStore implements TicketStore {
       throw new Error('Invalid final outcome.');
     this.attempts.set(attempt.id, attempt);
     if (next) await this.saveDraft(next);
+    else if (
+      attempt.result?.status === 'accepted' &&
+      this.draft?.submittedTicketId === attempt.ticketId
+    )
+      await this.saveDraft(newDraft());
     return attempt;
   }
 }

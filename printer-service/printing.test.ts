@@ -177,23 +177,25 @@ describe('Linux CUPS printing', () => {
       1,
     );
   });
-  it('blocks overlapping jobs and saves a deliberate reprint as a separate attempt', async () => {
+  it('serializes overlapping jobs, coalesces duplicates and preserves deliberate reprints', async () => {
     const journal = new MemoryPrintJournal();
-    let finish!: (value: string) => void;
-    let submitted!: () => void;
+    let release!: () => void;
+    let entered!: () => void;
     const reached = new Promise<void>((resolve) => {
-      submitted = resolve;
+      entered = resolve;
     });
     const run = runner();
     const original = run.getMockImplementation()!;
-    run.mockImplementation((program, args, input) =>
-      program === 'lp'
-        ? new Promise((resolve) => {
-            finish = resolve;
-            submitted();
-          })
-        : original(program, args, input),
-    );
+    let count = 0;
+    run.mockImplementation(async (program, args, input) => {
+      if (program === 'lp' && ++count === 1) {
+        entered();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return original(program, args, input);
+    });
     const render = vi.fn<typeof receiptPdf>(async () =>
       Buffer.from('%PDF-test'),
     );
@@ -205,24 +207,195 @@ describe('Linux CUPS printing', () => {
     );
     const first = printing.print(request);
     await reached;
-    expect(
-      (await printing.print({ ...request, attemptId: 'attempt-2' })).status,
-    ).toBe('failed');
-    expect((await printing.print(request)).status).toBe('outcome-unknown');
-    finish('request id is OrderPad-42 (1 file(s))');
-    await first;
-    run.mockImplementation(original);
-    expect(
-      (
-        await printing.print({
-          ...request,
-          attemptId: 'attempt-2',
-          reprint: true,
-        })
-      ).status,
-    ).toBe('accepted');
+    const duplicate = printing.print(request);
+    expect(duplicate).toBe(first);
+    expect((await printing.print({ ...request, reprint: true })).status).toBe(
+      'failed',
+    );
+    const second = printing.print({
+      ...request,
+      attemptId: 'attempt-2',
+      reprint: true,
+    });
+    expect(render).toHaveBeenCalledTimes(1);
+    release();
+    expect((await first).status).toBe('accepted');
+    expect((await duplicate).status).toBe('accepted');
+    expect((await second).status).toBe('accepted');
     expect(render.mock.calls[1][1]).toBe(true);
+    expect(run.mock.calls.filter(([program]) => program === 'lp')).toHaveLength(
+      2,
+    );
     expect((await journal.get('attempt-2'))!.request.ticket.id).toBe(ticket.id);
+  });
+  it('admits waiting requests in arrival order and rejects a ninth waiter without submitting', async () => {
+    const journal = new MemoryPrintJournal();
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const run = runner();
+    const original = run.getMockImplementation()!;
+    const submitted: string[] = [];
+    run.mockImplementation(async (program, args, input) => {
+      if (program === 'lp') {
+        submitted.push(args[args.indexOf('-t') + 1]);
+        if (submitted.length === 1) {
+          entered();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+      }
+      return original(program, args, input);
+    });
+    const printing = new Printing(
+      new Cups('OrderPad', run),
+      journal,
+      'Courier',
+      async () => Buffer.from('%PDF-test'),
+    );
+    const at = (n: number) => ({ ...request, attemptId: `attempt-${n}` });
+    const first = printing.print(at(1));
+    await reached;
+    const waiting = [2, 3, 4, 5, 6, 7, 8, 9].map((n) => printing.print(at(n)));
+    const overflow = await printing.print(at(10));
+    expect(overflow).toMatchObject({ status: 'failed', code: 'printer-busy' });
+    expect(overflow.message).toContain('No job was submitted');
+    expect(await journal.get('attempt-10')).toBeUndefined();
+    release();
+    expect((await first).status).toBe('accepted');
+    for (const result of await Promise.all(waiting))
+      expect(result.status).toBe('accepted');
+    expect(submitted).toEqual(
+      [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `OrderPad-attempt-${n}`),
+    );
+  });
+  it('fails a request that waits 30 seconds for the submission slot without saving intent', async () => {
+    vi.useFakeTimers();
+    try {
+      const journal = new MemoryPrintJournal();
+      let release!: () => void;
+      const run = runner();
+      const original = run.getMockImplementation()!;
+      let lp = 0;
+      run.mockImplementation(async (program, args, input) => {
+        if (program === 'lp' && ++lp === 1)
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        return original(program, args, input);
+      });
+      const printing = new Printing(
+        new Cups('OrderPad', run),
+        journal,
+        'Courier',
+        async () => Buffer.from('%PDF-test'),
+      );
+      const first = printing.print(request);
+      await vi.waitFor(() => expect(lp).toBe(1));
+      const second = printing.print({ ...request, attemptId: 'attempt-2' });
+      await vi.advanceTimersByTimeAsync(30000);
+      const result = await second;
+      expect(result).toMatchObject({ status: 'failed', code: 'printer-busy' });
+      expect(result.message).toContain('No job was submitted');
+      expect(await journal.get('attempt-2')).toBeUndefined();
+      release();
+      expect((await first).status).toBe('accepted');
+      expect(lp).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('waits for pending CUPS jobs to clear, then submits once', async () => {
+    vi.useFakeTimers();
+    try {
+      const journal = new MemoryPrintJournal();
+      const run = runner();
+      const original = run.getMockImplementation()!;
+      let checks = 0;
+      run.mockImplementation(async (program, args, input) => {
+        if (program === 'lpstat' && args.includes('-o') && ++checks <= 3)
+          return 'OrderPad-7 user 1024 Mon 13 Oct 2026';
+        return original(program, args, input);
+      });
+      const printing = new Printing(
+        new Cups('OrderPad', run),
+        journal,
+        'Courier',
+        async () => Buffer.from('%PDF-test'),
+      );
+      const result = printing.print(request);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect((await result).status).toBe('accepted');
+      expect(
+        run.mock.calls.filter(([program]) => program === 'lp'),
+      ).toHaveLength(1);
+      expect((await journal.get('attempt-1'))?.result?.status).toBe('accepted');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('persists a failed outcome when the CUPS queue does not clear within 30 seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const journal = new MemoryPrintJournal();
+      const run = runner();
+      const original = run.getMockImplementation()!;
+      run.mockImplementation(async (program, args, input) =>
+        program === 'lpstat' && args.includes('-o')
+          ? 'OrderPad-7 user 1024 Mon 13 Oct 2026'
+          : original(program, args, input),
+      );
+      const printing = new Printing(
+        new Cups('OrderPad', run),
+        journal,
+        'Courier',
+        async () => Buffer.from('%PDF-test'),
+      );
+      const result = printing.print(request);
+      await vi.advanceTimersByTimeAsync(31000);
+      expect(await result).toMatchObject({ status: 'failed' });
+      expect((await result).message).toContain('No job was submitted');
+      expect((await journal.get('attempt-1'))?.result?.status).toBe('failed');
+      expect(
+        run.mock.calls.filter(([program]) => program === 'lp'),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('never submits an attempt that was finalized while it waited', async () => {
+    const journal = new MemoryPrintJournal();
+    const run = runner();
+    const original = run.getMockImplementation()!;
+    run.mockImplementation(async (program, args, input) => {
+      if (program === 'lpstat' && args.includes('-o')) {
+        const record = await journal.get('attempt-1');
+        if (record && !record.result)
+          await journal.finish(record.request, {
+            status: 'outcome-unknown',
+            simulated: false,
+            code: 'transport',
+            message: 'Recovered as unknown.',
+          });
+      }
+      return original(program, args, input);
+    });
+    const printing = new Printing(
+      new Cups('OrderPad', run),
+      journal,
+      'Courier',
+      async () => Buffer.from('%PDF-test'),
+    );
+    expect((await printing.print(request)).status).toBe('outcome-unknown');
+    expect(run.mock.calls.filter(([program]) => program === 'lp')).toHaveLength(
+      0,
+    );
+    expect((await journal.get('attempt-1'))?.result?.message).toBe(
+      'Recovered as unknown.',
+    );
   });
   it('does not send when PDF preparation fails or the database is inaccessible', async () => {
     const journal = new MemoryPrintJournal();
@@ -263,4 +436,107 @@ describe('Linux CUPS printing', () => {
     );
     expect(ticket.id).toBe('ticket-1');
   });
+});
+
+it('limits the FIFO to eight waiting requests and expires them without dispatch', async () => {
+  vi.useFakeTimers();
+  try {
+    const journal = new MemoryPrintJournal();
+    const cups = new Cups('OrderPad', runner());
+    vi.spyOn(cups, 'waitUntilIdle').mockResolvedValue();
+    vi.spyOn(cups, 'prepare').mockResolvedValue({
+      media: 'test',
+      heightMm: 200,
+      jobOptions: [],
+    });
+    let release!: (job: string) => void;
+    const submit = vi.spyOn(cups, 'submit').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const printing = new Printing(cups, journal, 'Courier', async () =>
+      Buffer.from('%PDF-test'),
+    );
+    const active = printing.print(request);
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    const waiting = Array.from({ length: 8 }, (_, i) =>
+      printing.print({ ...request, attemptId: 'waiting-' + i }),
+    );
+    expect(
+      (await printing.print({ ...request, attemptId: 'overflow' })).message,
+    ).toContain('queue is full');
+    await vi.advanceTimersByTimeAsync(30000);
+    for (const pending of waiting) {
+      expect((await pending).status).toBe('failed');
+      expect((await pending).message).toContain('No job was submitted');
+    }
+    expect(journal.records.size).toBe(1);
+    release('OrderPad-1');
+    expect((await active).status).toBe('accepted');
+    expect(submit).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('waits for CUPS to clear and refuses submission after its 30-second deadline', async () => {
+  let elapsed = 0;
+  let checks = 0;
+  const run = vi.fn<Command>(async () =>
+    ++checks < 3 ? 'OrderPad-1 pending' : '',
+  );
+  const cups = new Cups('OrderPad', run);
+  await cups.waitUntilIdle(
+    () => elapsed,
+    async (ms) => {
+      elapsed += ms;
+    },
+  );
+  expect(elapsed).toBe(2000);
+  run.mockResolvedValue('OrderPad-1 pending');
+  elapsed = 0;
+  await expect(
+    cups.waitUntilIdle(
+      () => elapsed,
+      async (ms) => {
+        elapsed += ms;
+      },
+    ),
+  ).rejects.toThrow('30 seconds');
+  expect(elapsed).toBe(30000);
+  const journal = new MemoryPrintJournal();
+  vi.spyOn(cups, 'waitUntilIdle').mockRejectedValue(
+    new Error('Still pending after 30 seconds.'),
+  );
+  const submit = vi.spyOn(cups, 'submit');
+  const printing = new Printing(cups, journal, 'Courier');
+  const result = await printing.print(request);
+  expect(result.status).toBe('failed');
+  expect(result.message).toContain('No job was submitted');
+  expect((await journal.get(request.attemptId))?.result).toEqual(result);
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it('rechecks attempts finalized during CUPS waiting and never sends them', async () => {
+  const journal = new MemoryPrintJournal();
+  const cups = new Cups('OrderPad', runner());
+  vi.spyOn(cups, 'waitUntilIdle').mockImplementation(async () => {
+    await journal.finish(request, {
+      status: 'outcome-unknown',
+      simulated: false,
+      code: 'transport',
+      message: 'Recovered while waiting.',
+    });
+  });
+  const submit = vi.spyOn(cups, 'submit');
+  const printing = new Printing(cups, journal, 'Courier', async () =>
+    Buffer.from('%PDF-test'),
+  );
+  expect((await printing.print(request)).status).toBe('outcome-unknown');
+  expect(submit).not.toHaveBeenCalled();
+  expect(
+    (await new Printing(cups, journal, 'Courier').print(request)).message,
+  ).toBe('Recovered while waiting.');
 });

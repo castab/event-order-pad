@@ -274,11 +274,16 @@ async function backend(
     }
     return route.fulfill({ json: { order: updated, instanceId, revision } });
   });
-  await mockStationApi(context, (ticket) => {
-    if (publishFails) throw new Error('Database down');
-    publications.push(ticket);
-    upsert(ticket);
-  });
+  await mockStationApi(
+    context,
+    (ticket) => {
+      publications.push(ticket);
+      upsert(ticket);
+    },
+    () => {
+      if (publishFails) throw new Error('Database down');
+    },
+  );
   await context.route('**/api/printer', (route) =>
     route.fulfill({
       json: {
@@ -840,7 +845,7 @@ test('failed central order commits block printing and restore the saved draft on
   await page.getByRole('button', { name: 'Cup', exact: true }).click();
   await page.getByRole('button', { name: 'Print order', exact: true }).click();
   await expect(page.getByLabel('Print recovery')).toContainText(
-    'Could not save print intent. No data was sent.',
+    'Could not save print intent. No job was sent by this browser.',
   );
   expect(api.records.size).toBe(0);
   expect(api.prints).toHaveLength(0);

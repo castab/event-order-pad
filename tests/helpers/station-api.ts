@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from '@playwright/test';
+import { StationConflict } from '../../printer-service/station-database';
 import { MemoryStationRepository } from './station';
 import type { OrderTicket } from '../../src/lib/tickets/ticket';
 
@@ -6,6 +7,7 @@ import type { OrderTicket } from '../../src/lib/tickets/ticket';
 export async function mockStationApi(
   surface: Page | BrowserContext,
   onOrder?: (ticket: OrderTicket) => void,
+  beforeOrder?: () => void,
 ) {
   const station = new MemoryStationRepository();
   let unavailable = false;
@@ -20,12 +22,19 @@ export async function mockStationApi(
     try {
       if (route.request().method() === 'POST') {
         const command = route.request().postDataJSON();
-        if (command.operation === 'startOrder') onOrder?.(command.ticket);
-        return route.fulfill({ json: await station.mutate(command) });
+        // Throwing here models a rolled-back intent transaction.
+        if (command.operation === 'startOrder') beforeOrder?.();
+        const snapshot = await station.mutate(command);
+        if (command.operation === 'startOrder')
+          onOrder?.(snapshot.saved!.ticket);
+        return route.fulfill({ json: snapshot });
       }
       return route.fulfill({ json: await station.load() });
-    } catch {
-      return route.fulfill({ status: 409, json: {} });
+    } catch (error) {
+      return route.fulfill({
+        status: error instanceof StationConflict ? 409 : 503,
+        json: {},
+      });
     }
   });
   return {

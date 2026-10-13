@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
@@ -94,6 +95,15 @@ export function createApp({
     try {
       const url = new URL(req.url ?? '/', origin);
       const path = url.pathname;
+      const workspaceCookie = req.headers.cookie
+        ?.split(';')
+        .map((value) => value.trim())
+        .find((value) => value.startsWith('__Host-order-pad-workspace='))
+        ?.split('=')[1];
+      const workspaceId =
+        workspaceCookie && /^[a-f0-9]{64}$/.test(workspaceCookie)
+          ? workspaceCookie
+          : undefined;
       if (
         req.method === 'POST' &&
         (path === '/api/station' ||
@@ -128,7 +138,13 @@ export function createApp({
       }
       if (req.method === 'GET' && path === '/api/station') {
         try {
-          json(200, await station.load());
+          const id = workspaceId ?? randomBytes(32).toString('hex');
+          const snapshot = await station.load(id);
+          res.setHeader(
+            'Set-Cookie',
+            `__Host-order-pad-workspace=${id}; Max-Age=31536000; Path=/; Secure; HttpOnly; SameSite=Strict`,
+          );
+          json(200, snapshot);
         } catch {
           json(503, {
             error: 'Database unavailable. Restore Postgres and reload.',
@@ -137,6 +153,12 @@ export function createApp({
         return;
       }
       if (req.method === 'POST' && path === '/api/station') {
+        if (!workspaceId) {
+          json(409, {
+            error: 'Workspace not initialized. Reload before continuing.',
+          });
+          return;
+        }
         let command;
         const body = await readJson(req);
         try {
@@ -145,7 +167,7 @@ export function createApp({
           throw new BadRequest(400, 'Invalid station operation.');
         }
         try {
-          const snapshot = await station.mutate(command);
+          const snapshot = await station.mutate(command, workspaceId);
           if (command.operation === 'startOrder') {
             try {
               await orders.stationChanged();
@@ -290,6 +312,13 @@ export function createApp({
         return;
       }
       if (req.method === 'POST' && path === '/api/print') {
+        if (!workspaceId) {
+          json(409, {
+            error:
+              'Workspace not initialized. No job was submitted. Reload before continuing.',
+          });
+          return;
+        }
         let request;
         try {
           request = parseRequest(await readJson(req));
@@ -297,6 +326,21 @@ export function createApp({
           if (error instanceof BadRequest) throw error;
           json(400, {
             error: 'Invalid ticket or attempt metadata. No data sent.',
+          });
+          return;
+        }
+        try {
+          await station.authorizePrint(request, workspaceId);
+        } catch (error) {
+          json(error instanceof StationConflict ? 409 : 503, {
+            error:
+              error instanceof StationConflict
+                ? error.message
+                : 'Database unavailable.',
+            code:
+              error instanceof StationConflict
+                ? 'workspace-conflict'
+                : 'database-unavailable',
           });
           return;
         }

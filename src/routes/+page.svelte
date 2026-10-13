@@ -113,12 +113,29 @@
   const draftPreview = $derived.by(() => {
     if (!prepared) return undefined;
     try {
-      return draftTicket(prepared, 'Assigned when printed', previewTimestamp);
+      return draftTicket(
+        prepared,
+        'Draft preview',
+        previewTimestamp,
+        prepared.reference ?? '0001',
+      );
     } catch {
       return undefined;
     }
   });
-  const preview = $derived(draftPreview ? formatTicket(draftPreview) : []);
+  const preview = $derived(
+    draftPreview
+      ? formatTicket(draftPreview).map((line) =>
+          !prepared?.reference && line.role === 'reference'
+            ? { ...line, text: 'ORDER — Assigned when printed' }
+            : !prepared?.reference &&
+                !prepared?.name.trim() &&
+                line.role === 'name'
+              ? { ...line, text: 'Assigned when printed' }
+              : line,
+        )
+      : [],
+  );
   const lastPreview = $derived(
     viewState.ticket
       ? formatTicket(viewState.ticket, last?.reprint ?? false)
@@ -140,7 +157,9 @@
     editable && editorComplete && !full && !unchangedEdit,
   );
   const fallbackName = $derived(
-    draft ? blankNameLabel(Number(draft.reference)) : '',
+    draft?.reference
+      ? blankNameLabel(Number(draft.reference))
+      : 'Assigned when printed',
   );
   const recoveryNeeded = $derived(
     !!viewState.notice ||
@@ -344,7 +363,7 @@
     sending = true;
     dismissToast();
     const previousAttempt = last?.id;
-    const previousReference = draft?.reference;
+    const previousDraft = draft;
     try {
       if (reprint) await session.print(printer, true, confirmed);
       else await session.submit(printer, confirmed);
@@ -359,7 +378,10 @@
       ) {
         if (completed.result.status === 'accepted') {
           previewTimestamp = new Date().toISOString();
-          if (viewState.draft?.reference !== previousReference) {
+          if (
+            previousDraft !== viewState.draft &&
+            !viewState.draft?.submittedTicketId
+          ) {
             await tick();
             resetScroll();
           }
@@ -474,7 +496,8 @@
       height="44"
     />
     <div class="header-order">
-      <span>Order #{draft?.reference ?? '…'}</span>
+      <span>{draft?.reference ? `Order #${draft.reference}` : 'New order'}</span
+      >
       <button
         class="icon-button"
         aria-label="Reprint last order"
@@ -535,7 +558,11 @@
           aria-label="Print recovery"
         >
           {#if viewState.notice}<div role="alert">
-              <strong>Database needs attention</strong>
+              <strong
+                >{viewState.conflict
+                  ? 'Open in another tab'
+                  : 'Database needs attention'}</strong
+              >
               <p>{viewState.notice}</p>
             </div>{/if}
           {#if formError}<p role="alert">{formError}</p>{/if}
@@ -601,7 +628,11 @@
             aria-describedby="name-hint"
             oninput={(event) => changeName(event.currentTarget)}
           />
-          <p id="name-hint">Left blank, the ticket says “{fallbackName}”</p>
+          <p id="name-hint">
+            {draft.reference
+              ? `Left blank, the ticket says “${fallbackName}”`
+              : 'Left blank, a name is assigned when printed.'}
+          </p>
         </div>
         {#if draft.servings.length && !draft.submittedTicketId}
           <section class="saved-section" aria-labelledby="saved-title">

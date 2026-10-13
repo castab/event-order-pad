@@ -30,7 +30,7 @@ export function scoopSummary(serving: Pick<ServingEditor, 'flavors'>): string {
 }
 export interface OrderDraft {
   readonly name: string;
-  readonly reference: string;
+  readonly reference?: string;
   readonly servings: readonly Serving[];
   readonly editor: ServingEditor;
   readonly editingIndex?: number;
@@ -139,18 +139,18 @@ export function prepareDraftForPrint(draft: OrderDraft): OrderDraft {
     throw new Error(
       'Add at least one scoop and choose a container to start your order.',
     );
-  draftTicket(prepared, 'I'.repeat(100), '2000-01-01T00:00:00.000Z');
+  draftTicket(
+    prepared,
+    'I'.repeat(100),
+    '2000-01-01T00:00:00.000Z',
+    String(Number.MAX_SAFE_INTEGER),
+  );
   return prepared;
 }
 
-export function newDraft(previousReference?: string): OrderDraft {
-  const n =
-    previousReference === undefined
-      ? 1
-      : Number(parseReference(previousReference)) + 1;
+export function newDraft(): OrderDraft {
   return parseDraft({
     name: '',
-    reference: parseReference(String(n)),
     servings: [],
     editor: emptyEditor(),
   });
@@ -162,7 +162,8 @@ export function parseDraft(value: unknown): OrderDraft {
     throw new Error('Invalid order draft.');
   const v = value as OrderDraft;
   const name = cleanCustomerName(v.name, false);
-  const reference = parseReference(v.reference);
+  const reference =
+    v.reference === undefined ? undefined : parseReference(v.reference);
   if (!Array.isArray(v.servings) || v.servings.length > 30)
     throw new Error('An order can contain at most 30 servings.');
   if (
@@ -179,6 +180,8 @@ export function parseDraft(value: unknown): OrderDraft {
       v.submittedTicketId.length > 100)
   )
     throw new Error('Invalid submitted ticket.');
+  if (v.submittedTicketId && !reference)
+    throw new Error('Submitted orders need an assigned reference.');
   return Object.freeze({
     name,
     reference,
@@ -193,6 +196,7 @@ export function draftTicket(
   draft: OrderDraft,
   id: string,
   createdAt: string,
+  reference = draft.reference,
 ): OrderTicket {
   const valid = parseDraft(draft);
   if (
@@ -206,7 +210,7 @@ export function draftTicket(
     schema: 2,
     id,
     createdAt,
-    reference: valid.reference,
+    reference,
     customerName: valid.name,
     servings: valid.servings,
   });

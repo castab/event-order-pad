@@ -22,56 +22,69 @@ import { parseRequest, type PrintJournal, type Request } from './printing';
 export class StationConflict extends Error {}
 export interface StationRepository {
   check(): Promise<void>;
-  load(): Promise<StationSnapshot>;
-  mutate(command: StationCommand): Promise<StationSnapshot>;
+  load(workspaceId?: string): Promise<StationSnapshot>;
+  mutate(
+    command: StationCommand,
+    workspaceId?: string,
+  ): Promise<StationSnapshot>;
+  authorizePrint(request: Request, workspaceId: string): Promise<void>;
 }
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const equal = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
 
-/** One shared station; revision checks and transactions prevent stale tabs from losing orders. */
+/** Independent durable workspaces share only a transactionally allocated order counter. */
 export class PostgresStationRepository
   implements StationRepository, PrintJournal
 {
   constructor(
     private database: PrismaClient,
     private captureFrom: string,
+    private now = () => new Date().toISOString(),
   ) {}
   async check() {
     // Check the migrated schema too: a reachable but unprepared database is down.
     await this.database.$queryRaw`SELECT
-      (SELECT revision FROM station WHERE id = 1) AS station_revision,
+      (SELECT reference_counter FROM station WHERE id = 1) AS reference_counter,
+      (SELECT cookie_id FROM workspaces LIMIT 1) AS workspace_cookie,
       (SELECT id FROM tickets LIMIT 1) AS ticket_id,
       (SELECT id FROM print_attempts LIMIT 1) AS attempt_id,
       (SELECT attempt_id FROM print_dispatches LIMIT 1) AS dispatch_id,
       (SELECT event_id FROM order_events LIMIT 1) AS event_id`;
   }
-  private async station(tx: Prisma.TransactionClient) {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(721403)::text`;
-    const existing = await tx.station.findUnique({ where: { id: 1 } });
+  private async workspace(
+    tx: Prisma.TransactionClient,
+    cookieId: string,
+    create = false,
+  ) {
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(cookieId))
+      throw new StationConflict('Invalid workspace.');
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'workspace:' + cookieId}, 0))::text`;
+    const existing = await tx.workspace.findUnique({ where: { cookieId } });
     if (existing) return existing;
-    // Existing queue history must not cause order numbers to be reused on upgrade.
-    const history = await tx.orderEvent.findMany({
-      select: { orderJsonb: true },
-    });
-    const high = history.reduce(
-      (n, event) =>
-        Math.max(n, Number(parseTicket(event.orderJsonb).reference)),
-      0,
-    );
-    const draft = high ? newDraft(String(high)) : newDraft();
-    return tx.station.create({
-      data: {
-        id: 1,
-        draft: json(draft),
-        referenceCounter: BigInt(draft.reference),
-      },
+    if (!create)
+      throw new StationConflict(
+        'Workspace not found. Reload before continuing.',
+      );
+    // Only one browser can adopt the previous station's draft and recovery history.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(721403)::text`;
+    const legacy = await tx.workspace.findFirst({ where: { cookieId: null } });
+    if (legacy)
+      return tx.workspace.update({
+        where: { id: legacy.id },
+        data: { cookieId },
+      });
+    return tx.workspace.create({
+      data: { id: cookieId, cookieId, draft: json(newDraft()) },
     });
   }
   private async snapshot(
     tx: Prisma.TransactionClient,
+    workspaceId: string,
   ): Promise<StationSnapshot> {
-    const station = await tx.station.findUniqueOrThrow({ where: { id: 1 } });
+    const station = await tx.workspace.findUniqueOrThrow({
+      where: { id: workspaceId },
+    });
     let saved;
     if (station.latestTicketId) {
       const ticket = await tx.ticket.findUniqueOrThrow({
@@ -108,19 +121,27 @@ export class PostgresStationRepository
       saved,
     });
   }
-  load() {
+  load(workspaceId = 'test-workspace') {
     return this.database.$transaction(async (tx) => {
-      await this.station(tx);
-      return this.snapshot(tx);
+      const workspace = await this.workspace(tx, workspaceId, true);
+      return this.snapshot(tx, workspace.id);
     });
   }
-  private async ticket(tx: Prisma.TransactionClient, ticket: OrderTicket) {
+  private async ticket(
+    tx: Prisma.TransactionClient,
+    ticket: OrderTicket,
+    workspaceId: string,
+  ) {
     const before = await tx.ticket.findUnique({ where: { id: ticket.id } });
-    if (before && !equal(parseTicket(before.content), ticket))
+    if (
+      before &&
+      (before.workspaceId !== workspaceId ||
+        !equal(parseTicket(before.content), ticket))
+    )
       throw new StationConflict('Immutable ticket content differs.');
     if (!before)
       await tx.ticket.create({
-        data: { id: ticket.id, content: json(ticket) },
+        data: { id: ticket.id, content: json(ticket), workspaceId },
       });
   }
   private async start(tx: Prisma.TransactionClient, attempt: PrintAttempt) {
@@ -136,64 +157,87 @@ export class PostgresStationRepository
       },
     });
   }
-  mutate(value: StationCommand) {
+  mutate(value: StationCommand, workspaceId = 'test-workspace') {
     const command = parseStationCommand(value);
     return this.database.$transaction(async (tx) => {
-      const station = await this.station(tx);
+      const station = await this.workspace(tx, workspaceId);
       if (station.revision !== command.revision)
         throw new StationConflict(
           'The station changed in another tab. Reload before continuing.',
         );
       const current = parseDraft(station.draft);
       if (command.operation === 'saveDraft' && equal(current, command.draft))
-        return this.snapshot(tx);
+        return this.snapshot(tx, station.id);
       let draft = current;
       let latest = station.latestTicketId;
       switch (command.operation) {
         case 'saveDraft':
           draft = command.draft;
           if (
-            BigInt(draft.reference) < station.referenceCounter ||
-            BigInt(draft.reference) > station.referenceCounter + 1n
+            !current.submittedTicketId &&
+            (draft.reference || draft.submittedTicketId)
           )
-            throw new StationConflict('Invalid order number.');
-          if (draft.submittedTicketId && draft.submittedTicketId !== latest)
-            throw new StationConflict('Invalid locked draft.');
+            throw new StationConflict(
+              'Only the service can assign an order number.',
+            );
+          if (current.submittedTicketId) {
+            const saved = (await this.snapshot(tx, station.id)).saved;
+            const newest = saved?.attempts.at(-1);
+            if (draft.submittedTicketId) {
+              if (!equal(draft, current))
+                throw new StationConflict('Submitted drafts are locked.');
+            } else {
+              if (!newest?.result)
+                throw new StationConflict(
+                  'Check the printer before starting a new order.',
+                );
+              if (!equal(draft, newDraft()) || !saved)
+                throw new StationConflict(
+                  'New orders must start with an empty draft.',
+                );
+            }
+          }
           break;
         case 'saveTicket':
-          await this.ticket(tx, command.ticket);
-          latest = command.ticket.id;
+          if (command.ticket.id !== latest)
+            throw new StationConflict(
+              'Tickets must be created by first-order intent.',
+            );
+          await this.ticket(tx, command.ticket, station.id);
           break;
         case 'startOrder': {
-          const { ticket, attempt } = command;
-          draft = command.draft;
-          if (
-            current.submittedTicketId ||
-            ticket.reference !== current.reference ||
-            draft.submittedTicketId !== ticket.id ||
-            attempt.ticketId !== ticket.id ||
-            attempt.reprint ||
-            !equal(
-              draftTicket(
-                prepareDraftForPrint(current),
-                ticket.id,
-                ticket.createdAt,
-              ),
-              ticket,
-            ) ||
-            !equal(
-              draftTicket(
-                { ...draft, submittedTicketId: undefined },
-                ticket.id,
-                ticket.createdAt,
-              ),
-              ticket,
-            )
-          )
+          const { attempt } = command;
+          if (current.submittedTicketId || attempt.reprint || attempt.result)
             throw new StationConflict('Invalid first order intent.');
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(721404)::text`;
+          const counter = await tx.station.findUnique({ where: { id: 1 } });
+          const high = counter?.referenceCounter ?? 0n;
+          // Include explicit queue registrations and preserved centralized history.
+          const refs = await tx.$queryRaw<
+            { high: bigint }[]
+          >`SELECT COALESCE(MAX((order_jsonb->>'reference')::bigint),0) AS high FROM order_events`;
+          const next = (high > refs[0].high ? high : refs[0].high) + 1n;
+          const reference = String(next);
+          const prepared = prepareDraftForPrint(current);
+          const ticket = draftTicket(
+            prepared,
+            attempt.ticketId,
+            this.now(),
+            reference,
+          );
+          draft = parseDraft({
+            ...prepared,
+            reference: ticket.reference,
+            submittedTicketId: ticket.id,
+          });
+          await tx.station.upsert({
+            where: { id: 1 },
+            create: { id: 1, referenceCounter: next },
+            update: { referenceCounter: next },
+          });
           if (await tx.ticket.findUnique({ where: { id: ticket.id } }))
             throw new StationConflict('Order already exists.');
-          await this.ticket(tx, ticket);
+          await this.ticket(tx, ticket, station.id);
           await this.start(tx, attempt);
           latest = ticket.id;
           if (ticket.createdAt < this.captureFrom)
@@ -225,7 +269,10 @@ export class PostgresStationRepository
             where: { id: command.attempt.id },
             include: { dispatch: true },
           });
-          if (!row) throw new StationConflict('Print attempt not found.');
+          if (!row || row.ticketId !== latest)
+            throw new StationConflict(
+              'Print attempt not found in this workspace.',
+            );
           const before = parseAttempt(row.content);
           if (
             before.result ||
@@ -256,7 +303,7 @@ export class PostgresStationRepository
             current.submittedTicketId === completed.ticketId &&
             result.status === 'accepted'
           )
-            draft = newDraft(current.reference);
+            draft = newDraft();
           else if (command.draft)
             throw new StationConflict(
               'Only an accepted attempt can advance the draft.',
@@ -264,20 +311,29 @@ export class PostgresStationRepository
           break;
         }
       }
-      await tx.station.update({
-        where: { id: 1 },
+      await tx.workspace.update({
+        where: { id: station.id },
         data: {
           draft: json(draft),
           latestTicketId: latest,
-          referenceCounter:
-            station.referenceCounter > BigInt(draft.reference)
-              ? station.referenceCounter
-              : BigInt(draft.reference),
           revision: { increment: 1 },
         },
       });
-      return this.snapshot(tx);
+      return this.snapshot(tx, station.id);
     });
+  }
+  async authorizePrint(request: Request, workspaceId: string) {
+    const row = await this.database.ticket.findUnique({
+      where: { id: request.ticket.id },
+      include: { workspace: true },
+    });
+    if (!row || row.workspace.cookieId !== workspaceId)
+      throw new StationConflict('Print intent belongs to another workspace.');
+    const attempt = await this.database.attempt.findUnique({
+      where: { id: request.attemptId },
+    });
+    if (!attempt || attempt.ticketId !== row.id)
+      throw new StationConflict('Print attempt not found in this workspace.');
   }
   async get(id: string) {
     const record = await this.database.printDispatch.findUnique({
@@ -291,13 +347,18 @@ export class PostgresStationRepository
   }
   async begin(request: Request) {
     await this.database.$transaction(async (tx) => {
-      await this.station(tx);
+      const owner = await tx.ticket.findUniqueOrThrow({
+        where: { id: request.ticket.id },
+        include: { workspace: true },
+      });
+      const workspace = await this.workspace(tx, owner.workspace.cookieId!);
       const row = await tx.attempt.findUniqueOrThrow({
         where: { id: request.attemptId },
         include: { ticket: true },
       });
       const attempt = parseAttempt(row.content);
       if (
+        workspace.latestTicketId !== row.ticketId ||
         attempt.result ||
         attempt.ticketId !== request.ticket.id ||
         attempt.reprint !== request.reprint ||
@@ -308,6 +369,19 @@ export class PostgresStationRepository
         data: { attemptId: request.attemptId, request: json(request) },
       });
     });
+  }
+  async assertPending(request: Request) {
+    const row = await this.database.attempt.findUniqueOrThrow({
+      where: { id: request.attemptId },
+      include: { dispatch: true },
+    });
+    if (
+      parseAttempt(row.content).result ||
+      !row.dispatch ||
+      row.dispatch.result ||
+      !equal(parseRequest(row.dispatch.request), request)
+    )
+      throw new StationConflict('Print intent is no longer pending.');
   }
   async finish(request: Request, result: unknown) {
     const valid = parseAttemptResult(result);

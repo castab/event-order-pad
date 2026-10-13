@@ -16,11 +16,7 @@ export interface TicketStore {
   ): Promise<PrintAttempt | void>;
   loadDraft(): Promise<OrderDraft | undefined>;
   saveDraft(draft: OrderDraft): Promise<void>;
-  startOrder(
-    ticket: OrderTicket,
-    draft: OrderDraft,
-    attempt: PrintAttempt,
-  ): Promise<void>;
+  startOrder(attempt: PrintAttempt): Promise<StationSnapshot>;
 }
 export interface StationSnapshot {
   readonly revision: number;
@@ -38,8 +34,6 @@ export type StationCommand = { readonly revision: number } & (
     }
   | {
       readonly operation: 'startOrder';
-      readonly ticket: OrderTicket;
-      readonly draft: OrderDraft;
       readonly attempt: PrintAttempt;
     }
 );
@@ -88,8 +82,6 @@ export function parseStationCommand(value: unknown): StationCommand {
       return Object.freeze({
         ...base,
         operation: input.operation,
-        ticket: parseTicket(input.ticket),
-        draft: parseDraft(input.draft),
         attempt: parseAttempt(input.attempt),
       });
     default:
@@ -120,6 +112,9 @@ export function parseStationSnapshot(value: unknown): StationSnapshot {
   });
 }
 
+/** A rejected stale revision, distinct from database failures. */
+export class StationConflict extends Error {}
+
 /** Only transient view state lives in the browser; every durable write goes to Postgres. */
 export class DatabaseTicketStore implements TicketStore {
   private snapshot?: StationSnapshot;
@@ -138,12 +133,12 @@ export class DatabaseTicketStore implements TicketStore {
       cache: 'no-store',
       signal: AbortSignal.timeout(15000),
     });
-    if (!response.ok)
-      throw new Error(
-        response.status === 409
-          ? 'The station changed in another tab. Reload before continuing.'
-          : 'Database unavailable. Restore Postgres and reload.',
+    if (response.status === 409)
+      throw new StationConflict(
+        'The station changed in another tab. Reload before continuing.',
       );
+    if (!response.ok)
+      throw new Error('Database unavailable. Restore Postgres and reload.');
     return (this.snapshot = parseStationSnapshot(await response.json()));
   }
   private async write(command: StationWrite): Promise<void> {
@@ -167,12 +162,16 @@ export class DatabaseTicketStore implements TicketStore {
   async startAttempt(attempt: PrintAttempt) {
     await this.write({ operation: 'startAttempt', attempt });
   }
-  async startOrder(
-    ticket: OrderTicket,
-    draft: OrderDraft,
-    attempt: PrintAttempt,
-  ) {
-    await this.write({ operation: 'startOrder', ticket, draft, attempt });
+  async startOrder(attempt: PrintAttempt): Promise<StationSnapshot> {
+    await this.write({ operation: 'startOrder', attempt });
+    const snapshot = this.snapshot!;
+    if (
+      snapshot.saved?.ticket.id !== attempt.ticketId ||
+      snapshot.draft.submittedTicketId !== attempt.ticketId ||
+      !snapshot.saved.attempts.some((a) => a.id === attempt.id && !a.result)
+    )
+      throw new Error('Missing committed print intent.');
+    return snapshot;
   }
   async finishAttempt(
     attempt: PrintAttempt,

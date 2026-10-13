@@ -42,7 +42,6 @@ const database = createOrderDatabase(
 const captureFrom = parseCaptureFrom(process.env.ORDER_PAD_CAPTURE_FROM);
 const station = new PostgresStationRepository(database, captureFrom);
 await station.check();
-await station.load();
 const printing = new Printing(
   cups,
   station,

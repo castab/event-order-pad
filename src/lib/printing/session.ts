@@ -6,7 +6,7 @@ import {
   prepareDraftForPrint,
   type OrderDraft,
 } from '../tickets/order';
-import type { TicketStore } from '../storage/ticket-store';
+import { StationConflict, type TicketStore } from '../storage/ticket-store';
 import type {
   PrintAttempt,
   PrintAttemptResult,
@@ -23,6 +23,14 @@ export interface SessionState {
   readonly draft?: OrderDraft;
   readonly attempts: readonly PrintAttempt[];
   readonly notice?: string;
+  /** The notice is a stale-revision conflict, not a database failure. */
+  readonly conflict?: boolean;
+}
+
+function blockedNotice(error: unknown, failure: string) {
+  return error instanceof StationConflict
+    ? { notice: error.message, conflict: true }
+    : { notice: failure, conflict: false };
 }
 
 /** Durable intent precedes every send. No implicit retries, including after reload. */
@@ -71,29 +79,35 @@ export class PrintSession {
         const persisted = await this.store.finishAttempt(recovered);
         attempts.push(persisted ?? recovered);
       }
-      let draft = (await this.store.loadDraft()) ?? newDraft(ticket?.reference);
+      let draft = (await this.store.loadDraft()) ?? newDraft();
       // No attempt means no send occurred. A crash while saving the order can
       // safely restore its editable draft; pending attempts always stay locked.
       if (
         draft.submittedTicketId &&
         (draft.submittedTicketId !== ticket?.id || !attempts.length)
       ) {
-        draft = parseDraft({ ...draft, submittedTicketId: undefined });
+        draft = parseDraft({
+          ...draft,
+          submittedTicketId: undefined,
+          reference: undefined,
+        });
       }
       if (
         draft.submittedTicketId === ticket?.id &&
         attempts.at(-1)?.result?.status === 'accepted'
       ) {
-        draft = newDraft(draft.reference);
+        draft = newDraft();
       }
       await this.store.saveDraft(draft);
       this.update({ phase: 'ready', ticket, attempts, draft });
-    } catch {
+    } catch (error) {
       this.update({
         phase: 'blocked',
         attempts: [],
-        notice:
+        ...blockedNotice(
+          error,
           'Database unavailable or station state changed. Order editing and printing are blocked. Restore Postgres on the app machine and reload to recover saved state.',
+        ),
       });
     }
   }
@@ -114,12 +128,14 @@ export class PrintSession {
         await this.store.saveDraft(draft);
         if (this.state.draft === draft)
           this.update({ ...this.state, savingDraft: false });
-      } catch {
+      } catch (error) {
         this.update({
           ...this.state,
           phase: 'blocked',
-          notice:
+          ...blockedNotice(
+            error,
             'Could not save the order draft. Printing is blocked. Reopen the page to recover the last saved draft.',
+          ),
         });
       }
     });
@@ -130,6 +146,7 @@ export class PrintSession {
     this.update({
       ...this.state,
       phase: 'blocked',
+      conflict: false,
       notice:
         'Database connection lost. Order editing and printing are blocked. Restore Postgres on this machine and reload. Nothing will be resent automatically.',
     });
@@ -152,19 +169,19 @@ export class PrintSession {
       this.busy = false;
       return;
     }
-    const draft = newDraft(
-      this.state.draft?.reference ?? this.state.ticket?.reference,
-    );
+    const draft = newDraft();
     this.update({ ...this.state, phase: 'saving' });
     try {
       await this.store.saveDraft(draft);
       this.update({ ...this.state, phase: 'ready', draft });
-    } catch {
+    } catch (error) {
       this.update({
         ...this.state,
         phase: 'blocked',
-        notice:
+        ...blockedNotice(
+          error,
           'Could not save the new order. No data was sent. Restore Postgres and reload to recover saved state.',
+        ),
       });
     } finally {
       this.busy = false;
@@ -180,14 +197,48 @@ export class PrintSession {
       (this.requiresConfirmation() && !confirmed)
     )
       return;
-    const prepared = prepareDraftForPrint(this.state.draft);
-    const ticket = draftTicket(prepared, this.id(), this.now());
-    await this.send(
-      printer,
-      ticket,
-      false,
-      parseDraft({ ...prepared, submittedTicketId: ticket.id }),
-    );
+    this.busy = true;
+    await this.draftWrites;
+    if (this.state.phase !== 'ready' || this.state.notice) {
+      this.busy = false;
+      return;
+    }
+    const draft = this.state.draft!;
+    try {
+      prepareDraftForPrint(draft);
+    } catch (error) {
+      this.busy = false;
+      throw error;
+    }
+    const attempt: PrintAttempt = {
+      id: this.id(),
+      ticketId: this.id(),
+      startedAt: this.now(),
+      mode: printer.mode,
+      reprint: false,
+    };
+    this.update({ ...this.state, phase: 'saving' });
+    try {
+      const snapshot = await this.store.startOrder(attempt);
+      await this.dispatch(
+        printer,
+        snapshot.saved!.ticket,
+        attempt,
+        [],
+        snapshot.draft,
+      );
+    } catch (error) {
+      this.update({
+        ...this.state,
+        phase: 'blocked',
+        ...blockedNotice(
+          error,
+          'Could not save print intent. No job was sent by this browser. Reload to recover committed state. Nothing will be resent automatically.',
+        ),
+      });
+    } finally {
+      this.busy = false;
+    }
   }
 
   async print(
@@ -229,29 +280,34 @@ export class PrintSession {
     };
     this.update({ phase: 'saving', ticket, attempts: previous, draft });
     try {
-      if (
-        !reprint &&
-        draft?.submittedTicketId === ticket.id &&
-        !previous.length
-      ) {
-        await this.store.startOrder(ticket, draft, attempt);
-      } else {
-        await this.store.saveTicket(ticket);
-        if (draft) await this.store.saveDraft(draft);
-        await this.store.startAttempt(attempt);
-      }
-    } catch {
+      await this.store.saveTicket(ticket);
+      if (draft) await this.store.saveDraft(draft);
+      await this.store.startAttempt(attempt);
+    } catch (error) {
       this.busy = false;
       this.update({
         phase: 'blocked',
         ticket,
         draft,
         attempts: previous,
-        notice:
+        ...blockedNotice(
+          error,
           'Could not save print intent. No data was sent. Restore Postgres and reload to recover saved state.',
+        ),
       });
       return;
     }
+    await this.dispatch(printer, ticket, attempt, previous, draft);
+  }
+
+  private async dispatch(
+    printer: TicketPrinter,
+    ticket: OrderTicket,
+    attempt: PrintAttempt,
+    previous: readonly PrintAttempt[],
+    draft?: OrderDraft,
+  ): Promise<void> {
+    const reprint = attempt.reprint;
     this.update({
       phase: 'printing',
       ticket,
@@ -288,7 +344,7 @@ export class PrintSession {
     const completed = { ...attempt, result, completedAt: this.now() };
     const nextDraft =
       result.status === 'accepted' && draft?.submittedTicketId === ticket.id
-        ? newDraft(draft.reference)
+        ? newDraft()
         : undefined;
     try {
       const persisted = await this.store.finishAttempt(completed, nextDraft);
@@ -299,12 +355,13 @@ export class PrintSession {
         draft: savedDraft ?? nextDraft ?? draft,
         attempts: [...previous, persisted ?? completed],
       });
-    } catch {
+    } catch (error) {
       this.update({
         phase: 'blocked',
         ticket,
         draft,
         attempts: [...previous, completed],
+        conflict: false,
         notice:
           'The send finished but its outcome could not be saved. Printing is blocked. Reload to recover the database outcome. If it is still unknown, check the physical ticket.',
       });

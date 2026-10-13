@@ -101,6 +101,25 @@ export class Cups {
     }
     return jobOptions;
   }
+  async waitUntilIdle(
+    now = () => Date.now(),
+    pause = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  ): Promise<void> {
+    const deadline = now() + 30000;
+    while (
+      (
+        await this.run('lpstat', ['-h', 'localhost:631', '-o', this.queue])
+      ).trim()
+    ) {
+      if (now() >= deadline)
+        throw new Error(
+          'A CUPS job is still pending after 30 seconds. Inspect or cancel it before deliberately reprinting.',
+        );
+      await pause(Math.min(1000, deadline - now()));
+    }
+  }
+
   async prepare(
     heightMm: number,
   ): Promise<{ media: string; heightMm: number; jobOptions: string[] }> {

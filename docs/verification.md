@@ -2,6 +2,25 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Independent browser workspaces and database-assigned numbers — 2026-10-13
+
+Each browser profile now receives an anonymous `__Host-order-pad-workspace` cookie and owns its own Postgres draft, revision, latest ticket and recovery state. Editable drafts have no number; the service allocates the next global number atomically with print intent and returns the authoritative ticket. The `20261015000000_browser_workspaces` migration preserves the existing station draft, latest ticket, attempts and dispatches for the first browser after upgrade and seeds the counter above all stored references. Print requests queue FIFO (eight waiting, 30-second slot limit), then wait up to 30 seconds for pending CUPS jobs before submitting once. Revision conflicts now show “Open in another tab” instead of “Database needs attention”.
+
+Checks ran on Linux with Node 24.21.0, in the AGENTS.md order. `npm run test:postgres` used a newly created disposable PostgreSQL 18 container on a random loopback port, removed afterward; the station database was not touched.
+
+| Check                        | Result                                                                                                                                                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres:volume | Passed; disposable PostgreSQL 18 volume survived container recreation.                                                                                                                                                      |
+| npm run test:postgres        | Passed; 18 tests across 3 files, including concurrent number allocation, rollback without consuming numbers, workspace ownership, same-workspace revision conflicts and migration of editable, accepted and unknown states. |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                                                                                                                                |
+| npm run lint                 | Passed.                                                                                                                                                                                                                     |
+| npm test                     | Passed; 204 tests across 18 files, including FIFO order, eight-waiter capacity, slot timeout, CUPS queue clearing and timeout, duplicate coalescing and attempts finalized while waiting.                                   |
+| npm run build                | Passed.                                                                                                                                                                                                                     |
+| npm run build:printer        | Passed.                                                                                                                                                                                                                     |
+| npm run test:e2e             | Passed; 128 Chromium runs, including a two-browser-context scenario covering independent editing, serialized concurrent prints, authoritative numbers and isolated recovery.                                                |
+
+No physical print job was sent and no hardware result is claimed. Steps 7 and 8 of the acceptance checklist in [Linux printing](linux-printing.md) remain owner-run checks. Deployment requires `npm run db:deploy` for the new migration and a coordinated app/service restart.
+
 ## PWA station endpoint diagnosis — 2026-10-13
 
 The reloaded PWA showed “Database needs attention.” Read-only inspection found local PostgreSQL 18 healthy and both committed migrations already applied to the station database. The managed `order-pad.service` process started before the new build and returned 404 for `/api/database` and `/api/station`, confirming an app/service version mismatch. CUPS reported no pending jobs.

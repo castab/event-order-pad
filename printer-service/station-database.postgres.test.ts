@@ -12,20 +12,16 @@ if (!url || !new URL(url).pathname.endsWith('_test'))
   throw new Error('Use a separate *_test database.');
 const database = createOrderDatabase(url);
 const cutoff = '2026-10-11T20:00:00.000Z';
-const station = new PostgresStationRepository(database, cutoff);
+const station = new PostgresStationRepository(database, cutoff, () => cutoff);
 beforeEach(async () => {
-  await database.printDispatch.deleteMany();
-  await database.attempt.deleteMany();
-  await database.station.deleteMany();
-  await database.ticket.deleteMany();
-  await database.orderEvent.deleteMany();
+  await database.$executeRaw`TRUNCATE workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
 });
 afterAll(() => database.$disconnect());
 async function intent(id = 'ticket') {
   let snapshot = await station.load();
   const ticket = {
     ...sampleTicket(id, cutoff),
-    reference: snapshot.draft.reference,
+    reference: '0001',
   };
   const draft = parseDraft({
     ...snapshot.draft,
@@ -46,7 +42,11 @@ async function intent(id = 'ticket') {
   };
   return {
     ticket,
-    draft: parseDraft({ ...draft, submittedTicketId: id }),
+    draft: parseDraft({
+      ...draft,
+      reference: ticket.reference,
+      submittedTicketId: id,
+    }),
     attempt,
     revision: snapshot.revision,
   };
@@ -108,6 +108,7 @@ it('durably claims dispatch before lp, reconciles a lost response, advances once
     reprint: false,
   };
   const cups = new Cups('OrderPad');
+  vi.spyOn(cups, 'waitUntilIdle').mockResolvedValue();
   vi.spyOn(cups, 'prepare').mockResolvedValue({
     media: 'test',
     heightMm: 200,
@@ -144,7 +145,7 @@ it('durably claims dispatch before lp, reconciles a lost response, advances once
     },
   });
   expect(snapshot.saved?.attempts[0].result).toEqual(result);
-  expect(snapshot.draft.reference).toBe('0002');
+  expect(snapshot.draft.reference).toBeUndefined();
   await expect(
     station.mutate({
       revision: snapshot.revision,
@@ -175,6 +176,7 @@ it('never sends when the database fails before dispatch and blocks after an unsa
     reprint: false,
   };
   const cups = new Cups('OrderPad');
+  vi.spyOn(cups, 'waitUntilIdle').mockResolvedValue();
   vi.spyOn(cups, 'prepare').mockResolvedValue({
     media: 'test',
     heightMm: 200,
@@ -202,7 +204,10 @@ it('starts above existing centralized order numbers without importing browser hi
   await new PostgresOrderRepository(database).upsert(
     sampleTicket('old', cutoff),
   );
-  expect((await station.load()).draft.reference).toBe('0044');
+  expect((await station.load()).draft.reference).toBeUndefined();
+  const cmd = await intent('new');
+  const saved = await station.mutate({ ...cmd, operation: 'startOrder' });
+  expect(saved.saved?.ticket.reference).toBe('0044');
   await station.check();
 });
 
@@ -215,6 +220,7 @@ it('runs the complete API client/session flow against Postgres and recovers thro
   const { LinuxCupsPrinter } =
     await import('../src/lib/printing/adapters/linux-cups');
   const cups = new Cups('OrderPad');
+  vi.spyOn(cups, 'waitUntilIdle').mockResolvedValue();
   vi.spyOn(cups, 'prepare').mockResolvedValue({
     media: 'test',
     heightMm: 200,
@@ -237,14 +243,19 @@ it('runs the complete API client/session flow against Postgres and recovers thro
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin.port = String((server.address() as { port: number }).port);
-  const send: typeof fetch = (input, init) =>
-    fetch(`${origin.origin}${input}`, {
+  let cookie = '';
+  const send: typeof fetch = async (input, init) => {
+    const response = await fetch(`${origin.origin}${input}`, {
       ...init,
       headers: {
         ...init?.headers,
         Origin: origin.origin,
+        ...(cookie ? { Cookie: cookie } : {}),
       },
     });
+    cookie = response.headers.get('set-cookie')?.split(';')[0] ?? cookie;
+    return response;
+  };
   try {
     const store = new DatabaseTicketStore(send);
     let id = 0;
@@ -268,7 +279,7 @@ it('runs the complete API client/session flow against Postgres and recovers thro
     await session.submit(new LinuxCupsPrinter(send));
     expect(session.state.phase).toBe('ready');
     expect(session.state.attempts[0].result?.status).toBe('accepted');
-    expect(session.state.draft?.reference).toBe('0002');
+    expect(session.state.draft?.reference).toBeUndefined();
     const reload = new PrintSession(new DatabaseTicketStore(send), () => {});
     await reload.initialize();
     expect(reload.state.ticket).toEqual(session.state.ticket);
@@ -277,11 +288,192 @@ it('runs the complete API client/session flow against Postgres and recovers thro
     await reload.print(new LinuxCupsPrinter(send), true);
     expect(reload.state.phase).toBe('ready');
     expect(reload.state.attempts).toHaveLength(2);
-    expect(reload.state.draft?.reference).toBe('0002');
+    expect(reload.state.draft?.reference).toBeUndefined();
     expect(await database.orderEvent.count()).toBe(1);
     expect(submit).toHaveBeenCalledTimes(2);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+it('isolates browser revisions and allocates unique numbers atomically across concurrent workspaces', async () => {
+  const a = await station.load('browser-a');
+  const b = await station.load('browser-b');
+  const servings = sampleTicket('sample', cutoff).servings;
+  const [readyA, readyB] = await Promise.all([
+    station.mutate(
+      {
+        operation: 'saveDraft',
+        revision: a.revision,
+        draft: { ...a.draft, name: 'Alice', servings },
+      },
+      'browser-a',
+    ),
+    station.mutate(
+      {
+        operation: 'saveDraft',
+        revision: b.revision,
+        draft: { ...b.draft, name: 'Bob', servings },
+      },
+      'browser-b',
+    ),
+  ]);
+  const attempt = (id: string): PrintAttempt => ({
+    id: 'attempt-' + id,
+    ticketId: id,
+    mode: 'linux-cups',
+    reprint: false,
+    startedAt: cutoff,
+  });
+  const [printedA, printedB] = await Promise.all([
+    station.mutate(
+      {
+        operation: 'startOrder',
+        revision: readyA.revision,
+        attempt: attempt('alice'),
+      },
+      'browser-a',
+    ),
+    station.mutate(
+      {
+        operation: 'startOrder',
+        revision: readyB.revision,
+        attempt: attempt('bob'),
+      },
+      'browser-b',
+    ),
+  ]);
+  expect(
+    [printedA.saved!.ticket.reference, printedB.saved!.ticket.reference].sort(),
+  ).toEqual(['0001', '0002']);
+  expect(printedA.saved!.ticket.displayName).toBe('Alice');
+  expect(printedB.saved!.ticket.displayName).toBe('Bob');
+  expect(await station.load('browser-a')).toEqual(printedA);
+  expect(await station.load('browser-b')).toEqual(printedB);
+  const request = {
+    ticket: printedA.saved!.ticket,
+    attemptId: 'attempt-alice',
+    reprint: false,
+  };
+  await expect(station.authorizePrint(request, 'browser-b')).rejects.toThrow(
+    'another workspace',
+  );
+  await expect(
+    station.mutate(
+      {
+        operation: 'finishAttempt',
+        revision: printedB.revision,
+        attempt: {
+          ...attempt('alice'),
+          completedAt: cutoff,
+          result: {
+            status: 'failed',
+            simulated: false,
+            code: 'transport',
+            message: 'No job submitted.',
+          },
+        },
+      },
+      'browser-b',
+    ),
+  ).rejects.toThrow('workspace');
+  await expect(
+    station.mutate(
+      {
+        operation: 'startAttempt',
+        revision: printedB.revision,
+        attempt: { ...attempt('alice'), id: 'foreign-reprint', reprint: true },
+      },
+      'browser-b',
+    ),
+  ).rejects.toThrow('latest ticket');
+  await expect(
+    station.mutate(
+      {
+        operation: 'saveTicket',
+        revision: printedB.revision,
+        ticket: printedA.saved!.ticket,
+      },
+      'browser-b',
+    ),
+  ).rejects.toThrow();
+  expect(await database.orderEvent.count()).toBe(2);
+});
+
+it('a rolled-back intent consumes no reference and a recovered pending attempt cannot dispatch', async () => {
+  const command = await intent('rollback-number');
+  await new PostgresOrderRepository(database).upsert(command.ticket);
+  await expect(
+    station.mutate({
+      operation: 'startOrder',
+      revision: command.revision,
+      attempt: command.attempt,
+    }),
+  ).rejects.toThrow('already exists');
+  expect(await database.station.count()).toBe(0);
+  await database.orderEvent.deleteMany();
+  const committed = await station.mutate({
+    operation: 'startOrder',
+    revision: command.revision,
+    attempt: command.attempt,
+  });
+  expect(committed.saved!.ticket.reference).toBe('0001');
+  await station.mutate({
+    operation: 'finishAttempt',
+    revision: committed.revision,
+    attempt: {
+      ...command.attempt,
+      completedAt: cutoff,
+      result: {
+        status: 'outcome-unknown',
+        simulated: false,
+        code: 'transport',
+        message: 'Lost reply.',
+      },
+    },
+  });
+  await expect(
+    station.begin({
+      ticket: committed.saved!.ticket,
+      attemptId: command.attempt.id,
+      reprint: false,
+    }),
+  ).rejects.toThrow('pending');
+  expect(await database.printDispatch.count()).toBe(0);
+});
+
+it('atomically attaches legacy recovery state to only the first initializing browser', async () => {
+  const ticket = sampleTicket('legacy-owner', cutoff);
+  await database.workspace.create({
+    data: {
+      id: 'legacy',
+      revision: 4,
+      draft: JSON.parse(
+        JSON.stringify({ ...newDraft(), name: 'Recovered draft' }),
+      ),
+    },
+  });
+  await database.ticket.create({
+    data: {
+      id: ticket.id,
+      content: JSON.parse(JSON.stringify(ticket)),
+      workspaceId: 'legacy',
+    },
+  });
+  await database.workspace.update({
+    where: { id: 'legacy' },
+    data: { latestTicketId: ticket.id },
+  });
+  const [a, b] = await Promise.all([
+    station.load('new-browser-a'),
+    station.load('new-browser-b'),
+  ]);
+  expect([a, b].filter((s) => s.draft.name === 'Recovered draft')).toHaveLength(
+    1,
+  );
+  const adopted = a.draft.name ? 'new-browser-a' : 'new-browser-b';
+  expect((await station.load(adopted)).saved?.ticket).toEqual(ticket);
+  expect(await database.workspace.count()).toBe(2);
+  expect(await database.ticket.count()).toBe(1);
 });
