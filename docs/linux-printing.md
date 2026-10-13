@@ -52,9 +52,9 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:4174
 
 Follow Tailscale's authorization link if HTTPS needs enabling. Serve is private to the tailnet; do not enable Funnel or expose CUPS port 631. Phone HTTPS uses 443 with no explicit port. The backend binds only to loopback port 4174.
 
-On the S10e, open the **Mint machine’s** HTTPS URL. The Order tab checks the server’s USB queue automatically. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Printer settings** contains queue details, setup instructions, and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
+On the S10e, open the **Mint machine’s** HTTPS URL. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
 
-The Mint URL is a different storage origin from the Windows URL. Old browser ticket/history remain at the old origin; no migration or erasure occurs. Existing sample tickets remain recoverable, and new receipts use the entered order contents.
+Browser drafts, tickets and attempts belong to one origin (scheme + host + port) and browser profile. Opening Order Pad at a different URL, such as an earlier Windows preview address, starts with empty local history; nothing is migrated between origins.
 
 ## Behavior and limits
 
@@ -68,10 +68,13 @@ The Mint URL is a different storage origin from the Windows URL. Old browser tic
 - Preserve `.print-data/` on local persistent storage; it contains tickets/attempts and is Git-ignored. Do not delete it to resolve an ambiguous print.
 - Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
 - The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Simulation/PassPRNT adapters remain available for compatibility tests. Phase 1 resets v1 browser records once, as documented in README; the printer-service journal is unchanged.
+- Printed ticket times use the **Mint host’s** local time zone, because the service renders the PDF. Check it with `timedatectl` before an event. Browser previews and the queue use each device’s own time zone.
 
-Optional variables: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to disable order tracking), `ORDER_PAD_PORT` (4174), `ORDER_PAD_DATA` (`.print-data` relative to repository), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). Keep paths/environment stable across restarts.
+Required: `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to disable order tracking; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_DATA` (`.print-data`, resolved from the working directory), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
 
-The initial service is foreground-only. Tailscale `--bg` persists the proxy, not Node. After smoke testing, configure systemd with the actual Node path, repository working directory and these variables. Disable host sleep for event use.
+Start the service **from the repository root**: it serves `./build` and resolves a relative `ORDER_PAD_DATA` against the current directory, and exits if `build/` is missing.
+
+The initial service is foreground-only. Tailscale `--bg` persists the proxy, not Node. After smoke testing, configure systemd with the actual Node path, `WorkingDirectory` set to the repository root, and these variables. Disable host sleep for event use.
 
 ## Verified Mint setup — 2026-10-11
 
@@ -127,7 +130,7 @@ For physical acceptance of the simplified workflow:
 1. Choose Vanilla and Cup without pressing Add serving. Tap **Print order** once. Verify one serving with one Vanilla scoop, the generated two-word label, end marker, legibility, and partial cut. Confirm a fresh order opens with all flavor counts at zero and no container selected.
 2. Enter a name and choose 2 Chocolate Chip scoops + 1 Strawberry scoop in a Cup with all eight toppings, then add that serving. Choose 5 Vanilla scoops in a Cake Cone with no toppings and press Print directly. Verify the trimmed name, exactly two serving blocks, total scoop counts of 3 and 5, correct per-flavor counts, full toppings, and the no-toppings line. The mixed flavors must remain together in one serving block.
 3. Begin another draft with a different name and unfinished selections. Deliberately **Reprint last order**. Verify REPRINT, original label/content/ID/timestamp, and that the new draft is unchanged.
-4. Switch to **Printer settings**, inspect the `Star_TSP143` queue, check readiness, and return to Order. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
+4. Open **Order tools**, inspect the `Star_TSP143` queue under Printer settings, tap **Check printer**, and close Order tools. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
 5. Inspect printer output and pending jobs during a controlled connection interruption. Verify the UI retains an unknown order and requires acknowledgment before continuing, without automatically resending.
 
 These are physical acceptance steps, not claims that this interaction update has already been tested on hardware.

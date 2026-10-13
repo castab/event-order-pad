@@ -2,13 +2,15 @@
 
 Updated **2026-10-11**. The owner confirmed **TSP143IIIU / Galaxy S10e / Android 12**, reported working PassPRNT output and later a successful CUPS test receipt on **Mint 22.3 Cinnamon 64-bit**. These replace the specification's IV assumption. Detailed hardware acceptance is incomplete.
 
+> **Current route: Linux only.** Since the USB-only ordering UX (2026-10-11), the ordering interface prints exclusively through the Linux service. The Android PassPRNT route described below is **not selectable in the app**; its adapter (`src/lib/printing/adapters/passprnt.ts`) is kept for unit tests and as reference if the route is restored. Read this page for background and official Star sources, and [linux-printing.md](linux-printing.md) for the live setup.
+
 ## Linux host route
 
-The optional Linux route is now implemented: **phone browser → Mint HTTPS app/service → CUPS → printer USB-B**. [Linux setup and limits](linux-printing.md) document exact launch commands and official CUPS/Star sources. Domain objects and shared layout remain unchanged. The service uses the installed Star driver, not an Android SDK or guessed raw printer commands. App-generated PDF, cut/reprint, error and network-interruption tests are still required. The owner's CUPS test page proves basic output only. Native Android remains deferred; no Order Pad APK exists.
+The Linux route is implemented and is the only route the UI uses: **phone browser → Mint HTTPS app/service → CUPS → printer USB-B**. [Linux setup and limits](linux-printing.md) document exact launch commands and official CUPS/Star sources. Domain objects and shared layout remain printer-neutral. The service uses the installed Star driver, not an Android SDK or guessed raw printer commands. The first app-generated receipt printed and cut correctly on 2026-10-11; detailed layout, REPRINT, error and network-interruption tests are still required. Native Android remains deferred; no Order Pad APK exists.
 
-## Selected route
+## Android PassPRNT route (historical)
 
-**Static HTTPS app in Android Chrome → Star PassPRNT → phone USB-C host/OTG → printer USB-B.** This original Android route remains available alongside Linux. The ticket domain, simulator and IndexedDB remain printer-neutral. No order builder or custom native app was added.
+**Static HTTPS app in Android Chrome → Star PassPRNT → phone USB-C host/OTG → printer USB-B.** This was the original route and is no longer reachable from the ordering UI (see the note above). The ticket domain, simulator and IndexedDB remain printer-neutral. No custom native app was added.
 
 The [IIIU USB manual](https://www.star-m.jp/products/s_print/tsp100iiiu/manual/en/installing/connectingUSBCable.htm) assigns Android communication to **USB-B** with a suitable device cable/adapter. USB-A only charges Android; USB-B does not charge the phone. Use a USB-C host/OTG adapter plus an A-to-B data cable, or a compatible C-to-B data cable. Exact cable/phone compatibility needs testing. This is different from the former IV AOA route.
 
@@ -44,4 +46,4 @@ A callback can reopen another tab or bypass a standalone PWA. Use Chrome as the 
 
 The shell and callback navigation can load from production cache. Layout is embedded. The owner reports PassPRNT printing works and notes the app-switching requirement. Exact versions, callback correlation, offline return, output details and cutting still need a recorded test. Installed-PWA routing must be checked separately. Use [hardware-test.md](hardware-test.md).
 
-Native SDKs support IIIU USB but require a native app/wrapper and remain deferred. WebUSB, Ethernet, CloudPRNT and the full order builder remain outside this milestone.
+Native SDKs support IIIU USB but require a native app/wrapper and remain deferred. WebUSB, Ethernet and CloudPRNT were not pursued. (The order builder, originally out of scope here, has since been implemented; see [README](../README.md).)

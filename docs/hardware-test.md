@@ -2,7 +2,9 @@
 
 **Status: PARTIAL, OWNER-REPORTED.** The owner reports PassPRNT output and, on 2026-10-11, a successful CUPS test page/receipt on Mint 22.3 Cinnamon 64-bit with direct USB. Exact driver version, output/cut details, reprint, error and offline checks remain unrecorded. The implementation agent has no physical printer access.
 
-For Linux app printing, follow [Linux setup and acceptance](linux-printing.md). Its application-generated receipt has not yet been hardware-tested. The Android checklist below remains applicable to PassPRNT.
+For the current Linux route, follow [Linux setup and acceptance](linux-printing.md). Its first application-generated receipt printed successfully from the S10e on 2026-10-11; the remaining receipt, REPRINT, error and recovery checks are listed there.
+
+> **Historical checklist.** The sections below cover the earlier Android route (phone → Star PassPRNT → USB). The ordering UI no longer offers it: there is no printer selector, setup acknowledgment or **Open PassPRNT and print** link, and the PassPRNT adapter is kept only for unit tests. Steps 4–6, the launch/callback checks and the "simulation default" reload check cannot be run from the current app. Keep this page as device evidence and as the starting point if the Android route is restored.
 
 ## Device evidence
 

@@ -1,10 +1,29 @@
 # Order Pad verification
 
+A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
+
+## Current branch check — 2026-10-12
+
+Documentation pass on `design/order-builder` at `1eda67b`. This branch adds the phase 1–3 work since the entries below: schema 2 structured tickets and the one-time v1 browser reset, the redesigned prep ticket, the responsive order builder, the persistent build queue with SSE, the `ORDER_PAD_TRACKING_ENABLED` flag, automatic service-worker updates, and the Rainbow and Chocolate Sprinkles toppings. All checks were run locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.
+
+| Check                 | Result                                                                                    |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| npm run check         | Passed; svelte-check 0 errors / 0 warnings, printer-service `tsc` clean                   |
+| npm run lint          | Passed                                                                                    |
+| npm test              | Passed; 187 tests across 19 files                                                         |
+| npm run build         | Passed                                                                                    |
+| npm run build:printer | Passed                                                                                    |
+| npm run test:e2e      | Passed; 120 Chromium runs (builder spec at 390×844, 820×1180, 1280×800, plus queue specs) |
+
+No print job was sent, and no hardware result is newly claimed. Physical acceptance of the redesigned prep ticket, REPRINT and recovery flows remains open; follow the checklist in [linux-printing.md](linux-printing.md).
+
 ## Mixed flavors and scoop counts — 2026-10-11
 
 Each serving now has a list of flavors with positive integer scoop counts, capped at **5 scoops total per cup or cone**. Touch-sized +/− controls start at zero, show each flavor’s count and the shared total, disable additions at five, and remove a flavor when its count reaches zero. Container and toppings apply to the whole serving. Printing still includes the complete current serving or edit automatically.
 
 New tickets keep one item per serving (`quantity: 1`), with a heading such as **Ice cream (3 scoops)** and separate modifier lines for **2 scoops Chocolate Chip**, **1 scoop Strawberry**, the container, and toppings. The existing ticket API and receipt renderers need no schema change. Saved single-flavor drafts convert to one-scoop portions during recovery; submitted tickets remain unchanged for deliberate reprinting. No IndexedDB version bump or data clearing is needed.
+
+> Superseded: the later phase 1 domain upgrade replaced this `items`/`quantity` shape with schema 2 `servings` and reset v1 browser data once (IndexedDB version 2). See README.
 
 | Check                 | Result                                                            |
 | --------------------- | ----------------------------------------------------------------- |

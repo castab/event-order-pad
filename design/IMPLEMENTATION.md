@@ -1,5 +1,13 @@
 # Order builder, prep ticket & build queue — implementation brief
 
+> **Status (2026-10-12): implemented.** All three suggested phases are built. This brief is kept as the original handoff and the source of the ordering rules and layout intent. Where it and the code differ, the code and [README](../README.md) are authoritative. Known differences:
+>
+> - The build queue screen is titled **Now Scooping** (route `/queue/`), not "BUILD QUEUE".
+> - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and order tracking can be switched off with `ORDER_PAD_TRACKING_ENABLED=false`.
+> - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration happens both in `POST /api/print` and through the browser outbox.
+> - Order numbers are still allocated per browser; moving allocation to the service remains deferred.
+> - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.
+
 This folder is the design handoff for the next milestone: touch order entry that prints a
 preparation ticket, plus a second screen where the build station tracks open orders and marks
 them done. It replaces handwritten notepad orders with a fixed, repeatable format.
@@ -29,9 +37,9 @@ components in the source system; recreate their look in Svelte from the tokens (
 16 px cards, 10 px inputs, Poppins). The Wordmark is supplied logo art — ask the owner for
 `logo.svg` rather than typesetting the brand name.
 
-Keep everything in `README.md` → "Boundaries and reliability" true. In particular: tickets stay
-immutable, intent is saved before any send, real mode never falls back to simulation, and
-reprints keep the original ticket ID.
+Keep everything in `README.md` → "Printing and reliability" and the invariants in `AGENTS.md`
+true. In particular: tickets stay immutable, intent is saved before any send, real mode never
+falls back to simulation, and reprints keep the original ticket ID.
 
 ## Ordering rules (source of truth)
 
