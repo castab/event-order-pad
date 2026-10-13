@@ -2,6 +2,21 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## SvelteKit 3 migration — 2026-10-12
+
+Upgrade from SvelteKit 2 to SvelteKit 3.0.1 (Vite 8.3.4, vite-plugin-svelte 7.3.1, adapter-static 4.0.0, TypeScript 6.0.3) on top of `main` at `0df5798`, uncommitted at the time of the run. After `sv migrate sveltekit-3`, the manual steps were: the service worker moved to `src/service-worker/index.ts` with its own `tsconfig.json` and reads `version` from `$app/env` and the precache list from `$app/manifest` through `$app/paths`; the root `tsconfig.json` excludes it, and `npm run check` now type-checks it separately; the obsolete `cookie` override was removed so SvelteKit gets the `cookie` 2.x it declares; the documented Node floor is now 22.17 (SvelteKit 3 requires it). Checks ran locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.
+
+| Check                 | Result                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| npm run check         | Passed; svelte-check 0 errors / 0 warnings, printer-service and service-worker `tsc` clean |
+| npm run lint          | Passed                                                                                     |
+| npm test              | Passed; 187 tests across 19 files                                                          |
+| npm run build         | Passed                                                                                     |
+| npm run build:printer | Passed                                                                                     |
+| npm run test:e2e      | Passed; 120 Chromium runs                                                                  |
+
+Manual check against `vite preview` in Chromium: the worker registered and took control, its cache held 31 root-absolute entries (18 immutable assets, 11 static files, `/` and `/queue/`), and with the server stopped `/queue/` still loaded from the cache while `/api/features` failed on the network instead of being served from it. The immutable list gains SvelteKit 3’s new `payload` entry. No print job was sent, and no hardware result is claimed.
+
 ## Current branch check — 2026-10-12
 
 Documentation pass on `design/order-builder` at `1eda67b`. This branch adds the phase 1–3 work since the entries below: schema 2 structured tickets and the one-time v1 browser reset, the redesigned prep ticket, the responsive order builder, the persistent build queue with SSE, the `ORDER_PAD_TRACKING_ENABLED` flag, automatic service-worker updates, and the Rainbow and Chocolate Sprinkles toppings. All checks were run locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.

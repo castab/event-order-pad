@@ -1,9 +1,21 @@
-/// <reference lib="webworker" />
-import { build, files, prerendered, version } from '$service-worker';
+import { self as worker } from '$app/service-worker';
+import { version } from '$app/env';
+import { assets, immutable, prerendered } from '$app/manifest';
+import { asset, resolve } from '$app/paths';
 
-const worker = self as unknown as ServiceWorkerGlobalScope;
 const cacheName = `order-pad-${version}`;
-const assets = [...new Set([...build, ...files, ...prerendered, '/'])];
+// Manifest paths are base-relative; the cache and fetch handler match
+// root-absolute pathnames. `immutable` is typed as plain strings, which
+// `resolve` would reject without the cast.
+const pathname = (path: string) => resolve(path as '');
+const precache = [
+  ...new Set([
+    ...immutable.map((entry) => pathname(entry.path)),
+    ...assets.map((entry) => asset(entry.path)),
+    ...prerendered.map((entry) => pathname(entry.path)),
+    '/',
+  ]),
+];
 // How long a navigation waits for the network before using the cached shell.
 const navigationTimeoutMs = 3000;
 
@@ -14,7 +26,7 @@ worker.addEventListener('install', (event) => {
       .open(cacheName)
       .then((cache) =>
         cache.addAll(
-          assets.map((asset) => new Request(asset, { cache: 'reload' })),
+          precache.map((path) => new Request(path, { cache: 'reload' })),
         ),
       ),
   );
@@ -73,7 +85,7 @@ worker.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || url.origin !== worker.location.origin)
     return;
   const isNavigation = event.request.mode === 'navigate';
-  if (!assets.includes(url.pathname) && !isNavigation) return;
+  if (!precache.includes(url.pathname) && !isNavigation) return;
   event.respondWith(
     (async () => {
       const cache = await caches.open(cacheName);

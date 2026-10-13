@@ -1,17 +1,17 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { changeOrderStatus } from '$lib/orders/client';
-  import { columnCount, packColumns } from '$lib/orders/pack';
+  import { changeOrderStatus } from '#lib/orders/client.js';
+  import { columnCount, packColumns } from '#lib/orders/pack.js';
   import {
     sortOrders,
     waitMinutes,
     waitLabel,
     waitTone,
     type QueueOrder,
-  } from '$lib/orders/order';
-  import { fetchTrackingEnabled } from '$lib/orders/features';
-  import { QueueFeed } from '$lib/orders/stream';
-  import { totalScoops } from '$lib/tickets/ticket';
+  } from '#lib/orders/order.js';
+  import { fetchTrackingEnabled } from '#lib/orders/features.js';
+  import { QueueFeed } from '#lib/orders/stream.js';
+  import { totalScoops } from '#lib/tickets/ticket.js';
 
   let orders = $state<readonly QueueOrder[]>([]);
   let now = $state(Date.now());
