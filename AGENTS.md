@@ -186,7 +186,7 @@ Follow invariant 12. Write data for the same order in one transaction (`startOrd
 ## Gotchas
 
 - `design/tokens/tokens.css` **ships in the app**: `+layout.svelte` imports it with `?raw`. The rest of `design/` is reference only. The `.dc.html` screens use a design-canvas template syntax and cannot render on their own; do not import them.
-- `src/lib/printing/select.ts` is left over from the removed printer selector and nothing imports it. The attempt mode `'star-usb'` and the session phase `'handoff'` exist only so old histories and the PassPRNT adapter still type-check and parse.
+- The attempt mode `'star-usb'` and the session phase `'handoff'` exist only so old histories and the PassPRNT adapter still type-check and parse. Nothing in the UI constructs the simulated or PassPRNT adapters; only tests do.
 - The service resolves `./build` with `realpath` at startup. Run it from the repository root after `npm run build`, or it exits.
 - Printed ticket times use the **service host's** time zone, because the PDF is rendered there. The browser preview and the queue use the browser's time zone.
 - `ORDER_PAD_ORIGIN` must be HTTPS. POSTs from `http://localhost:4174` are rejected by the Origin guard, even though GETs from that address are allowed.
