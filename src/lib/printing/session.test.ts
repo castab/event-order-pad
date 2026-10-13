@@ -1,6 +1,5 @@
-import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it, vi } from 'vitest';
-import { IndexedDbTicketStore } from '../storage/ticket-store';
+import { MemoryTicketStore } from '../../../tests/helpers/ticket-store';
 import { PrintSession } from './session';
 import { sampleTicket } from '../tickets/ticket';
 import { SimulatedPrinter } from './adapters/simulated';
@@ -8,7 +7,7 @@ import { passPrntReturn } from './adapters/passprnt';
 import type { PrintAttemptResult, TicketPrinter } from './port';
 
 async function fixture() {
-  const store = new IndexedDbTicketStore(new IDBFactory(), 'test');
+  const store = new MemoryTicketStore();
   let id = 0;
   const session = new PrintSession(
     store,

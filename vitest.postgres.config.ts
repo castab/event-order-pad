@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  tsconfig: './tsconfig.printer.json',
   test: {
     include: ['printer-service/**/*.postgres.test.ts'],
     environment: 'node',

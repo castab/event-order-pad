@@ -2,7 +2,7 @@
 
 Touch-friendly order entry for an ice cream stand. Staff build each customer's order on a phone or tablet, a USB receipt printer attached to a Linux server prints a preparation ticket, and a second screen, **Now Scooping**, shows the build station which orders are still open. There are no prices, payments or user accounts.
 
-The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A small Node service on the Linux host serves it, prints through CUPS and keeps the shared order queue.
+The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A small Node service on the Linux host serves it, prints through CUPS and uses PostgreSQL 18 as the source of truth for the whole station. The app service and database must run on the same machine. If the database is unavailable, order entry and printing are down.
 
 > **Coding agents and new contributors:** start with [AGENTS.md](AGENTS.md). It lists the invariants that must not break, where each concern lives, and how to verify a change.
 
@@ -11,23 +11,22 @@ The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A sma
 ```mermaid
 flowchart TB
   subgraph Ordering["Ordering device (phone or tablet browser)"]
-    B["Order builder /"] --- IDB[("IndexedDB: draft, last ticket, attempts, outbox")]
+    B["Order builder / (transient view state)"]
   end
   subgraph Station["Build-station browser"]
     Q["Now Scooping /queue/"]
   end
   subgraph Host["Linux host"]
     TS["Tailscale Serve HTTPS :443"] --> S["printer-service (Node) 127.0.0.1:4174"]
-    S --- J[(".print-data/ print-attempt journal")]
-    S --- DB[("PostgreSQL 18: order_events")]
+    S --- DB[("Local PostgreSQL 18: drafts, numbers, tickets, attempts, dispatches, order events")]
     S -- "PDF via lp" --> C["CUPS queue"] -- USB --> P["Star TSP143IIIU"]
   end
-  B -- "GET /api/printer, POST /api/print, POST /api/orders" --> TS
+  B -- "GET/POST /api/station, GET /api/database, POST /api/print" --> TS
   Q -- "SSE /api/orders/events, POST done / reopen" --> TS
 ```
 
-- **Ordering device** opens the Linux host's HTTPS URL in a browser. The draft, the last submitted ticket and its print attempts live in that browser's IndexedDB, so they survive reloads.
-- **Linux host** runs `printer-service/`. It serves the static app from `build/`, renders each ticket as a PDF, submits it with `lp` to a local CUPS queue, and stores append-only order history in PostgreSQL 18. Tailscale Serve provides private HTTPS on the tailnet.
+- **Ordering device** opens the Linux host's HTTPS URL in a browser. The draft, order number, last submitted ticket and print attempts are loaded from the station database. Browser profiles and devices share one station; no order data is persisted in the browser.
+- **Linux host** runs `printer-service/`. It serves the static app from `build/`, renders each ticket as a PDF, submits it with `lp` to a local CUPS queue, and stores all station state and append-only order history in PostgreSQL 18 on the same host. Tailscale Serve provides private HTTPS on the tailnet.
 - **Build station** opens `/queue/` on the same origin and receives live updates over Server-Sent Events (SSE).
 
 The only supported print path from the UI is the Linux service. The repository also contains simulated and Android PassPRNT adapters; they are kept for unit tests and history and cannot be selected in the interface.
@@ -47,9 +46,9 @@ The dev server listens on port 5173 on all interfaces (`--host 0.0.0.0`), so oth
 
 There is no in-app printer simulator, and the dev server has no `/api` routes. Expect this during development:
 
-- The builder shows **Printer unavailable** and **Print order** stays disabled.
+- The builder shows **Database unavailable** and order editing and printing stay disabled.
 - **Now Scooping** is hidden in Order tools, and `/queue/` shows **Queue needs attention**.
-- Building, editing and reloading drafts all work.
+- Draft work requires the real service and database, or the API fixtures in tests.
 
 Full print and queue flows run in the Playwright suite, which mocks the API or starts the real HTTP service with a stubbed CUPS. The real service runs only on Linux and needs a local USB CUPS queue and an HTTPS origin (see [Configuration](#configuration)).
 
@@ -76,6 +75,7 @@ To run everything CI runs, in CI's order:
 
 ```sh
 npm ci
+npm run test:postgres:volume  # disposable PostgreSQL 18 Docker volume check
 npm run test:postgres  # configure a separate *_test database first
 npm run check
 npm run lint
@@ -94,16 +94,16 @@ CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these aga
 src/
   lib/tickets/        Menu, draft editing, ticket validation, receipt layout (pure: no DOM, I/O or transport)
   lib/printing/       Print port, PrintSession (intent saved before every send), printer adapters
-  lib/storage/        IndexedDB store: drafts, tickets, attempts, queue outbox, reference counter
-  lib/orders/         Queue order model, API client, SSE feed, outbox publisher, column packing
+  lib/storage/        Database API client: station snapshots, revisions and durable writes
+  lib/orders/         Queue order model, API client, SSE feed, column packing
   lib/app-update.ts   Applies service-worker updates only when it is safe to reload
   lib/builder.css     Global component styles and local Poppins @font-face rules
   routes/+layout.*    Prerendering, design-token injection, update checks
   routes/+page.svelte         Order builder (/)
   routes/queue/+page.svelte   Now Scooping (/queue/)
   service-worker/     Versioned offline shell cache (own tsconfig; excluded from the root project)
-printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, print journal, Prisma order store, SSE
-prisma/               Order-event schema and committed PostgreSQL migrations
+printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, Postgres dispatch journal, Prisma station/order stores, SSE
+prisma/               Station and order-event schemas and committed PostgreSQL migrations
 compose.yaml          Local PostgreSQL 18 with a persistent named volume
 tests/                Playwright specs (app.spec.ts, queue.spec.ts, queue-live.spec.ts)
 static/               Poppins fonts, logo, icons, web app manifest
@@ -167,14 +167,11 @@ Open **Now Scooping** from Order tools, or browse to `/queue/` on the same HTTPS
 - **Mark #0043 done** takes one tap with no confirmation. The **Recently done** strip keeps the latest eight completed orders with **Undo**.
 - Cards are packed into 1, 2, 3 or 4 columns depending on the content width (below 640, 1000 and 1500 px, otherwise 4). Each card goes into the currently shortest column by measured height, leftmost on ties, so short cards leave no gaps. Cards re-pack only when the set of open orders or the column count changes, never on the 30-second refresh. `aria-posinset` and `aria-setsize` keep screen readers in age order.
 
-**Live updates.** On connect, the service sends `retry: 3000` and a complete snapshot, then a new snapshot after every saved change, and a `ping` every 15 seconds. If the browser receives nothing for 45 seconds, it reconnects and shows a warning. There is no event replay and no polling fallback. Each service process has an instance ID (renewed after uncertain database writes) and each snapshot a revision, so a delayed snapshot or action response cannot overwrite newer state. On a connection error the last list stays visible with **Reconnecting…** and **Refresh queue**. A failed first load never shows the empty state. Done and Undo keep working while the stream is down, as long as their POST requests succeed. Action errors stay visible until a later action succeeds or you refresh.
+**Live updates.** On connect, the service sends `retry: 3000` and a complete snapshot, then a new snapshot after every saved change, and a `ping` every 15 seconds. If the browser receives nothing for 45 seconds, it reconnects and shows a warning. There is no event replay and no polling fallback. Each service process has an instance ID (renewed after uncertain database writes) and each snapshot a revision, so a delayed snapshot or action response cannot overwrite newer state. On a connection error the last list stays visible with **Reconnecting…** and **Refresh queue**. A failed first load never shows the empty state. Done and Undo are disabled while the stream is disconnected; reconnect or refresh to confirm database state before continuing. Action errors stay visible until a later action succeeds or you refresh.
 
 **What creates a card.** An order is registered on its **first** print submission, even if that print then fails or its outcome is unknown, so a card is not proof that a ticket printed. Orders are keyed by the immutable ticket ID. Repeat registrations are no-ops, reprints never add or reopen a card, and only **Undo** reopens a done order. Completed events remain in Postgres after orders leave the Recently done strip. Orders at or after the fixed capture cutoff are recorded even when tracking is off; older history is not imported.
 
-Registration happens in two places:
-
-1. `POST /api/print` registers the order on the server before printing, when the request is not a reprint, regardless of tracking visibility. If that fails, printing still continues.
-2. The browser saves the ticket to an IndexedDB outbox in the same transaction as its print intent. Every five seconds it publishes pending entries to `POST /api/orders` until they are acknowledged. The outbox survives reloads and never calls `/api/print`.
+The browser commits the first order through `POST /api/station`. One Postgres transaction saves the immutable ticket, locked draft, counter, pending attempt and submission event before `POST /api/print` is called. A failed or uncertain commit blocks printing; reload discovers committed state without resending. There is no browser outbox or delayed publication.
 
 ## Optional order tracking
 
@@ -195,7 +192,7 @@ While tracking is off:
 - printing, reprints, drafts, recovery and order numbers work normally;
 - saved order history and the print journal remain durable.
 
-The browser always retains and retries pending order publications. Tracking settings affect visibility only, and failure to fetch them cannot stop capture or printing. The builder learns visibility on its next printer check or reload; an open queue stops its stream when it detects the change. Set `true` (or unset the variable), restart and reload to resume the queue, including orders captured while it was hidden. No completion is inferred from print acceptance: staff must explicitly mark Done, or an authorized same-origin client must call the Done API.
+Tracking settings affect queue visibility only. All draft and print-intent writes still require Postgres; a database outage blocks work even with tracking off. The builder learns visibility on its next printer check or reload; an open queue stops its stream when it detects the change. Set `true` (or unset the variable), restart and reload to resume the queue, including orders captured while it was hidden. No completion is inferred from print acceptance: staff must explicitly mark Done, or an authorized same-origin client must call the Done API.
 
 ## Printing and reliability
 
@@ -209,13 +206,13 @@ Every print attempt ends in one of three results:
 
 These rules hold across the browser and the service:
 
-- **Intent before send.** The browser saves the ticket and a pending attempt to IndexedDB before calling the service. The service writes and syncs its own journal entry before running `lp`. If storage fails, nothing is sent.
-- **Explicit pre-submit rejections.** Recognized service 400/403/413 validation or origin errors are reported as failed with “No job was submitted.” Unexpected HTTP errors, malformed replies, and lost responses remain unknown. Deploy and restart the service together with the app to avoid ticket-version mismatches.
-- **No automatic retries.** A pending attempt found after a reload or service restart becomes `outcome-unknown` and is never replayed. Repeating an attempt ID returns the saved result. Reusing an attempt ID with different content is rejected.
+- **Intent before send.** The browser commits the ticket and pending attempt to Postgres before calling the print endpoint. The service commits an exclusive dispatch record in the same database before running `lp`. If either commit fails, nothing is submitted.
+- **Explicit pre-submit rejections.** Recognized service 400/403/413 validation/origin errors and database-unavailable 503 errors are reported as failed with “No job was submitted.” Unexpected HTTP errors, malformed replies, and lost responses remain unknown. Deploy and restart the service together with the app to avoid ticket-version mismatches.
+- **No automatic retries.** A pending attempt without a durable service result found after a reload or service restart becomes `outcome-unknown` and is never replayed. A recorded service result is authoritative even when its browser reply was lost. Repeating an attempt ID returns the saved result. Reusing an attempt ID with different content is rejected.
 - **Final results are final.** A late or repeated report cannot change a completed attempt.
 - **Tickets are immutable.** A reprint is a new attempt for the same ticket, marked REPRINT. It is never a new ticket.
 - **One submission at a time.** The service refuses a new job while another submission is running or while the CUPS queue has a pending job. Inspect the printer and `lpstat -o` before reprinting.
-- **One ordering tab per device.** Order numbers come from a per-browser counter, so use one order-taking station. The queue can be open on any number of devices.
+- **One active ordering tab per station.** All browsers share one draft and increasing database counter. Revision checks reject stale writes from other tabs with 409; reload before continuing. The queue can be open on any number of devices.
 
 There is no background print queue or exactly-once print guarantee. Postgres centralizes order history; backups remain the operator’s responsibility. Other applications that print through CUPS bypass the service's lock.
 
@@ -225,16 +222,15 @@ The service reads environment variables at startup. `npm run start:printer` also
 
 | Variable                     | Default                                               | Notes                                                                                                                                             |
 | ---------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`               | _required_                                            | Postgres connection URL with a database name. Never supplied to the browser.                                                                      |
+| `DATABASE_URL`               | _required_                                            | Postgres URL using `127.0.0.1`, `localhost` or `[::1]`. Remote hosts and connection-host overrides are rejected. Never supplied to the browser.   |
 | `ORDER_PAD_CAPTURE_FROM`     | _required_                                            | Fixed ISO UTC timestamp with milliseconds, e.g. `2026-10-13T00:00:00.000Z`. Tickets older than this are excluded. Keep the value across restarts. |
 | `ORDER_PAD_ORIGIN`           | _required_                                            | Root HTTPS origin the browsers use, such as `https://host.tailnet.ts.net`. It must be `https:` with no path, query or credentials.                |
 | `ORDER_PAD_QUEUE`            | `OrderPad`                                            | Name of the local USB CUPS queue. The verified station uses `Star_TSP143`.                                                                        |
 | `ORDER_PAD_PORT`             | `4174`                                                | Loopback port (1024–65535). The service binds to `127.0.0.1` only.                                                                                |
-| `ORDER_PAD_DATA`             | `.print-data`                                         | Journal directory. Relative paths resolve from the working directory.                                                                             |
 | `ORDER_PAD_FONT`             | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | Font embedded in receipt PDFs (`apt install fonts-dejavu-core`).                                                                                  |
 | `ORDER_PAD_TRACKING_ENABLED` | `true`                                                | Exactly `true` or `false`. See [Optional order tracking](#optional-order-tracking).                                                               |
 
-**Start the service from the repository root.** It serves `./build` and resolves a relative `ORDER_PAD_DATA` from the current directory. Keep paths and environment the same across restarts.
+**Start the service from the repository root.** It serves `./build` and checks the migrated database before listening. An unreachable database or missing schema stops startup. Keep environment configuration stable across restarts.
 
 Requests must use the configured origin. The `Host` header must match `ORDER_PAD_ORIGIN`, `127.0.0.1:PORT` or `localhost:PORT`. POST requests must send `Origin` equal to `ORDER_PAD_ORIGIN` and `Content-Type: application/json`. Request bodies are limited to 128 KiB, and no CORS headers are sent. Access control is left to the tailnet; there is no login. Station setup, Tailscale Serve, CUPS options and the physical acceptance checklist are in [docs/linux-printing.md](docs/linux-printing.md).
 
@@ -242,73 +238,69 @@ Requests must use the configured origin. The `Host` header must match `ORDER_PAD
 
 All `/api` responses are JSON with `Cache-Control: no-store`, except the SSE stream. Shared types live in [src/lib/printing/port.ts](src/lib/printing/port.ts), [src/lib/tickets/ticket.ts](src/lib/tickets/ticket.ts) and [src/lib/orders/](src/lib/orders/).
 
-| Endpoint                      | Request                                                                      | Response                                                                                                                                                                                                     |
-| ----------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /api/printer`            | none                                                                         | Always 200: `{ ready, queue, message }`. Checks that the queue exists, is enabled, uses `usb://` and offers the Star variable-length and cut options.                                                        |
-| `POST /api/print`             | `{ ticket, attemptId, reprint }`; `attemptId` matches `[A-Za-z0-9_-]{1,100}` | 200 `{ attemptId, result }`, where `result` is a `PrintAttemptResult`. Print failures are 200 with `result.status` of `failed` or `outcome-unknown`; 400 means the request was invalid and nothing was sent. |
-| `GET /api/features`           | none                                                                         | `{ trackingEnabled }`, the setting the service is running with. Always available.                                                                                                                            |
-| `POST /api/orders`            | schema 2 ticket                                                              | `{ order, created }`: 201 when first created, 200 when the ID already exists (unchanged), or 200 `{ excluded: true, ticketId }` for a pre-cutoff ticket.                                                     |
-| `GET /api/orders`             | optional `?status=open` or `?status=done`                                    | `{ orders }`: open orders oldest first, then the eight most recently done. `status` filters to one of the two lists.                                                                                         |
-| `GET /api/orders/events`      | none (`EventSource`)                                                         | SSE. `orders` events carry `{ orders, instanceId, revision }`; `ping` events every 15 s.                                                                                                                     |
-| `POST /api/orders/:id/done`   | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent.                                                                                                                                                               |
-| `POST /api/orders/:id/reopen` | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent; keeps the original submission time.                                                                                                                           |
+| Endpoint                      | Request                                                                      | Response                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/database`           | none                                                                         | 200 `{ ready: true }` after checking the required schema; 503 when unavailable.                                                                                                                                                                                                                                                  |
+| `GET /api/station`            | none                                                                         | `{ revision, draft, saved?: { ticket, attempts } }`, shared station state.                                                                                                                                                                                                                                                       |
+| `POST /api/station`           | `{ revision, operation, draft?, ticket?, attempt? }`                         | Updated station snapshot. Operations: `saveDraft`, `saveTicket`, `startOrder`, `startAttempt`, `finishAttempt`. 400 invalid input, 409 stale revision or invalid state transition, 503 unavailable/uncertain write.                                                                                                              |
+| `GET /api/printer`            | none                                                                         | 200 `{ ready, queue, message }` when the database is available. Checks that the queue exists, is enabled, uses `usb://` and offers the Star variable-length and cut options.                                                                                                                                                     |
+| `POST /api/print`             | `{ ticket, attemptId, reprint }`; `attemptId` matches `[A-Za-z0-9_-]{1,100}` | 200 `{ attemptId, result }`, where `result` is a `PrintAttemptResult`. Print failures are 200 with `result.status` of `failed` or `outcome-unknown`; 400 means invalid input; 503 with `code: "database-unavailable"` means the database gate rejected the request before printing. A matching saved pending intent is required. |
+| `GET /api/features`           | none                                                                         | `{ trackingEnabled }`, the setting the service is running with. Requires the database.                                                                                                                                                                                                                                           |
+| `POST /api/orders`            | schema 2 ticket                                                              | `{ order, created }`: 201 when first created, 200 when the ID already exists (unchanged), or 200 `{ excluded: true, ticketId }` for a pre-cutoff ticket.                                                                                                                                                                         |
+| `GET /api/orders`             | optional `?status=open` or `?status=done`                                    | `{ orders }`: open orders oldest first, then the eight most recently done. `status` filters to one of the two lists.                                                                                                                                                                                                             |
+| `GET /api/orders/events`      | none (`EventSource`)                                                         | SSE. `orders` events carry `{ orders, instanceId, revision }`; `ping` events every 15 s.                                                                                                                                                                                                                                         |
+| `POST /api/orders/:id/done`   | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent.                                                                                                                                                                                                                                                                                   |
+| `POST /api/orders/:id/reopen` | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent; keeps the original submission time.                                                                                                                                                                                                                                               |
 
-A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `submittedAt` is the ticket's own `createdAt`, so a delayed publication does not reset its wait time. With tracking off, only queue GET routes return 404 with `code: "ORDER_TRACKING_DISABLED"`. Order POST routes remain available with tracking off. Unknown order IDs return 404 and an unavailable order database returns 503. Database outages do not stop printing; the browser retains submissions for later publication. Done/Undo requests are not automatically retried: refresh before trying again after an ambiguous response. Any other non-`/api` GET or HEAD request serves a file from `build/`. Files under `/_app/immutable/` are cached for a year; everything else is `no-cache`.
+A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `submittedAt` is the ticket's own `createdAt`, so a delayed publication does not reset its wait time. With tracking off, only queue GET routes return 404 with `code: "ORDER_TRACKING_DISABLED"`. Order POST routes remain available with tracking off. Unknown order IDs return 404 and an unavailable order database returns 503. Every API route requires the database. A failed database check returns 503 with `code: "database-unavailable"` before CUPS is invoked; queue visibility cannot bypass this gate. Done/Undo requests are not automatically retried: refresh before trying again after an ambiguous response. Any other non-`/api` GET or HEAD request serves a file from `build/`. Files under `/_app/immutable/` are cached for a year; everything else is `no-cache`.
 
 ## Data and persistence
 
-**Browser (per origin and profile).** IndexedDB database `order-pad-v1`, schema version 2:
+**PostgreSQL 18 on the app host is the only durable application store.**
 
-| Store      | Contents                                                                                                                                     |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tickets`  | Immutable schema 2 tickets, keyed by `id`.                                                                                                   |
-| `attempts` | Print attempts (`id`, `ticketId`, `mode`, `reprint`, `startedAt`, then `result` and `completedAt` when finished).                            |
-| `settings` | `latest` (ticket ID), `draft` (current draft), `referenceCounter` (highest order number issued), and `queueOrder:<ticketId>` outbox entries. |
+| Table              | Contents                                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `station`          | One shared draft, latest ticket ID, increasing reference counter and revision.                           |
+| `tickets`          | Immutable schema 2 tickets, keyed by ticket ID.                                                          |
+| `print_attempts`   | Pending intents and final attempt outcomes.                                                              |
+| `print_dispatches` | Exclusive service dispatch claims, results and completion timestamps. Pending claims are never replayed. |
+| `order_events`     | Append-only submission, completion and reopening events, with full immutable tickets.                    |
 
-A new order's ticket, locked draft, counter, first attempt and outbox entry are written in one transaction. An accepted result and the next empty draft are also written together. Clearing site data, switching browser profile or changing the URL origin loses this history. If storage is missing or a write fails, printing is blocked.
+Prisma also maintains migration metadata. First submissions commit the ticket, locked draft, attempt and queue event atomically. Finalizing an accepted attempt commits its outcome and next draft together. Stored data passes through shared validators. One service process owns writes and SSE versions; multiple printer services and direct database writes are unsupported.
 
-**Linux service (`ORDER_PAD_DATA`, default `.print-data/`, Git-ignored).**
+The browser holds transient view state only: no IndexedDB, localStorage, sessionStorage or order outbox. Reloads, new profiles and other devices read the same station. Cached assets can load without the host, but order work cannot. A failed draft write or database health check blocks editing and printing until Postgres is restored and the page reloaded. Health checks run every five seconds while idle, and every API operation independently checks the database; no print is submitted without its durable dispatch claim.
 
-- `<attemptId>.json` holds one file per print attempt: `{ request, result? }`. It is created exclusively and synced before `lp` runs, then replaced atomically with the result.
-- Legacy `orders/<sha256(ticketId)>.json` files are preserved as archives. The service no longer reads or writes them.
+Queue projections select the latest event before filtering. A partial unique submission index and per-order advisory transaction locks prevent duplicate registrations. Station mutations use a transaction lock plus an expected revision to reject stale tabs. Order numbers are shared and begin above the highest existing Postgres ticket reference on first initialization; the earlier browser counter is not imported.
 
-One service process owns these files. Back them up, keep them across updates and restarts, and never delete them to resolve an ambiguous print.
-
-**PostgreSQL 18.** One application table, `order_events`, stores `event_id` (bigint), `order_id` (text), `occurred_at` (timestamptz with millisecond precision), `event_type` (`submitted`, `completed`, `reopened`), and `order_jsonb` (the complete immutable schema 2 ticket). Prisma also maintains its migration metadata table. Each actual transition appends an event; no application operation edits or deletes history. There is no `is_completed` column: the latest event determines state. One service process owns writes and SSE versions; multiple printer services or direct database writes are not supported live-queue configurations.
-
-The latest-event index supports one-query queue projections without joins. A partial unique index permits one submission per ticket, and per-order transaction advisory locks serialize creation and transitions. Duplicate registration preserves the original ticket; repeated Done/Undo is a no-op. Postgres reads still pass through the shared validators.
-
-Database waits are bounded (1 s service-operation queue, 1 s connection/acquisition, 2 s statements, 3 s driver queries, 4 s transactions). Missing or invalid connection/cutoff configuration stops startup, but an unreachable database does not: printing continues with order persistence pending. After a committed mutation, a failed snapshot read disconnects streams for recovery without reporting the write as failed. An uncertain write failure retires the previous stream version and disconnects subscribers, so a fresh snapshot discovers any commit whose reply was lost.
+Database waits are bounded (1 s service-operation queue, 1 s connection/acquisition, 2 s statements, 3 s driver queries, 4 s transactions). Missing/invalid configuration, an unreachable database, or missing schema stops startup. Failed post-commit broadcasting disconnects streams without changing a successful write result. Uncertain writes retire stream versions so reconnects discover commits with lost replies. No browser or print request is automatically retried.
 
 ### Set up Postgres and upgrade the station
 
-1. Copy `.env.example` to `.env` (Git-ignored). Choose a local database password and update `DATABASE_URL` with its URL-encoded value. Set the real HTTPS origin and CUPS queue. Set `ORDER_PAD_CAPTURE_FROM` once to the rollout time in UTC; keep device clocks accurate and retain this cutoff across restarts.
-2. Install Docker with Compose, or supply an existing PostgreSQL 18 connection. For local Docker, run `docker compose up -d --wait`. Postgres binds only to loopback and uses a named volume mounted at `/var/lib/postgresql`, the PostgreSQL 18 image’s versioned data layout. Container recreation preserves it; `docker compose down --volumes` deletes database history.
-3. Run `npm ci`, `npm run db:deploy`, `npm run build`, and `npm run build:printer`. Migrations are explicit; startup never applies them. Client generation needs no database connection and runs automatically before checks and the printer build.
-4. With no print attempt or CUPS job pending, stop the old service and start `npm run start:printer` from the repository root. Reload ordering and queue tabs together. A direct Node launcher such as `start-printer.local` must use `node --env-file=.env build-printer/server.mjs` or export both new required variables. For an existing systemd service, configure `EnvironmentFile=/absolute/path/to/order-pad/.env`, run `sudo systemctl daemon-reload`, then `sudo systemctl restart order-pad.service` instead of starting a second process. The verified Mint station uses this systemd service; its process must restart after rebuilding the service.
-5. Preserve `.print-data/`, legacy order files, and browser storage. No file history or acknowledged browser history is imported. Pending tickets older than the cutoff receive explicit exclusion acknowledgments and leave the outbox; tickets at the cutoff or later remain eligible for publication. The cutoff uses the original ticket creation time, including tickets delayed by an outage.
+1. Before switching, finish or reconcile the old browser’s draft, unpublished orders and all ambiguous attempts. Close old ordering tabs, stop the old service, and back up Postgres and legacy browser/file data. Legacy IndexedDB and `.print-data/` remain untouched archives; they are neither imported nor used by the new app. The new station starts with an empty shared draft and no last receipt, while existing `order_events` remain intact.
+2. Copy `.env.example` to `.env` (Git-ignored). Choose a local database password and update `DATABASE_URL` with its URL-encoded value. Set the real HTTPS origin and CUPS queue. Set `ORDER_PAD_CAPTURE_FROM` once to the rollout time in UTC; keep device clocks accurate and retain this cutoff across restarts.
+3. Install Docker with Compose, or run PostgreSQL 18 directly on this same app host. Remote database deployment is unsupported. For local Docker, run `docker compose up -d --wait`. Postgres binds only to loopback and uses a named volume mounted at `/var/lib/postgresql`, the PostgreSQL 18 image’s versioned data layout. Container recreation preserves it; `docker compose down --volumes` deletes database history.
+4. Run `npm ci`, `npm run db:deploy`, `npm run build`, and `npm run build:printer`. Migrations are explicit; startup never applies them. Client generation needs no database connection and runs automatically before checks and the printer build.
+5. With no print attempt or CUPS job pending, stop the old service and start `npm run start:printer` from the repository root. Reload ordering and queue tabs together. A direct Node launcher such as `start-printer.local` must use `node --env-file=.env build-printer/server.mjs` or export both new required variables. For an existing systemd service, configure `EnvironmentFile=/absolute/path/to/order-pad/.env`, run `sudo systemctl daemon-reload`, then `sudo systemctl restart order-pad.service` instead of starting a second process. The verified Mint station uses this systemd service; its process must restart after rebuilding the service.
 
 `npm run test:postgres:volume` creates its own disposable container and volume, verifies persistence after container recreation, and cleans them up. Docker access is required; it does not touch the station database.
 
-For integration tests, create a separate disposable database ending in `_test`, set `TEST_DATABASE_URL`, and run `npm run test:postgres`. The script applies migrations and clears only that test database’s events between tests. With the example Docker configuration, create it using `docker compose exec postgres sh -c 'createdb -U "$POSTGRES_USER" order_pad_test'`. CI provisions its own PostgreSQL 18 service. Do not point tests at station history.
+For integration tests, create a separate disposable database ending in `_test`, set `TEST_DATABASE_URL`, and run `npm run test:postgres`. The script applies migrations and clears only that test database’s station, attempt, ticket and event tables between tests. With the example Docker configuration, create it using `docker compose exec postgres sh -c 'createdb -U "$POSTGRES_USER" order_pad_test'`. CI provisions its own PostgreSQL 18 service. Do not point tests at station history.
 
-Back up Postgres separately, for example with `pg_dump` through the container. Keep the persistent volume and print-attempt journal intact across updates. A database outage can recover submissions while their browser outbox survives; clearing that browser’s site data before publication loses pending orders.
+Back up all Postgres tables together, for example with `pg_dump` through the container. Keep the volume intact across updates. Database loss includes drafts and print history, so never reset or restore it while a print may be unresolved. A restore to an earlier backup cannot establish whether a newer physical ticket printed; reconcile paper and CUPS first.
 
 ## Updates and offline use
 
-After one online visit, the service worker caches the app shell. Pages load network-first with a three-second timeout and fall back to the cache, so a reload while online always shows the newest deployment. `/api` requests are never cached. Offline, drafts can be viewed and recovered, but printing needs the Linux host.
+After one online visit, the service worker caches the app shell. Pages load network-first with a three-second timeout and fall back to the cache, so a reload while online always shows the newest deployment. `/api` requests are never cached. Offline, only app assets load. Drafts, recovery and printing require the app host and its local database.
 
-An open tab checks for a new version on load, when you return to the tab, when the device comes back online, and every five minutes. A downloaded update is applied with an automatic reload when the tab is hidden, within ten seconds of loading, or after a minute without input. It is held back while a print is in flight, an unknown outcome awaits acknowledgment, storage is blocked, or the draft is still loading. The draft and queue recover after the reload. See [src/lib/app-update.ts](src/lib/app-update.ts) and [src/service-worker.ts](src/service-worker.ts).
+An open tab checks for a new version on load, when you return to the tab, when the device comes back online, and every five minutes. A downloaded update is applied with an automatic reload when the tab is hidden, within ten seconds of loading, or after a minute without input. It is held back while a print is in flight, an unknown outcome awaits acknowledgment, database access is blocked, a draft write is pending, or the draft is still loading. The draft and queue recover after the reload. See [src/lib/app-update.ts](src/lib/app-update.ts) and [src/service-worker/index.ts](src/service-worker/index.ts).
 
-## Upgrading a station with old (v1) browser data
+## Upgrading a station with old browser data
 
-The structured-servings release replaced the v1 ticket format. The first time a browser that has v1 data opens the app, it upgrades `order-pad-v1` to version 2 and **deletes all v1 tickets, print attempts (including unfinished ones) and drafts**. Old `items` records cannot represent servings. The reset is atomic, happens once and never sends a print. Order numbers restart at `#0001`.
-
-Before opening the new version on such a station, check for unfinished physical output and pending CUPS jobs. Close other Order Pad tabs if the upgrade reports that it is blocked. The service's `.print-data/` journal and CUPS jobs are not affected.
+This release stops opening `order-pad-v1` entirely. It does not rename, migrate, clear or reset v1/v2 browser records. It also stops reading/writing `.print-data/` print journals. Preserve both archives for manual reconciliation, and inspect pending output before rollout. Previous browser drafts, last receipts, attempts and unpublished outbox entries are not automatically transferred to Postgres; complete or reconcile them with the old version first. Existing centralized queue events remain available. See the [station upgrade steps](#set-up-postgres-and-upgrade-the-station).
 
 ## Known limits and deferred work
 
-- Order numbers come from a per-browser counter and may repeat across devices. Shared number allocation is deferred; ticket IDs remain the central identity.
+- One shared order builder draft per station. Concurrent independent order-taking sessions are not supported; stale tabs must reload. Ticket IDs remain queue identity.
 - `accepted` means queued in CUPS. The app has no live hardware sensors.
 - The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`; configure its environment file and restart it after service updates. Tailscale `--bg` keeps the proxy running, not Node. Check host sleep settings before event use (see [docs/linux-printing.md](docs/linux-printing.md)).
 - Physical acceptance of the current receipt layout, REPRINT, hardware errors and interruption recovery is still open.

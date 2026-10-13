@@ -22,7 +22,15 @@ it('validates database URLs without echoing credentials in errors', async () => 
   expect(parseDatabaseUrl('postgresql://user:secret@localhost/order_pad')).toBe(
     'postgresql://user:secret@localhost/order_pad',
   );
-  for (const url of [undefined, '', 'https://host/db', 'postgresql://host/'])
+  for (const url of [
+    undefined,
+    '',
+    'https://host/db',
+    'postgresql://host/',
+    'postgresql://remote.example/db',
+    'postgresql://127.0.0.1/db?host=remote.example',
+    'postgresql://127.0.0.1/db?hostaddr=192.0.2.1',
+  ])
     expect(() => parseDatabaseUrl(url)).toThrow('DATABASE_URL');
 });
 

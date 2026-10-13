@@ -10,7 +10,9 @@ import {
   MemoryOrderRepository,
   testCaptureFrom,
 } from '../tests/helpers/order-repository';
+import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
+import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 
 const closers: (() => Promise<unknown>)[] = [];
@@ -29,13 +31,15 @@ async function app(trackingEnabled = true) {
     }),
   );
   const check = vi.fn(async () => 'Configured queue');
+  const repository = new MemoryOrderRepository();
   const orders = new Orders(
-    new MemoryOrderRepository(),
+    repository,
     testCaptureFrom,
     () => '2026-10-12T19:00:00.000Z',
   );
   await mkdir(join(directory, 'queue'));
   await writeFile(join(directory, 'queue/index.html'), '<h1>Build queue</h1>');
+  const station = new MemoryStationRepository(repository);
   const server = createApp({
     origin: new URL('https://mint.test'),
     port: 4174,
@@ -44,6 +48,7 @@ async function app(trackingEnabled = true) {
     printing: { print },
     orders,
     trackingEnabled,
+    station,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   closers.push(
@@ -86,7 +91,7 @@ async function app(trackingEnabled = true) {
         req.end(body);
       },
     );
-  return { print, check, send, orders, server, port, directory };
+  return { print, check, send, orders, server, port, directory, station };
 }
 const payload = JSON.stringify({
   attemptId: 'attempt-1',
@@ -97,6 +102,36 @@ const headers = {
   Origin: 'https://mint.test',
   'Content-Type': 'application/json',
 };
+
+async function capture(
+  send: Awaited<ReturnType<typeof app>>['send'],
+  ticket = JSON.parse(payload).ticket,
+) {
+  const state = JSON.parse((await send('/api/station')).body);
+  const response = await send(
+    '/api/station',
+    JSON.stringify({
+      revision: state.revision,
+      operation: 'startOrder',
+      ticket,
+      draft: {
+        ...newDraft(String(Number(ticket.reference) - 1)),
+        name: ticket.customerName ?? '',
+        servings: ticket.servings,
+        submittedTicketId: ticket.id,
+      },
+      attempt: {
+        id: `intent-${ticket.id}`,
+        ticketId: ticket.id,
+        mode: 'linux-cups',
+        reprint: false,
+        startedAt: ticket.createdAt,
+      },
+    }),
+    headers,
+  );
+  expect(response.status).toBe(200);
+}
 
 it('serves the static app and live status without caching API results', async () => {
   const { send, check } = await app();
@@ -224,6 +259,7 @@ it('first USB submission registers even a failed/unknown result; reprints never 
     headers,
   );
   expect(JSON.parse((await send('/api/orders')).body).orders).toEqual([]);
+  await capture(send);
   await send('/api/print', payload, headers);
   const initial = JSON.parse((await send('/api/orders')).body).orders;
   expect(initial).toHaveLength(1);
@@ -247,6 +283,7 @@ it('first USB submission registers even a failed/unknown result; reprints never 
       message: 'Inspect output.',
       code: 'printer-error',
     });
+    await capture(send, { ...ticket, id: status });
     const next = await send(
       '/api/print',
       JSON.stringify({
@@ -293,26 +330,20 @@ it('protects every order mutation and rejects invalid data, filters, bodies, IDs
   expect((await send('/api/orders')).cache).toBe('no-store');
 });
 
-it('returns an unavailable queue when storage fails while leaving the print result unchanged', async () => {
-  const { send, orders, print } = await app();
-  vi.spyOn(orders, 'upsert').mockRejectedValue(new Error('Read-only storage'));
-  vi.spyOn(orders, 'list').mockRejectedValue(new Error('Corrupt journal'));
-  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-  expect(
-    (
-      await send(
-        '/api/orders',
-        JSON.stringify(JSON.parse(payload).ticket),
-        headers,
-      )
-    ).status,
-  ).toBe(503);
-  expect((await send('/api/orders')).status).toBe(503);
-  expect(
-    JSON.parse((await send('/api/print', payload, headers)).body).result.status,
-  ).toBe('accepted');
-  expect(print).toHaveBeenCalledTimes(1);
-  warning.mockRestore();
+it('blocks all API work when the required database is unavailable', async () => {
+  const { send, station, print, check } = await app();
+  vi.spyOn(station, 'check').mockRejectedValue(new Error('Database down'));
+  for (const path of [
+    '/api/database',
+    '/api/station',
+    '/api/printer',
+    '/api/features',
+    '/api/orders',
+  ])
+    expect((await send(path)).status).toBe(503);
+  expect((await send('/api/print', payload, headers)).status).toBe(503);
+  expect(print).not.toHaveBeenCalled();
+  expect(check).not.toHaveBeenCalled();
 });
 
 async function stream(port: number, headers: Record<string, string> = {}) {
@@ -382,6 +413,7 @@ it('streams initial data and durable changes to multiple clients; no-op and repr
   expect(a.response.headers['cache-control']).toContain('no-store');
   expect(a.response.headers['x-accel-buffering']).toBe('no');
   expect(initial).toMatchObject({ revision: 0, orders: [] });
+  await capture(send);
   await send('/api/print', payload, headers);
   expect((await a.next(2)).orders).toHaveLength(1);
   await b.next(2);
@@ -493,6 +525,7 @@ it('disabled tracking hides reads but captures submissions and transitions witho
   expect(
     (await send('/api/orders/historical/reopen', '{}', headers)).status,
   ).toBe(200);
+  await capture(send);
   for (const status of ['accepted', 'failed', 'outcome-unknown'] as const) {
     for (const reprint of [false, true]) {
       const result: PrintAttemptResult = {
@@ -516,9 +549,9 @@ it('disabled tracking hides reads but captures submissions and transitions witho
   expect((await send('/api/orders/historical/done', '{}')).status).toBe(403);
 });
 
-it('continues printing during a database outage even when tracking is disabled', async () => {
-  const { send, orders, print } = await app(false);
-  vi.spyOn(orders, 'upsert').mockRejectedValue(
+it('blocks prints during a database outage even when tracking is disabled', async () => {
+  const { send, station, print } = await app(false);
+  vi.spyOn(station, 'check').mockRejectedValue(
     new Error('Database unavailable'),
   );
   expect(
@@ -530,8 +563,32 @@ it('continues printing during a database outage even when tracking is disabled',
       )
     ).status,
   ).toBe(503);
+  expect((await send('/api/print', payload, headers)).status).toBe(503);
+  expect(print).not.toHaveBeenCalled();
+});
+
+it('guards station mutations, validates bodies, and rejects stale revisions without a write', async () => {
+  const { send } = await app();
+  const state = JSON.parse((await send('/api/station')).body);
+  const body = JSON.stringify({
+    revision: state.revision,
+    operation: 'saveDraft',
+    draft: { ...state.draft, name: 'Updated draft' },
+  });
+  expect((await send('/api/station', body)).status).toBe(403);
   expect(
-    JSON.parse((await send('/api/print', payload, headers)).body).result.status,
-  ).toBe('accepted');
-  expect(print).toHaveBeenCalledExactlyOnceWith(JSON.parse(payload));
+    (
+      await send('/api/station', body, {
+        ...headers,
+        Origin: 'https://evil.test',
+      })
+    ).status,
+  ).toBe(403);
+  expect((await send('/api/station', '{}', headers)).status).toBe(400);
+  expect((await send('/api/station', 'x'.repeat(131073), headers)).status).toBe(
+    413,
+  );
+  expect((await send('/api/station', body, headers)).status).toBe(200);
+  expect((await send('/api/station', body, headers)).status).toBe(409);
+  expect((await send('/api/station')).cache).toBe('no-store');
 });

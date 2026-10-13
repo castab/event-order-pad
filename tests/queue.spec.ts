@@ -5,6 +5,7 @@ import {
   type Locator,
   type Page,
 } from '@playwright/test';
+import { mockStationApi } from './helpers/station-api';
 import {
   parseTicket,
   sampleTicket,
@@ -273,6 +274,11 @@ async function backend(
     }
     return route.fulfill({ json: { order: updated, instanceId, revision } });
   });
+  await mockStationApi(context, (ticket) => {
+    if (publishFails) throw new Error('Database down');
+    publications.push(ticket);
+    upsert(ticket);
+  });
   await context.route('**/api/printer', (route) =>
     route.fulfill({
       json: {
@@ -285,7 +291,6 @@ async function backend(
   await context.route('**/api/print', (route) => {
     const request = route.request().postDataJSON();
     prints.push(request);
-    if (!request.reprint && !publishFails) upsert(parseTicket(request.ticket));
     return route.fulfill({
       json: {
         attemptId: request.attemptId,
@@ -707,7 +712,7 @@ test('stale stream snapshots cannot restore an order after marking it done', asy
   await expect(page.getByRole('article')).toHaveCount(3);
 });
 
-test('disconnected queue keeps API actions usable and reconnects to catch up without polling', async ({
+test('disconnected queue blocks actions and reconnects to catch up without polling', async ({
   page,
   context,
 }) => {
@@ -727,14 +732,15 @@ test('disconnected queue keeps API actions usable and reconnects to catch up wit
   await expect(page.getByRole('alert')).toContainText('disconnected');
   await expect(page.getByRole('alert')).toContainText('Reconnecting…');
   await expect(page.getByRole('article')).toHaveCount(4);
-  await page
-    .getByRole('button', { name: 'Mark #0040 done', exact: true })
-    .click();
-  await expect(page.getByRole('article')).toHaveCount(3);
-  await expect(page.getByRole('alert')).toContainText('disconnected');
+  await expect(
+    page.getByRole('button', { name: 'Mark #0040 done', exact: true }),
+  ).toBeDisabled();
   api.failList(false);
   await page.clock.fastForward(3001);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Mark #0040 done', exact: true }),
+  ).toBeEnabled();
   expect(reads).toEqual([]);
   await page.getByRole('link', { name: 'Order builder', exact: true }).click();
   await expect(page.getByLabel('Customer name (optional)')).toBeVisible();
@@ -821,7 +827,7 @@ test('builder and queue share orders: every reprint leaves one card and never re
   expect(api.publications).toHaveLength(1);
 });
 
-test('pending publications survive reload and retry without reprinting', async ({
+test('failed central order commits block printing and restore the saved draft on reload', async ({
   page,
   context,
 }) => {
@@ -833,41 +839,17 @@ test('pending publications survive reload and retry without reprinting', async (
     .click();
   await page.getByRole('button', { name: 'Cup', exact: true }).click();
   await page.getByRole('button', { name: 'Print order', exact: true }).click();
-  await expect(page.getByLabel('Print notification')).toContainText(
-    'sent to the printer',
-  );
-  await page.getByRole('button', { name: 'Order tools', exact: true }).click();
-  await expect(page.getByLabel('Queue synchronization')).toContainText(
-    'no print will be resent',
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save print intent. No data was sent.',
   );
   expect(api.records.size).toBe(0);
-  expect(api.prints).toHaveLength(1);
+  expect(api.prints).toHaveLength(0);
   api.failPublish(false);
   await page.reload();
-  await expect.poll(() => api.records.size).toBe(1);
-  expect(api.prints).toHaveLength(1);
-  expect(api.records.get(api.prints[0].ticket.id)?.submittedAt).toBe(
-    api.prints[0].ticket.createdAt,
-  );
-  expect(
-    api.publications.every((ticket) => ticket.id === api.prints[0].ticket.id),
-  ).toBe(true);
-  await page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const request = indexedDB.open('order-pad-v1');
-      request.onsuccess = () => resolve(request.result);
-    });
-    const keys = await new Promise<IDBValidKey[]>((resolve) => {
-      const request = db
-        .transaction('settings')
-        .objectStore('settings')
-        .getAllKeys();
-      request.onsuccess = () => resolve(request.result);
-    });
-    db.close();
-    if (keys.some((key) => String(key).startsWith('queueOrder:')))
-      throw new Error('Outbox not acknowledged');
-  });
+  await expect(
+    page.getByRole('button', { name: 'Print order', exact: true }),
+  ).toBeEnabled();
+  expect(api.prints).toHaveLength(0);
 });
 
 for (const viewport of [

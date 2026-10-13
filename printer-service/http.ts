@@ -6,6 +6,8 @@ import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
 import { OrderStream } from './order-stream';
+import { StationConflict, type StationRepository } from './station-database';
+import { parseStationCommand } from '../src/lib/storage/ticket-store';
 import { trackingDisabledCode } from '../src/lib/orders/features';
 
 class BadRequest extends Error {
@@ -52,13 +54,23 @@ export function createApp({
   printing,
   orders,
   trackingEnabled = true,
+  station,
 }: {
   origin: URL;
   port: number;
   root: string;
   cups: Pick<Cups, 'check' | 'queue'>;
   printing: Pick<Printing, 'print'>;
-  orders: Pick<Orders, 'upsert' | 'list' | 'changeStatus' | 'subscribe'>;
+  orders: Pick<
+    Orders,
+    | 'upsert'
+    | 'list'
+    | 'changeStatus'
+    | 'subscribe'
+    | 'stationChanged'
+    | 'stationUncertain'
+  >;
+  station: StationRepository;
   trackingEnabled?: boolean;
 }) {
   const streams = new Set<OrderStream>();
@@ -84,7 +96,8 @@ export function createApp({
       const path = url.pathname;
       if (
         req.method === 'POST' &&
-        (path === '/api/print' ||
+        (path === '/api/station' ||
+          path === '/api/print' ||
           path === '/api/orders' ||
           path.startsWith('/api/orders/'))
       ) {
@@ -95,6 +108,62 @@ export function createApp({
           json(403, { error: 'Use the configured same-origin application.' });
           return;
         }
+      }
+      if (path.startsWith('/api/')) {
+        try {
+          await station.check();
+        } catch {
+          orders.stationUncertain();
+          json(503, {
+            error:
+              'Database unavailable. Restore Postgres on this machine and reload. No new job was submitted.',
+            code: 'database-unavailable',
+          });
+          return;
+        }
+      }
+      if (req.method === 'GET' && path === '/api/database') {
+        json(200, { ready: true });
+        return;
+      }
+      if (req.method === 'GET' && path === '/api/station') {
+        try {
+          json(200, await station.load());
+        } catch {
+          json(503, {
+            error: 'Database unavailable. Restore Postgres and reload.',
+          });
+        }
+        return;
+      }
+      if (req.method === 'POST' && path === '/api/station') {
+        let command;
+        const body = await readJson(req);
+        try {
+          command = parseStationCommand(body);
+        } catch {
+          throw new BadRequest(400, 'Invalid station operation.');
+        }
+        try {
+          const snapshot = await station.mutate(command);
+          if (command.operation === 'startOrder') {
+            try {
+              await orders.stationChanged();
+            } catch {
+              orders.stationUncertain();
+            }
+          }
+          json(200, snapshot);
+        } catch (error) {
+          if (!(error instanceof StationConflict)) orders.stationUncertain();
+          json(error instanceof StationConflict ? 409 : 503, {
+            error:
+              error instanceof StationConflict
+                ? error.message
+                : 'Database write unavailable. Reload to recover committed state; no print will be resent.',
+          });
+        }
+        return;
       }
       if (req.method === 'GET' && path === '/api/features') {
         json(200, { trackingEnabled });
@@ -230,15 +299,6 @@ export function createApp({
             error: 'Invalid ticket or attempt metadata. No data sent.',
           });
           return;
-        }
-        if (!request.reprint) {
-          try {
-            await orders.upsert(request.ticket);
-          } catch {
-            console.warn(
-              'Order database update failed; the browser outbox will retry without resending the print.',
-            );
-          }
         }
         json(200, {
           attemptId: request.attemptId,

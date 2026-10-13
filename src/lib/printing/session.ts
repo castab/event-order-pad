@@ -17,6 +17,7 @@ import type {
 export interface SessionState {
   readonly phase:
     'loading' | 'ready' | 'saving' | 'printing' | 'handoff' | 'blocked';
+  readonly savingDraft?: boolean;
   readonly handoffUrl?: string;
   readonly ticket?: OrderTicket;
   readonly draft?: OrderDraft;
@@ -67,8 +68,8 @@ export class PrintSession {
                     'Page closed before the outcome was saved. Inspect the printer before deliberately reprinting.',
                 },
         };
-        await this.store.finishAttempt(recovered);
-        attempts.push(recovered);
+        const persisted = await this.store.finishAttempt(recovered);
+        attempts.push(persisted ?? recovered);
       }
       let draft = (await this.store.loadDraft()) ?? newDraft(ticket?.reference);
       // No attempt means no send occurred. A crash while saving the order can
@@ -92,7 +93,7 @@ export class PrintSession {
         phase: 'blocked',
         attempts: [],
         notice:
-          'Local storage is unavailable or damaged. Printing is blocked because the ticket and attempts cannot be saved. Reopen in a supported browser; do not clear storage if a ticket may need recovery.',
+          'Database unavailable or station state changed. Order editing and printing are blocked. Restore Postgres on the app machine and reload to recover saved state.',
       });
     }
   }
@@ -106,11 +107,13 @@ export class PrintSession {
     )
       return;
     const draft = parseDraft(value);
-    this.update({ ...this.state, draft });
+    this.update({ ...this.state, draft, savingDraft: true });
     this.draftWrites = this.draftWrites.then(async () => {
       if (this.state.phase === 'blocked') return;
       try {
         await this.store.saveDraft(draft);
+        if (this.state.draft === draft)
+          this.update({ ...this.state, savingDraft: false });
       } catch {
         this.update({
           ...this.state,
@@ -119,6 +122,16 @@ export class PrintSession {
             'Could not save the order draft. Printing is blocked. Reopen the page to recover the last saved draft.',
         });
       }
+    });
+  }
+
+  block(): void {
+    if (this.busy) return;
+    this.update({
+      ...this.state,
+      phase: 'blocked',
+      notice:
+        'Database connection lost. Order editing and printing are blocked. Restore Postgres on this machine and reload. Nothing will be resent automatically.',
     });
   }
 
@@ -151,7 +164,7 @@ export class PrintSession {
         ...this.state,
         phase: 'blocked',
         notice:
-          'Could not save the new order. No data was sent. Reopen the page to recover local storage.',
+          'Could not save the new order. No data was sent. Restore Postgres and reload to recover saved state.',
       });
     } finally {
       this.busy = false;
@@ -235,7 +248,7 @@ export class PrintSession {
         draft,
         attempts: previous,
         notice:
-          'Could not save print intent. No data was sent. Printing is blocked until storage is recovered.',
+          'Could not save print intent. No data was sent. Restore Postgres and reload to recover saved state.',
       });
       return;
     }
@@ -278,12 +291,13 @@ export class PrintSession {
         ? newDraft(draft.reference)
         : undefined;
     try {
-      await this.store.finishAttempt(completed, nextDraft);
+      const persisted = await this.store.finishAttempt(completed, nextDraft);
+      const savedDraft = await this.store.loadDraft();
       this.update({
         phase: 'ready',
         ticket,
-        draft: nextDraft ?? draft,
-        attempts: [...previous, completed],
+        draft: savedDraft ?? nextDraft ?? draft,
+        attempts: [...previous, persisted ?? completed],
       });
     } catch {
       this.update({
@@ -292,7 +306,7 @@ export class PrintSession {
         draft,
         attempts: [...previous, completed],
         notice:
-          'The send finished but its outcome could not be saved. Printing is blocked. On reload this attempt will be recovered as unknown; check the physical ticket.',
+          'The send finished but its outcome could not be saved. Printing is blocked. Reload to recover the database outcome. If it is still unknown, check the physical ticket.',
       });
     } finally {
       this.busy = false;

@@ -31,7 +31,6 @@
     "@types/node": "^24.0.0",
     "@types/pdfkit": "0.17.6",
     "@types/pg": "8.20.0",
-    "fake-indexeddb": "^6.2.5",
     "prettier": "^3.6.2",
     "prettier-plugin-svelte": "^3.4.0",
     "prisma": "7.10.0",

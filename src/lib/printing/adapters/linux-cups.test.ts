@@ -119,3 +119,22 @@ it.each([
     expect(send).toHaveBeenCalledTimes(1);
   },
 );
+
+it('recognizes the database gate as a failed submission but treats other 503 replies as unknown', async () => {
+  for (const databaseGate of [true, false]) {
+    const send = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        {
+          error: 'Database unavailable',
+          ...(databaseGate ? { code: 'database-unavailable' } : {}),
+        },
+        { status: 503 },
+      ),
+    );
+    const result = await new LinuxCupsPrinter(send).print(ticket, options);
+    expect(result.status).toBe(databaseGate ? 'failed' : 'outcome-unknown');
+    if (databaseGate)
+      expect(result.message).toContain('No new job was submitted');
+    expect(send).toHaveBeenCalledTimes(1);
+  }
+});

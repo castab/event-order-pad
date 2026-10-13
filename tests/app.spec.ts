@@ -1,5 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type BrowserContext } from '@playwright/test';
 import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
+import { mockStationApi } from './helpers/station-api';
 import type { OrderDraft } from '../src/lib/tickets/order';
 
 type PrintRequest = {
@@ -39,28 +40,13 @@ async function addServing(
   await page.getByRole('button', { name: 'Add serving', exact: true }).click();
 }
 async function readDraft(page: Page): Promise<OrderDraft> {
-  return page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = indexedDB.open('order-pad-v1');
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    try {
-      return await new Promise<OrderDraft>((resolve, reject) => {
-        const req = db
-          .transaction('settings')
-          .objectStore('settings')
-          .get('draft');
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-    } finally {
-      db.close();
-    }
-  });
+  return page.evaluate(
+    async () => (await (await fetch('/api/station')).json()).draft,
+  );
 }
 
-async function mockUsb(page: Page) {
+async function mockUsb(page: Page | BrowserContext) {
+  const { station, fail } = await mockStationApi(page);
   await page.route('**/api/features', (route) =>
     route.fulfill({ json: { trackingEnabled: true } }),
   );
@@ -88,29 +74,11 @@ async function mockUsb(page: Page) {
   await page.route('**/api/print', async (route) => {
     const body = route.request().postDataJSON() as PrintRequest;
     submitted.push(body);
-    const saved = await page.evaluate(async (attemptId) => {
-      const db = await new Promise<IDBDatabase>((resolve) => {
-        const req = indexedDB.open('order-pad-v1');
-        req.onsuccess = () => resolve(req.result);
-      });
-      try {
-        return await new Promise<{ id: string; result?: unknown }>(
-          (resolve) => {
-            const req = db
-              .transaction('attempts')
-              .objectStore('attempts')
-              .get(attemptId);
-            req.onsuccess = () => resolve(req.result);
-          },
-        );
-      } finally {
-        db.close();
-      }
-    }, body.attemptId);
+    const saved = station.store.attempts.get(body.attemptId)!;
     expect(saved.id).toBe(body.attemptId);
     expect(saved.result).toBeUndefined();
     if (!body.reprint) {
-      const draft = await readDraft(page);
+      const draft = (await station.store.loadDraft())!;
       expect(draft.submittedTicketId).toBe(body.ticket.id);
       expect(draft.editor).toEqual({
         flavors: [],
@@ -130,7 +98,7 @@ async function mockUsb(page: Page) {
       },
     });
   });
-  return { submitted, lockedDrafts };
+  return { submitted, lockedDrafts, station, fail };
 }
 
 test('USB is automatic, Print includes the current serving, and the next order is immediately ready', async ({
@@ -376,58 +344,33 @@ test('removing the last scoop blocks printing without dropping the selected cont
   await expect(printButton(page)).toBeEnabled();
 });
 
-test('v1 browser tickets, attempts and drafts reset once before a new structured order', async ({
-  page,
-}) => {
+test('orders work without any browser persistence APIs', async ({ page }) => {
   const { submitted } = await mockUsb(page);
-  await page.addInitScript(async () => {
-    if (sessionStorage.getItem('seeded-v1')) return;
-    await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.open('order-pad-v1', 1);
-      req.onupgradeneeded = () => {
-        req.result.createObjectStore('tickets', { keyPath: 'id' });
-        req.result.createObjectStore('attempts', { keyPath: 'id' });
-        req.result.createObjectStore('settings');
-        const tx = req.transaction!;
-        tx.objectStore('tickets').put({ id: 'old-ticket', items: [] });
-        tx.objectStore('attempts').put({
-          id: 'old-attempt',
-          ticketId: 'old-ticket',
-        });
-        tx.objectStore('settings').put('old-ticket', 'latest');
-        tx.objectStore('settings').put(
-          { name: 'Legacy draft', reference: 'Sundae Sprinkle' },
-          'draft',
-        );
-      };
-      req.onsuccess = () => {
-        req.result.close();
-        sessionStorage.setItem('seeded-v1', 'yes');
-        resolve();
-      };
-      req.onerror = () => reject(req.error);
-    });
+  await page.addInitScript(() => {
+    for (const key of ['indexedDB', 'localStorage', 'sessionStorage'])
+      Object.defineProperty(window, key, {
+        get: () => {
+          throw new Error('Browser persistence must not be used');
+        },
+      });
   });
   await page.goto('/');
-  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
-  await expect(page.getByLabel('Customer name (optional)')).toHaveValue('');
-  await expect(
-    page.getByRole('button', { name: 'Reprint last order', exact: true }),
-  ).toBeDisabled();
-  expect((await readDraft(page)).reference).toBe('0001');
+  await page.getByLabel('Customer name (optional)').fill('Server draft');
   await chooseServing(page);
+  await expect
+    .poll(async () => (await readDraft(page)).name)
+    .toBe('Server draft');
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Server draft',
+  );
   await printButton(page).click();
   await expect(page.getByLabel('Print notification')).toContainText(
     'sent to the printer',
   );
-  expect(submitted[0].ticket.schema).toBe(2);
-  expect(submitted[0].ticket.reference).toBe('0001');
+  expect(submitted).toHaveLength(1);
   await page.reload();
-  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
-  expect((await readDraft(page)).reference).toBe('0002');
-  await expect(
-    page.getByRole('button', { name: 'Reprint last order', exact: true }),
-  ).toBeEnabled();
+  await expect(page.getByText('Order #0002', { exact: true })).toBeVisible();
 });
 
 test('tools preserve the draft, show the queue and support keyboard disclosure', async ({
@@ -828,25 +771,14 @@ test('reload during a request recovers an unknown locked order without another s
 test('older accepted locked drafts advance on reload without resubmission', async ({
   page,
 }) => {
-  const { submitted, lockedDrafts } = await mockUsb(page);
+  const { submitted, lockedDrafts, station } = await mockUsb(page);
   await page.goto('/');
   await chooseServing(page);
   await printButton(page).click();
   await expect(page.getByLabel('Print notification')).toContainText(
     'sent to the printer',
   );
-  await page.evaluate(async (draft) => {
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const req = indexedDB.open('order-pad-v1');
-      req.onsuccess = () => resolve(req.result);
-    });
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction('settings', 'readwrite');
-      tx.objectStore('settings').put(draft, 'draft');
-      tx.oncomplete = () => resolve();
-    });
-    db.close();
-  }, lockedDrafts[0]);
+  await station.store.saveDraft(lockedDrafts[0]);
   await page.reload();
   await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(0);
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
@@ -861,48 +793,27 @@ test('older accepted locked drafts advance on reload without resubmission', asyn
 test('overlength orders block printing with a clear message and recover after removing servings', async ({
   page,
 }) => {
-  const { submitted } = await mockUsb(page);
+  const { submitted, station } = await mockUsb(page);
   await page.goto('/');
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
   const current = await readDraft(page);
-  await page.evaluate(async (draft) => {
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const request = indexedDB.open('order-pad-v1');
-      request.onsuccess = () => resolve(request.result);
-    });
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction('settings', 'readwrite');
-        tx.objectStore('settings').put(
-          {
-            ...draft,
-            servings: Array(30).fill({
-              flavors: [
-                'Chocolate',
-                'Vanilla',
-                'Strawberry',
-                'Chocolate Chip',
-              ].map((flavor) => ({ flavor, count: 1 })),
-              container: 'Cup',
-              toppings: [
-                'Whipped cream',
-                'Gummy Bears',
-                'Caramel Sauce',
-                'Chocolate Sauce',
-                'Sliced Almonds',
-                'Maraschino Cherries',
-              ],
-            }),
-          },
-          'draft',
-        );
-        tx.oncomplete = () => resolve();
-        tx.onabort = () => reject(tx.error);
-      });
-    } finally {
-      db.close();
-    }
-  }, current);
+  await station.store.saveDraft({
+    ...current,
+    servings: Array(30).fill({
+      flavors: ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'].map(
+        (flavor) => ({ flavor, count: 1 }),
+      ),
+      container: 'Cup',
+      toppings: [
+        'Whipped cream',
+        'Gummy Bears',
+        'Caramel Sauce',
+        'Chocolate Sauce',
+        'Sliced Almonds',
+        'Maraschino Cherries',
+      ],
+    }),
+  });
   await page.reload();
   await expect(page.getByLabel('Order servings').locator('li')).toHaveCount(30);
   await expect(printButton(page)).toBeDisabled();
@@ -921,47 +832,52 @@ test('overlength orders block printing with a clear message and recover after re
   expect(submitted[0].ticket.servings).toHaveLength(20);
 });
 
-test('cached app reopens offline with recovered draft but cannot print without its host', async ({
+test('cached app assets cannot recover orders without the required database', async ({
   page,
-  context,
 }) => {
-  await mockUsb(page);
+  const { fail, submitted } = await mockUsb(page);
   await page.goto('/');
   await chooseServing(page, 'Chocolate', 'Cup');
   await expect
     .poll(async () => (await readDraft(page)).editor.flavors[0]?.flavor)
     .toBe('Chocolate');
   await openTools(page);
-  await page.getByText('Connection and local storage', { exact: true }).click();
+  await page.getByText('Connection and database', { exact: true }).click();
   await expect(page.getByText(/App assets cached/)).toBeVisible();
-  await page.unroute('**/api/printer');
-  await context.setOffline(true);
+  fail(true);
+  await page.reload();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Database unavailable',
+  );
+  await expect(page.getByLabel('Customer name (optional)')).toHaveCount(0);
+  await expect(printButton(page)).toBeDisabled();
+  expect(submitted).toHaveLength(0);
+  fail(false);
   await page.reload();
   await expect(
     page.getByLabel('Chocolate scoop count', { exact: true }),
   ).toHaveText('1');
-  await expect(page.getByRole('alert')).toContainText(
-    'printing service unavailable',
-  );
-  await expect(printButton(page)).toBeDisabled();
 });
 
-test('unsupported IndexedDB blocks sends with an actionable notice', async ({
+test('a database outage during editing blocks all order work until reload', async ({
   page,
 }) => {
-  await mockUsb(page);
-  await page.addInitScript(() => {
-    Object.defineProperty(window, 'indexedDB', {
-      get: () => {
-        throw new Error('unsupported');
-      },
-    });
-  });
+  const { fail, submitted } = await mockUsb(page);
   await page.goto('/');
-  await expect(page.getByRole('alert')).toContainText(
-    'IndexedDB is unavailable',
+  await chooseServing(page);
+  await expect(printButton(page)).toBeEnabled();
+  await page.clock.install();
+  fail(true);
+  await page.clock.runFor(5001);
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Database connection lost',
   );
   await expect(printButton(page)).toBeDisabled();
+  await expect(page.getByLabel('Customer name (optional)')).toBeDisabled();
+  expect(submitted).toHaveLength(0);
+  fail(false);
+  await page.reload();
+  await expect(printButton(page)).toBeEnabled();
 });
 
 for (const viewport of [
@@ -1414,17 +1330,15 @@ test('failed intent-save transaction shows recovery and never sends or resets th
   await expect
     .poll(async () => (await readDraft(page)).editor.container)
     .toBe('Cup');
-  await page.evaluate(() => {
-    const transaction = IDBDatabase.prototype.transaction;
-    IDBDatabase.prototype.transaction = function (storeNames, mode, options) {
-      if (
-        mode === 'readwrite' &&
-        Array.isArray(storeNames) &&
-        storeNames.includes('attempts')
-      )
-        throw new DOMException('Injected quota failure', 'QuotaExceededError');
-      return transaction.call(this, storeNames, mode, options);
-    };
+  let failIntent = true;
+  await page.route('**/api/station', async (route) => {
+    if (
+      failIntent &&
+      route.request().method() === 'POST' &&
+      route.request().postDataJSON().operation === 'startOrder'
+    )
+      return route.fulfill({ status: 503, json: {} });
+    return route.fallback();
   });
   await printButton(page).click();
   await expect(page.getByLabel('Print notification')).toContainText(
@@ -1442,6 +1356,7 @@ test('failed intent-save transaction shows recovery and never sends or resets th
   await expect(page.getByLabel('Print recovery')).toBeFocused();
   await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
   await expect(page.getByLabel('Print recovery')).toBeVisible();
+  failIntent = false;
   await page.reload();
   await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
     'Preserve this draft',
@@ -1509,67 +1424,66 @@ test('unavailable tracking settings do not block printing or reprints', async ({
     page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0);
   expect(submitted).toHaveLength(2);
-  await expect.poll(() => publications).toBeGreaterThan(0);
-  await expect(page.getByLabel('Queue synchronization')).toContainText(
-    'Order persistence pending',
-  );
+  expect(publications).toBe(0);
 });
 
-test('tracking-disabled submissions survive reload and clear only after explicit persistence exclusion', async ({
+test('tracking-disabled submissions use server state and do not publish from the browser', async ({
   page,
 }) => {
-  const { submitted } = await mockUsb(page);
+  const { submitted, station } = await mockUsb(page);
   await page.route('**/api/features', (route) =>
     route.fulfill({ json: { trackingEnabled: false } }),
   );
-  let acknowledge = false;
+  let publications = 0;
   await page.route('**/api/orders', (route) => {
-    const ticket = route.request().postDataJSON() as OrderTicket;
-    return route.fulfill(
-      acknowledge
-        ? { json: { excluded: true, ticketId: ticket.id } }
-        : { status: 503, json: {} },
-    );
+    publications++;
+    return route.fulfill({ status: 503, json: {} });
   });
-  const pending = () =>
-    page.evaluate(async () => {
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open('order-pad-v1', 2);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      try {
-        const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
-          const request = db
-            .transaction('settings')
-            .objectStore('settings')
-            .getAllKeys();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        return keys.filter(
-          (key) => typeof key === 'string' && key.startsWith('queueOrder:'),
-        ).length;
-      } finally {
-        db.close();
-      }
-    });
   await page.goto('/');
   await chooseServing(page);
   await printButton(page).click();
   await expect(page.getByLabel('Print notification')).toContainText(
     'Order #0001 sent',
   );
-  await expect.poll(pending).toBe(1);
+  await page.reload();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  expect((await station.load()).saved?.ticket).toEqual(submitted[0].ticket);
+  expect(submitted).toHaveLength(1);
+  expect(publications).toBe(0);
   await openTools(page);
-  await expect(page.getByLabel('Queue synchronization')).toContainText(
-    'Order persistence pending',
-  );
   await expect(
     page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0);
-  acknowledge = true;
+});
+
+test('tabs share a database draft and stale edits cannot overwrite newer station state', async ({
+  page,
+  context,
+}) => {
+  const { submitted } = await mockUsb(context);
+  await page.goto('/');
+  await page.getByLabel('Customer name (optional)').fill('Shared draft');
+  await expect
+    .poll(async () => (await readDraft(page)).name)
+    .toBe('Shared draft');
+  const second = await context.newPage();
+  await second.goto('/');
+  await expect(second.getByLabel('Customer name (optional)')).toHaveValue(
+    'Shared draft',
+  );
+  await second.getByLabel('Customer name (optional)').fill('Newer saved draft');
+  await expect
+    .poll(async () => (await readDraft(second)).name)
+    .toBe('Newer saved draft');
+  await page.getByLabel('Customer name (optional)').fill('Stale change');
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save the order draft',
+  );
+  await expect(printButton(page)).toBeDisabled();
+  expect((await readDraft(second)).name).toBe('Newer saved draft');
   await page.reload();
-  await expect.poll(pending).toBe(0);
-  expect(submitted).toHaveLength(1);
+  await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
+    'Newer saved draft',
+  );
+  expect(submitted).toHaveLength(0);
 });

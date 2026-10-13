@@ -4,8 +4,8 @@
 >
 > - The build queue screen is titled **Now Scooping** (route `/queue/`), not "BUILD QUEUE".
 > - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and queue visibility can be switched off while event capture continues with `ORDER_PAD_TRACKING_ENABLED=false`.
-> - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration happens both in `POST /api/print` and through the browser outbox.
-> - Order numbers are still allocated per browser; moving allocation to the service remains deferred.
+> - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration commits atomically with print intent through `POST /api/station`. Postgres on the app host owns drafts, counters, tickets, attempts and dispatch records; database failure blocks order work. The browser has no persistence or outbox.
+> - Order numbers and the active draft are shared in Postgres; revision checks reject stale writes from other ordering tabs.
 > - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.
 
 This folder is the design handoff for the order builder and build queue: touch order entry that prints a
@@ -125,8 +125,7 @@ export interface OrderTicket {
   (`schema: 2`) and keep a read-only parser for v1 history, or document a one-time reset. Don't
   let old records crash history.
 - `sampleTicket()` should become the #0043 order shown in `screens/prep-ticket.dc.html`.
-- The order reference needs a persistent, increasing counter (IndexedDB now; the shared store
-  later, see the build queue).
+- The order reference needs a persistent, increasing counter in Postgres on the app host.
 
 ## The prep ticket (`formatTicket` and the PassPRNT/PDF renderers)
 

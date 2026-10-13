@@ -61,6 +61,14 @@ export class LinuxCupsPrinter implements TicketPrinter {
         data?.attemptId === undefined &&
         data?.result === undefined
       ) {
+        if (response.status === 503 && data?.code === 'database-unavailable')
+          return {
+            status: 'failed',
+            code: 'transport',
+            simulated: false,
+            message:
+              'Database unavailable. No new job was submitted. Restore Postgres on this machine and reload.',
+          };
         if (
           response.status === 403 &&
           [

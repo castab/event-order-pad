@@ -17,3 +17,44 @@ model OrderEvent {
   @@index([orderId, eventId(sort: Desc)], map: "order_events_latest_idx")
   @@map("order_events")
 }
+
+model Station {
+  id              Int    @id
+  revision        Int    @default(0)
+  referenceCounter BigInt   @default(0) @map("reference_counter")
+  draft           Json   @db.JsonB
+  latestTicketId  String? @map("latest_ticket_id")
+  latestTicket Ticket? @relation(fields: [latestTicketId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "station_latest_ticket_fk")
+
+  @@map("station")
+}
+
+model Ticket {
+  id      String @id
+  content Json   @db.JsonB
+  attempts Attempt[]
+  latestFor Station[]
+
+  @@map("tickets")
+}
+
+model Attempt {
+  id       String @id
+  ticketId String @map("ticket_id")
+  content  Json   @db.JsonB
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  dispatch PrintDispatch?
+
+  @@index([ticketId])
+  @@map("print_attempts")
+}
+
+model PrintDispatch {
+  attemptId String @id @map("attempt_id")
+  request   Json   @db.JsonB
+  result    Json?  @db.JsonB
+  completedAt DateTime? @db.Timestamptz(3) @map("completed_at")
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("print_dispatches")
+}

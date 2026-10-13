@@ -99,6 +99,13 @@ export class Orders {
       this.disconnect();
     }
   }
+  /** A station transaction may commit an order together with its print intent. */
+  async stationChanged(): Promise<void> {
+    await this.serialize(() => this.committed());
+  }
+  stationUncertain(): void {
+    this.uncertain();
+  }
   upsert(value: OrderTicket): Promise<OrderRegistration> {
     const ticket = parseTicket(value);
     if (ticket.createdAt < this.captureFrom)

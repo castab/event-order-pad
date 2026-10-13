@@ -10,14 +10,24 @@ export function parseDatabaseUrl(value: string | undefined): string {
     const url = new URL(value ?? '');
     if (
       !['postgres:', 'postgresql:'].includes(url.protocol) ||
-      !url.hostname ||
+      !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
+      [...url.searchParams.keys()].some(
+        (key) =>
+          ![
+            'schema',
+            'sslmode',
+            'connection_limit',
+            'connect_timeout',
+            'pool_timeout',
+          ].includes(key),
+      ) ||
       url.pathname.length < 2
     )
       throw new Error();
     return value!;
   } catch {
     throw new Error(
-      'DATABASE_URL must be a Postgres connection URL with a database name.',
+      'DATABASE_URL must be a loopback Postgres connection URL with a database name; the app service and database must run on the same machine.',
     );
   }
 }

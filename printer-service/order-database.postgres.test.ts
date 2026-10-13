@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
 import { createOrderDatabase, PostgresOrderRepository } from './order-database';
 import { Orders, OrderNotFound } from './orders';
+import { PostgresStationRepository } from './station-database';
 import { createApp } from './http';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -24,6 +25,10 @@ beforeAll(async () => {
   expect(Number(version.version)).toBeLessThan(190000);
 });
 beforeEach(async () => {
+  await database.printDispatch.deleteMany();
+  await database.attempt.deleteMany();
+  await database.station.deleteMany();
+  await database.ticket.deleteMany();
   await database.orderEvent.deleteMany();
 });
 afterAll(async () => {
@@ -204,18 +209,19 @@ it('orders events by identity even with equal or backwards timestamps', async ()
   expect(await repository.list('open')).toHaveLength(1);
 });
 
-it('captures with tracking off, excludes pre-cutoff tickets, and leaves prints operational during outages', async () => {
+it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints during outages', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'order-pad-postgres-http-'));
   const unavailable = createOrderDatabase(
     'postgresql://none:none@127.0.0.1:1/none',
   );
   const prints: string[] = [];
-  async function serve(orders: Orders) {
+  async function serve(orders: Orders, stationDatabase = database) {
     const server = createApp({
       origin: new URL('https://mint.test'),
       port: 4174,
       root: directory,
       trackingEnabled: false,
+      station: new PostgresStationRepository(stationDatabase, cutoff),
       cups: { queue: 'Test', check: async () => 'Ready' },
       orders,
       printing: {
@@ -277,6 +283,7 @@ it('captures with tracking off, excludes pre-cutoff tickets, and leaves prints o
       status: 200,
       body: { excluded: true, ticketId: old.id },
     });
+    await live.send('/api/orders', ticket);
     expect(
       (
         await live.send('/api/print', {
@@ -311,6 +318,7 @@ it('captures with tracking off, excludes pre-cutoff tickets, and leaves prints o
   }
   const offline = await serve(
     new Orders(new PostgresOrderRepository(unavailable), cutoff),
+    unavailable,
   );
   try {
     expect((await offline.send('/api/orders', ticket)).status).toBe(503);
@@ -324,9 +332,9 @@ it('captures with tracking off, excludes pre-cutoff tickets, and leaves prints o
           reprint: false,
           ticket,
         })
-      ).body.result.status,
-    ).toBe('accepted');
-    expect(prints).toEqual([ticket.id, ticket.id, ticket.id]);
+      ).status,
+    ).toBe(503);
+    expect(prints).toEqual([ticket.id, ticket.id]);
   } finally {
     await offline.close();
     await unavailable.$disconnect();

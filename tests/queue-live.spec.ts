@@ -7,6 +7,7 @@ import {
   MemoryOrderRepository,
   testCaptureFrom,
 } from './helpers/order-repository';
+import { MemoryStationRepository } from './helpers/station';
 import { createApp } from '../printer-service/http';
 import type { Request as PrintRequest } from '../printer-service/printing';
 import { sampleTicket } from '../src/lib/tickets/ticket';
@@ -29,6 +30,7 @@ const test = base.extend<{ service: Service }>({
     let trackingEnabled = true;
     const repository = new MemoryOrderRepository();
     let orders = new Orders(repository, testCaptureFrom);
+    const station = new MemoryStationRepository(repository);
     const makeServer = () => {
       const server = createApp({
         origin,
@@ -37,6 +39,7 @@ const test = base.extend<{ service: Service }>({
         cups: { queue: 'TestQueue', check: async () => 'Ready' },
         orders,
         trackingEnabled,
+        station,
         printing: {
           print: async (request) => {
             prints.push(request);
@@ -68,7 +71,7 @@ const test = base.extend<{ service: Service }>({
     const close = () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
-        // Test browsers can race shutdown with a final outbox request on a reused socket.
+        // Test browsers can race shutdown with a final station request on a reused socket.
         server.closeAllConnections();
       });
     await listen();
@@ -78,10 +81,11 @@ const test = base.extend<{ service: Service }>({
       prints,
       activeStreams: () => active,
       loseNextCommitReply: () => {
-        const persist = repository.upsert.bind(repository);
-        repository.upsert = async (value) => {
-          repository.upsert = persist;
-          await persist(value);
+        const persist = station.mutate.bind(station);
+        station.mutate = async (value) => {
+          const result = await persist(value);
+          if (value.operation !== 'startOrder') return result;
+          station.mutate = persist;
           throw new Error('Commit reply lost');
         };
       },
@@ -346,11 +350,15 @@ test('a lost database commit reply reconnects the live queue without duplicating
     .click();
   await page.getByRole('button', { name: 'Cup', exact: true }).click();
   await page.getByRole('button', { name: 'Print order', exact: true }).click();
-  await expect(page.getByLabel('Print notification')).toContainText(
-    '#0001 sent',
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save print intent. No data was sent.',
+  );
+  await page.reload();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
   );
   await expect(queue.getByRole('article')).toHaveCount(1, { timeout: 10000 });
   await expect.poll(service.activeStreams).toBe(1);
-  expect(service.prints).toHaveLength(1);
+  expect(service.prints).toHaveLength(0);
   expect(await service.orders.list('open')).toHaveLength(1);
 });

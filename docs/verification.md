@@ -2,6 +2,32 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## PWA station endpoint diagnosis — 2026-10-13
+
+The reloaded PWA showed “Database needs attention.” Read-only inspection found local PostgreSQL 18 healthy and both committed migrations already applied to the station database. The managed `order-pad.service` process started before the new build and returned 404 for `/api/database` and `/api/station`, confirming an app/service version mismatch. CUPS reported no pending jobs.
+
+An orderly service-manager restart was attempted but required the owner's administrator password. The service remains on its older process pending `sudo systemctl restart order-pad.service`, followed by a PWA reload and endpoint verification. No database migration, data deletion or physical print was performed during this diagnosis.
+
+## Required local Postgres station persistence — 2026-10-12
+
+Postgres now owns the shared draft, reference counter, immutable tickets, print attempts, exclusive dispatch claims and order events. Browser order persistence and the publication outbox are removed, along with the `fake-indexeddb` dependency. First-order intent and queue capture commit atomically; stale tabs cannot overwrite newer revisions. Recorded service results recover lost replies, while unresolved pending attempts remain unknown and never replay. The app service requires a loopback database on the same machine, checks the migrated schema before listening, and rejects API work during database outages. Idle browser health checks block editing until recovery and reload.
+
+Checks ran on Linux with Node 24.21.0. Real database checks used a newly created disposable PostgreSQL 18 container on a random loopback port; no station migrations or data changes were performed.
+
+| Check                        | Result                                                                                                                                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres:volume | Passed; disposable PostgreSQL 18 volume survived container recreation.                                                                                                                                      |
+| npm run test:postgres        | Passed; 12 tests covering atomic rollback, cross-client revisions, dispatch durability, lost-response recovery, restart reads, full API client/session flow, tracking-disabled capture and outage blocking. |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                                                                                                                |
+| npm run lint                 | Passed.                                                                                                                                                                                                     |
+| npm test                     | Passed; 195 tests across 18 files.                                                                                                                                                                          |
+| npm run build                | Passed.                                                                                                                                                                                                     |
+| npm run build:printer        | Passed.                                                                                                                                                                                                     |
+| npm run test:e2e             | Passed; 127 Chromium runs including unavailable browser persistence APIs, database outages, shared drafts and stale-tab protection at all builder viewport sizes.                                           |
+| Bundled service readiness    | Passed; starts against local test Postgres and answers `/api/database`, refuses startup against an unavailable database before listening. No CUPS calls made.                                               |
+
+No physical print job was sent and no new hardware result is claimed. Rollout requires the committed station migration, coordinated app/service deployment and reconciliation of old browser drafts, unpublished orders and unresolved attempts. Legacy IndexedDB and `.print-data/` are preserved as archives and are not automatically imported. Existing Postgres queue events remain intact. See [README’s upgrade steps](../README.md#set-up-postgres-and-upgrade-the-station).
+
 ## Print rejection diagnosis and station restart — 2026-10-12
 
 The browser’s generic “The Linux service did not return a matching result” message hid explicit service validation/origin rejections. The Linux adapter now recognizes the service’s known 400/403/413 error bodies as failed before submission, with actionable “No job was submitted” copy. Unexpected errors, malformed responses, timeouts, wrong attempt IDs, and non-success responses containing apparent accepted results remain unknown. No print retry or historical result rewrite was added.

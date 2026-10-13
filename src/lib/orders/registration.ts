@@ -4,7 +4,7 @@ export type OrderRegistration =
   | { readonly order: QueueOrder; readonly created: boolean }
   | { readonly excluded: true; readonly ticketId: string };
 
-/** Only a matching durable save or explicit cutoff exclusion can acknowledge an outbox entry. */
+/** Accept only a matching durable order or an explicit cutoff exclusion. */
 export function parseRegistration(
   value: unknown,
   ticketId: string,

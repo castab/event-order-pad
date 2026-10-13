@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Cups } from './cups';
 import { Printing } from './printing';
+import { PostgresStationRepository } from './station-database';
 import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
@@ -35,19 +36,20 @@ const trackingEnabled = parseTrackingEnabled(
 );
 const root = await realpath(resolve('build'));
 const cups = new Cups(process.env.ORDER_PAD_QUEUE ?? 'OrderPad');
-const printing = new Printing(
-  cups,
-  resolve(process.env.ORDER_PAD_DATA ?? '.print-data'),
-  process.env.ORDER_PAD_FONT ??
-    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
-);
 const database = createOrderDatabase(
   parseDatabaseUrl(process.env.DATABASE_URL),
 );
-const orders = new Orders(
-  new PostgresOrderRepository(database),
-  parseCaptureFrom(process.env.ORDER_PAD_CAPTURE_FROM),
+const captureFrom = parseCaptureFrom(process.env.ORDER_PAD_CAPTURE_FROM);
+const station = new PostgresStationRepository(database, captureFrom);
+await station.check();
+await station.load();
+const printing = new Printing(
+  cups,
+  station,
+  process.env.ORDER_PAD_FONT ??
+    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
 );
+const orders = new Orders(new PostgresOrderRepository(database), captureFrom);
 const server = createApp({
   origin,
   port,
@@ -56,6 +58,7 @@ const server = createApp({
   printing,
   orders,
   trackingEnabled,
+  station,
 }).listen(port, '127.0.0.1', () =>
   console.log(
     `Order Pad Linux service listening on 127.0.0.1:${port}; open ${origin.origin}`,

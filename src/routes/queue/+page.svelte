@@ -267,7 +267,7 @@
       <button
         class="primary"
         onclick={() => update(ticket.id, 'done')}
-        disabled={pending.has(ticket.id)}
+        disabled={!!connectionError || pending.has(ticket.id)}
         aria-busy={pending.has(ticket.id)}>Mark #{ticket.reference} done</button
       >
     </div>
@@ -380,7 +380,7 @@
           ><button
             aria-label={`Undo done for #${order.ticket.reference}`}
             onclick={() => update(order.ticket.id, 'reopen')}
-            disabled={pending.has(order.ticket.id)}
+            disabled={!!connectionError || pending.has(order.ticket.id)}
             aria-busy={pending.has(order.ticket.id)}>Undo</button
           >
         </div>{/each}

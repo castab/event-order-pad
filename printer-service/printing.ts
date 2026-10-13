@@ -1,5 +1,3 @@
-import { mkdir, open, readFile, rename } from 'node:fs/promises';
-import { join } from 'node:path';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
 import type { PrintAttemptResult } from '../src/lib/printing/port';
 import { Cups } from './cups';
@@ -10,9 +8,14 @@ export interface Request {
   reprint: boolean;
   ticket: OrderTicket;
 }
-interface Record {
+export interface PrintRecord {
   request: Request;
   result?: PrintAttemptResult;
+}
+export interface PrintJournal {
+  get(id: string): Promise<PrintRecord | undefined>;
+  begin(request: Request): Promise<void>;
+  finish(request: Request, result: PrintAttemptResult): Promise<void>;
 }
 const failed = (
   message: string,
@@ -41,56 +44,42 @@ export function parseRequest(value: unknown): Request {
     typeof input.reprint !== 'boolean'
   )
     throw new Error('Invalid attempt ID or reprint flag.');
-  return {
+  return Object.freeze({
     attemptId: input.attemptId,
     reprint: input.reprint,
     ticket: parseTicket(input.ticket),
-  };
+  });
 }
 
-async function syncDirectory(directory: string) {
-  if (process.platform !== 'linux') return;
-  const handle = await open(directory, 'r');
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function save(path: string, value: Record, directory: string) {
-  const file = await open(path, 'wx', 0o600);
-  try {
-    await file.writeFile(JSON.stringify(value));
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-  await syncDirectory(directory);
-}
-
-/** Small durable attempt journal, not a background queue. Pending intent is never replayed. */
+/** Database dispatch intent precedes lp. Pending intent is never replayed. */
 export class Printing {
   private busy = false;
   private blocked = false;
   constructor(
     private cups: Cups,
-    private directory: string,
+    private journal: PrintJournal,
     private font: string,
     private render = receiptPdf,
   ) {}
   async print(request: Request): Promise<PrintAttemptResult> {
-    const path = join(this.directory, `${request.attemptId}.json`);
+    request = parseRequest(request);
     try {
-      const existing = JSON.parse(await readFile(path, 'utf8')) as Record;
-      if (JSON.stringify(existing.request) !== JSON.stringify(request))
-        return failed(
-          'Attempt ID was already used for different ticket content.',
-          'invalid-ticket',
-        );
-      return existing.result ?? unknown();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-        return failed('Print history cannot be read. No new job was sent.');
+      const existing = await this.journal.get(request.attemptId);
+      if (existing) {
+        if (
+          JSON.stringify(parseRequest(existing.request)) !==
+          JSON.stringify(request)
+        )
+          return failed(
+            'Attempt ID was already used for different ticket content.',
+            'invalid-ticket',
+          );
+        return existing.result ?? unknown();
+      }
+    } catch {
+      return failed(
+        'Database unavailable. No new job was submitted. Restore Postgres and reload.',
+      );
     }
     if (this.blocked)
       return failed(
@@ -103,6 +92,13 @@ export class Printing {
       );
     this.busy = true;
     try {
+      try {
+        await this.journal.begin(request);
+      } catch {
+        return failed(
+          'Could not save exclusive print intent. No job was submitted; inspect existing attempt history before trying again.',
+        );
+      }
       let pdf: Buffer;
       let media: string;
       let jobOptions: string[];
@@ -119,15 +115,16 @@ export class Printing {
           paper.heightMm,
         );
       } catch (error) {
-        return failed(`${(error as Error).message} No job was submitted.`);
-      }
-      try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        await save(path, { request }, this.directory);
-      } catch {
-        return failed(
-          'Could not save exclusive print intent. No job was submitted; inspect existing attempt history before trying again.',
+        const result = failed(
+          `${(error as Error).message} No job was submitted.`,
         );
+        try {
+          await this.journal.finish(request, result);
+        } catch {
+          this.blocked = true;
+          return unknown();
+        }
+        return result;
       }
       let result: PrintAttemptResult;
       try {
@@ -146,10 +143,7 @@ export class Printing {
         result = unknown();
       }
       try {
-        const temporary = `${path}.complete`;
-        await save(temporary, { request, result }, this.directory);
-        await rename(temporary, path);
-        await syncDirectory(this.directory);
+        await this.journal.finish(request, result);
       } catch {
         this.blocked = true;
         return unknown();

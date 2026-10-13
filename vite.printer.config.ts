@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  tsconfig: './tsconfig.printer.json',
   build: {
     ssr: 'printer-service/server.ts',
     target: 'node22',
