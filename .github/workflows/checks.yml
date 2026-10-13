@@ -1,7 +1,10 @@
 name: Checks
 on:
+  # Branch pushes are covered by their pull request; running both doubles every PR run.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

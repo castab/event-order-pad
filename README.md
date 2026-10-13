@@ -80,7 +80,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these on Node 24 for every push and pull request, with `--with-deps` on the Playwright install. Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins dependencies, and the `cookie` override in `package.json` resolves an upstream SvelteKit 2 advisory.
+CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these on Node 24 for every pull request and every push to `main`, with `--with-deps` on the Playwright install. To check a branch that has no pull request, start the workflow manually from the Actions tab. Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins dependencies, and the `cookie` override in `package.json` resolves an upstream SvelteKit 2 advisory.
 
 ## Project layout
 

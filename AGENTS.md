@@ -31,7 +31,7 @@ npm run build:printer  # build-printer/server.mjs
 npm run test:e2e       # Playwright, Chromium, vite preview on :4175
 ```
 
-CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs the same sequence on Node 24 for every push and pull request. The full suite takes about a minute locally: 187 Vitest tests in 19 files and 120 Playwright runs as of 2026-10-12.
+CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs the same sequence on Node 24 for every pull request and every push to `main`. Branch pushes are deliberately not triggers, because the pull request run already covers them; use `workflow_dispatch` to check a branch with no PR. The full suite takes about a minute locally: 187 Vitest tests in 19 files and 120 Playwright runs as of 2026-10-12.
 
 Faster loops:
 
