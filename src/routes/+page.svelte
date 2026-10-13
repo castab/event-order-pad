@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { fetchTrackingEnabled } from '$lib/orders/features';
-  import { OrderPublisher } from '$lib/orders/publisher';
-  import { formatTicket } from '$lib/tickets/format';
-  import { blankNameLabel, cleanCustomerName } from '$lib/tickets/ticket';
+  import { fetchTrackingEnabled } from '#lib/orders/features.js';
+  import { OrderPublisher } from '#lib/orders/publisher.js';
+  import { formatTicket } from '#lib/tickets/format.js';
+  import { blankNameLabel, cleanCustomerName } from '#lib/tickets/ticket.js';
   import {
     flavors,
     maxScoopsPerServing,
@@ -21,15 +21,15 @@
     prepareDraftForPrint,
     type OrderDraft,
     type ServingEditor,
-  } from '$lib/tickets/order';
-  import { holdUpdates } from '$lib/app-update';
-  import { PrintSession, type SessionState } from '$lib/printing/session';
-  import { IndexedDbTicketStore } from '$lib/storage/ticket-store';
+  } from '#lib/tickets/order.js';
+  import { holdUpdates } from '#lib/app-update.js';
+  import { PrintSession, type SessionState } from '#lib/printing/session.js';
+  import { IndexedDbTicketStore } from '#lib/storage/ticket-store.js';
   import {
     LinuxCupsPrinter,
     linuxPrinterStatus,
     type LinuxPrinterStatus,
-  } from '$lib/printing/adapters/linux-cups';
+  } from '#lib/printing/adapters/linux-cups.js';
 
   let queueNotice = $state('');
   let trackingEnabled = $state(false);
