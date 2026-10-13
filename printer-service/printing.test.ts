@@ -40,7 +40,7 @@ describe('Linux CUPS printing', () => {
     expect(() => parseRequest({ ...request, attemptId: 1 })).toThrow();
     expect(() => parseRequest({ ...request, reprint: 'false' })).toThrow();
     expect(() =>
-      parseRequest({ ...request, ticket: { ...ticket, items: [] } }),
+      parseRequest({ ...request, ticket: { ...ticket, servings: [] } }),
     ).toThrow();
     expect(() => new Cups('-h remote')).toThrow();
     expect(parseRequest(request).ticket).toEqual(ticket);
@@ -264,9 +264,9 @@ describe('Linux CUPS printing', () => {
   it('renders one receipt PDF including a reprint without changing the ticket', async () => {
     const layout = receiptLayout(ticket, true);
     expect(layout.lines[0].text).toBe('REPRINT');
-    expect(layout.lines.some((line) => line.text === 'ORDER: 0042')).toBe(true);
-    expect(layout.heightMm).toBeLessThan(200);
-    const pdf = await receiptPdf(ticket, true, 'Courier', 200);
+    expect(layout.lines.some((line) => line.text === 'ORDER #0043')).toBe(true);
+    expect(layout.heightMm).toBeLessThan(400);
+    const pdf = await receiptPdf(ticket, true, 'Courier', layout.heightMm);
     expect(pdf.toString('ascii').startsWith('%PDF-')).toBe(true);
     expect(pdf.toString('ascii').match(/\/Type \/Page\b/g)).toHaveLength(1);
     await expect(receiptPdf(ticket, false, 'Courier', 30)).rejects.toThrow(

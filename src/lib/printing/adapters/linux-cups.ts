@@ -38,7 +38,10 @@ export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
 export class LinuxCupsPrinter implements TicketPrinter {
   readonly mode = 'linux-cups' as const;
   readonly label = 'Star USB via Linux CUPS';
-  constructor(private send: typeof fetch = fetch) {}
+  // Native fetch needs its global receiver when called in a browser.
+  constructor(
+    private send: typeof fetch = (input, init) => fetch(input, init),
+  ) {}
 
   async print(
     ticket: OrderTicket,

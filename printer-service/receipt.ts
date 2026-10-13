@@ -1,26 +1,22 @@
 import PDFDocument from 'pdfkit';
-import { formatTicket } from '../src/lib/tickets/format';
-import type { OrderTicket } from '../src/lib/tickets/ticket';
+import {
+  formatTicket,
+  prepTicketLayout,
+  pixelsPerMm,
+} from '../src/lib/tickets/format';
+import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
 
 const mm = 72 / 25.4;
+const px = mm / pixelsPerMm;
 export function receiptLayout(ticket: OrderTicket, reprint: boolean) {
-  const lines = formatTicket(ticket, reprint, 36);
-  const sizes = lines.map((line) =>
-    line.role === 'reference'
-      ? 16
-      : line.role === 'heading' || line.role === 'reprint'
-        ? 13
-        : 9,
-  );
-  const heightMm = Math.ceil(
-    (12 + sizes.reduce((sum, size) => sum + size + 4, 0)) / mm,
-  );
-  if (heightMm > 2000)
-    throw new Error('Ticket exceeds the 2000 mm receipt limit.');
-  return { lines, sizes, heightMm };
+  const valid = parseTicket(ticket);
+  return {
+    ...prepTicketLayout(valid, reprint),
+    lines: formatTicket(valid, reprint, 36),
+  };
 }
 
-/** Embedded local font, one receipt page, no HTML or external assets. */
+/** Embedded configured font, one receipt page, and shared HTML/PDF geometry. */
 export async function receiptPdf(
   ticket: OrderTicket,
   reprint: boolean,
@@ -28,14 +24,14 @@ export async function receiptPdf(
   heightMm: number,
 ): Promise<Buffer> {
   const layout = receiptLayout(ticket, reprint);
-  if (heightMm < layout.heightMm)
+  if (!Number.isFinite(heightMm) || heightMm < layout.heightMm)
     throw new Error('Paper is too short for this ticket.');
   const doc = new PDFDocument({
     size: [72 * mm, heightMm * mm],
     margin: 0,
     font,
     compress: true,
-    info: { Title: 'Preparation ticket' },
+    info: { Title: 'Prep ticket' },
   });
   const chunks: Buffer[] = [];
   const finished = new Promise<Buffer>((resolve, reject) => {
@@ -43,16 +39,50 @@ export async function receiptPdf(
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
   });
-  let y = 6;
-  layout.lines.forEach((line, index) => {
-    const size = layout.sizes[index];
-    doc.fontSize(size);
-    // Fit large headings/references without losing or wrapping characters.
-    const width = doc.widthOfString(line.text);
-    if (width > 72 * mm - 8) doc.fontSize((size * (72 * mm - 8)) / width);
-    doc.text(line.text || ' ', 4, y, { lineBreak: false });
-    y += size + 4;
-  });
+  for (const node of layout.nodes) {
+    doc.save();
+    if (node.kind === 'box') {
+      if (!node.width)
+        doc
+          .moveTo(node.x * px, node.y * px)
+          .lineTo(node.x * px, (node.y + node.height) * px)
+          .lineWidth(node.stroke * px)
+          .stroke('black');
+      else {
+        doc.rect(node.x * px, node.y * px, node.width * px, node.height * px);
+        if (node.filled) doc.fill('black');
+        else doc.lineWidth(node.stroke * px).stroke('black');
+      }
+    } else if (node.kind === 'rule') {
+      if (node.dashed) doc.dash(8 * px, { space: 5 * px });
+      doc
+        .moveTo(node.x * px, node.y * px)
+        .lineTo((node.x + node.width) * px, node.y * px)
+        .lineWidth(node.stroke * px)
+        .stroke('black');
+    } else {
+      doc.fontSize(node.size * px);
+      const actualWidth = doc.widthOfString(node.text);
+      if (actualWidth > node.width * px)
+        doc.fontSize((node.size * px * node.width * px) / actualWidth);
+      doc.fillColor(node.inverse ? 'white' : 'black');
+      doc.strokeColor(node.inverse ? 'white' : 'black').lineWidth(0.5 * px);
+      const width = doc.widthOfString(node.text);
+      const x =
+        node.x * px +
+        (node.align === 'center'
+          ? (node.width * px - width) / 2
+          : node.align === 'right'
+            ? node.width * px - width
+            : 0);
+      doc.text(node.text, x, node.y * px, {
+        lineBreak: false,
+        stroke: node.bold,
+        fill: true,
+      });
+    }
+    doc.restore();
+  }
   doc.end();
   return finished;
 }

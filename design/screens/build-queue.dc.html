@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Build queue</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/fionasicecreamdesignsystem_65d2e1/styles.css">
+<script src="ds/fionasicecreamdesignsystem_65d2e1/components/bundle.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#4a4733}a:hover{color:#3d3a2b}
+button:focus-visible{outline:3px solid rgba(95,91,64,0.45);outline-offset:2px}
+</style>
+</helmet>
+<div style="width: 1180px; height: 820px; box-sizing: border-box; display: flex; flex-direction: column; background: var(--surface-page); color: var(--text-body); font-family: var(--font-sans); overflow: hidden">
+
+<div style="height: 72px; flex-shrink: 0; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 24px; background: var(--surface-inverse); color: var(--text-on-inverse)">
+<span style="display: flex; align-items: center; gap: 20px">
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Wordmark" size="{{ wmSize }}" tone="cream"></x-import>
+<span aria-hidden="true" style="width: 1px; height: 28px; background: rgba(237,229,211,0.3)"></span>
+<h1 style="margin: 0; font: 600 15px/1 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--cream-200)">Build queue</h1>
+</span>
+<span style="display: flex; align-items: center; gap: 28px">
+<span style="display: flex; align-items: baseline; gap: 8px"><span style="font: 700 28px/1 var(--font-sans); color: var(--cream-100)">{{ openCount }}</span><span style="font: 600 12px/1 var(--font-sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--olive-100)">open</span></span>
+<span style="display: flex; align-items: baseline; gap: 8px"><span style="font: 700 28px/1 var(--font-sans); color: var(--cream-100)">{{ servingCount }}</span><span style="font: 600 12px/1 var(--font-sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--olive-100)">servings to build</span></span>
+<span style="display: flex; align-items: baseline; gap: 8px"><span style="font: 700 28px/1 var(--font-sans); color: var(--cream-100)">{{ oldestLabel }}</span><span style="font: 600 12px/1 var(--font-sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--olive-100)">oldest wait</span></span>
+</span>
+</div>
+
+<div style="flex-grow: 1; overflow-y: auto; box-sizing: border-box; padding: 24px 28px">
+<sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+<div style="height: 100%; min-height: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center">
+<p style="margin: 0; font: 700 26px/1.25 var(--font-sans); letter-spacing: -0.015em; color: var(--text-heading)">All caught up</p>
+<p style="margin: 0; font: 400 16px/1.6 var(--font-sans); color: var(--text-muted)">New orders show up here the moment they print.</p>
+</div>
+</sc-if>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start">
+<sc-for list="{{ columns }}" as="col" hint-placeholder-count="3">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 20px">
+<sc-for list="{{ col.cards }}" as="o" hint-placeholder-count="2">
+<article style="box-sizing: border-box; border-radius: 16px; background: var(--surface-card); box-shadow: var(--shadow-card); display: flex; flex-direction: column; overflow: hidden">
+<header style="padding: 16px 18px 12px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-soft)">
+<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+<span style="font: 700 34px/1 var(--font-sans); letter-spacing: -0.02em; color: var(--text-heading)">#{{ o.ref }}</span>
+<span style="font: 600 16px/1.35 var(--font-sans); color: var(--ink-700); overflow-wrap: anywhere">{{ o.name }}</span>
+</span>
+<span style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0">
+<sc-if value="{{ o.isLate }}" hint-placeholder-val="{{ false }}"><x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Badge" tone="rust">{{ o.age }}</x-import></sc-if>
+<sc-if value="{{ o.isWaiting }}" hint-placeholder-val="{{ false }}"><x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Badge" tone="olive">{{ o.age }}</x-import></sc-if>
+<sc-if value="{{ o.isFresh }}" hint-placeholder-val="{{ true }}"><x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Badge" tone="moss">{{ o.age }}</x-import></sc-if>
+<span style="font: 400 13px/1 var(--font-sans); color: var(--text-muted)">{{ o.time }}</span>
+</span>
+</header>
+<ol style="margin: 0; padding: 4px 18px; list-style: none; display: flex; flex-direction: column">
+<sc-for list="{{ o.servings }}" as="s" hint-placeholder-count="2">
+<li style="padding: 12px 0; display: flex; gap: 12px; border-bottom: 1px dashed var(--border-soft)">
+<span style="width: 26px; height: 26px; flex-shrink: 0; border-radius: 999px; background: var(--olive-700); color: var(--cream-100); font: 700 12px/26px var(--font-sans); text-align: center">{{ s.num }}</span>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+<span style="font: 600 15px/26px var(--font-sans); color: var(--text-heading)">{{ s.headline }}</span>
+<ul aria-label="Flavors" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.flavors }}" as="f" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 4px; border-radius: 999px; background: var(--surface-page); display: flex; align-items: center; gap: 8px">
+<span style="min-width: 24px; height: 24px; box-sizing: border-box; padding: 0 6px; border-radius: 999px; background: var(--olive-900); color: var(--cream-100); font: 700 13px/24px var(--font-sans); text-align: center">{{ f.count }}</span>
+<span style="font: 500 14px/1 var(--font-sans); color: var(--text-heading); white-space: nowrap">{{ f.name }}</span>
+</li>
+</sc-for>
+</ul>
+<sc-if value="{{ s.hasToppings }}" hint-placeholder-val="{{ true }}">
+<ul aria-label="Toppings" style="margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ s.toppings }}" as="t" hint-placeholder-count="2">
+<li style="height: 32px; box-sizing: border-box; padding: 0 12px 0 8px; border-radius: 6px; border: 1.5px solid var(--olive-700); background: var(--surface-card); display: flex; align-items: center; gap: 6px">
+<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5f5b40" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+<span style="font: 600 14px/1 var(--font-sans); color: var(--olive-900); white-space: nowrap">{{ t }}</span>
+</li>
+</sc-for>
+</ul>
+</sc-if>
+<sc-if value="{{ s.noToppings }}" hint-placeholder-val="{{ false }}">
+<span style="align-self: flex-start; height: 32px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1.5px dashed var(--paper-300); display: flex; align-items: center; font: 500 14px/1 var(--font-sans); color: var(--text-muted)">No toppings</span>
+</sc-if>
+</div>
+</li>
+</sc-for>
+</ol>
+<div style="padding: 12px 18px 16px">
+<x-import component-from-global-scope="FionaSIceCreamDesignSystem_65d2e1.Button" variant="primary" size="md" on-click="{{ o.done }}" style="width: 100%">{{ o.doneLabel }}</x-import>
+</div>
+</article>
+</sc-for>
+</div>
+</sc-for>
+</div>
+</div>
+
+<sc-if value="{{ hasDone }}" hint-placeholder-val="{{ true }}">
+<div style="flex-shrink: 0; box-sizing: border-box; min-height: 68px; padding: 10px 28px; display: flex; align-items: center; gap: 14px; background: var(--paper-200); border-top: 1px solid var(--border-soft); overflow-x: auto">
+<h2 style="margin: 0; flex-shrink: 0; font: 600 12px/1.4 var(--font-sans); letter-spacing: 0.26em; text-transform: uppercase; color: var(--ink-700)">Recently done</h2>
+<sc-for list="{{ done }}" as="d" hint-placeholder-count="2">
+<span style="flex-shrink: 0; height: 44px; box-sizing: border-box; padding: 0 6px 0 16px; border-radius: 999px; background: var(--cream-100); display: flex; align-items: center; gap: 8px">
+<span style="font: 600 14px/1 var(--font-sans); color: var(--text-heading)">#{{ d.ref }}</span>
+<span style="font: 400 14px/1 var(--font-sans); color: var(--ink-700)">{{ d.name }} · done {{ d.time }}</span>
+<button type="button" aria-label="{{ d.undoLabel }}" onClick="{{ d.undo }}" style="min-height: 36px; padding: 0 12px; border: none; border-radius: 999px; background: transparent; color: var(--brand-strong); font: 600 11px/1 var(--font-sans); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">Undo</button>
+</span>
+</sc-for>
+</div>
+</sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1180,"height":820}}'>
+var FLAVORS = ['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip'];
+function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+function sv(counts, container, toppings) { return { counts: counts, container: container, toppings: toppings }; }
+function total(s) { return FLAVORS.reduce(function (n, f) { return n + (s.counts[f] || 0); }, 0); }
+function clock(ms) {
+  var d = new Date(ms); var h = d.getHours(); var m = String(d.getMinutes()).padStart(2, '0');
+  return ((h + 11) % 12 + 1) + ':' + m + (h < 12 ? ' AM' : ' PM');
+}
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    var now = Date.now();
+    var min = 60000;
+    // Orders are keyed by ticket ID; a reprint carries the same ID, so it never adds a second card.
+    this.state = {
+      now: now,
+      orders: [
+        { id: 't40', ref: 40, name: 'Happy Sprinkle', at: now - 12 * min, servings: [sv({ 'Chocolate': 2 }, 'Cup', ['Chocolate Sauce', 'Maraschino Cherries']), sv({ 'Vanilla': 1, 'Strawberry': 1 }, 'Cake Cone', [])] },
+        { id: 't41', ref: 41, name: 'Dana', at: now - 7 * min, servings: [sv({ 'Chocolate Chip': 1 }, 'Sugar Cone', ['Sliced Almonds'])] },
+        { id: 't42', ref: 42, name: 'Lucky Waffle', at: now - 4 * min, servings: [sv({ 'Vanilla': 3 }, 'Cup', ['Whipped cream', 'Caramel Sauce', 'Maraschino Cherries']), sv({ 'Strawberry': 1 }, 'Cup', []), sv({ 'Chocolate': 1, 'Chocolate Chip': 1 }, 'Sugar Cone', ['Gummy Bears']), sv({ 'Vanilla': 1 }, 'Cake Cone', [])] },
+        { id: 't43', ref: 43, name: 'Maria', at: now - 1 * min, servings: [sv({ 'Chocolate Chip': 2, 'Strawberry': 1 }, 'Sugar Cone', ['Whipped cream', 'Chocolate Sauce']), sv({ 'Vanilla': 1 }, 'Cup', []), sv({ 'Chocolate': 1, 'Vanilla': 1 }, 'Cake Cone', ['Gummy Bears'])] },
+        { id: 't44', ref: 44, name: 'Cozy Swirl', at: now - 0.5 * min, servings: [sv({ 'Strawberry': 2 }, 'Cake Cone', ['Sliced Almonds'])] }
+      ],
+      done: [
+        { id: 't39', ref: 39, name: 'Jolly Cone', at: now - 18 * min, doneAt: now - 2 * min, servings: [sv({ 'Vanilla': 1 }, 'Cup', [])] }
+      ]
+    };
+  }
+  componentDidMount() {
+    var self = this;
+    this.tick = setInterval(function () { self.setState({ now: Date.now() }); }, 30000);
+  }
+  componentWillUnmount() { clearInterval(this.tick); }
+  renderVals() {
+    var self = this;
+    var st = this.state;
+    var open = st.orders.slice().sort(function (a, b) { return a.at - b.at; });
+    var orders = open.map(function (o) {
+      var mins = Math.max(0, Math.floor((st.now - o.at) / 60000));
+      return {
+        ref: String(o.ref).padStart(4, '0'),
+        name: o.name,
+        time: clock(o.at),
+        age: mins < 1 ? 'Just now' : mins + ' min',
+        isFresh: mins < 5, isWaiting: mins >= 5 && mins < 10, isLate: mins >= 10,
+        doneLabel: 'Mark #' + String(o.ref).padStart(4, '0') + ' done',
+        servings: o.servings.map(function (s, i) {
+          return {
+            num: i + 1,
+            headline: plural(total(s), 'scoop') + ' · ' + s.container,
+            flavors: FLAVORS.filter(function (f) { return s.counts[f]; }).map(function (f) { return { count: s.counts[f], name: f }; }),
+            toppings: s.toppings,
+            hasToppings: s.toppings.length > 0,
+            noToppings: s.toppings.length === 0
+          };
+        }),
+        done: function () {
+          self.setState({
+            orders: st.orders.filter(function (x) { return x.id !== o.id; }),
+            done: [Object.assign({}, o, { doneAt: Date.now() })].concat(st.done).slice(0, 8)
+          });
+        }
+      };
+    });
+    var done = st.done.map(function (o) {
+      return {
+        ref: String(o.ref).padStart(4, '0'),
+        name: o.name,
+        time: clock(o.doneAt),
+        undoLabel: 'Undo done for #' + String(o.ref).padStart(4, '0'),
+        undo: function () {
+          var back = Object.assign({}, o); delete back.doneAt;
+          self.setState({
+            done: st.done.filter(function (x) { return x.id !== o.id; }),
+            orders: st.orders.concat([back])
+          });
+        }
+      };
+    });
+    // Pack cards, oldest first, into whichever column is shortest (leftmost on ties).
+    // In the app, use each card's measured height; here it is estimated from its content.
+    function estHeight(o) {
+      var h = 150;
+      o.servings.forEach(function (s) {
+        var fl = FLAVORS.filter(function (f) { return s.counts[f]; }).length;
+        var tp = Math.max(1, s.toppings.length);
+        h += 66 + Math.ceil(fl / 2) * 38 + Math.ceil(tp / 2) * 38;
+      });
+      return h;
+    }
+    var cols = [0, 1, 2].map(function () { return { cards: [], h: 0 }; });
+    orders.forEach(function (card, i) {
+      var t = 0;
+      for (var j = 1; j < cols.length; j++) if (cols[j].h < cols[t].h) t = j;
+      cols[t].cards.push(card);
+      cols[t].h += estHeight(open[i]) + 20;
+    });
+    var oldest = open.length ?Math.max(0, Math.floor((st.now - open[0].at) / 60000)) : 0;
+    return {
+      wmSize: 18,
+      columns: cols.map(function (c) { return { cards: c.cards }; }),
+      isEmpty: open.length === 0,
+      openCount: open.length,
+      servingCount: open.reduce(function (n, o) { return n + o.servings.length; }, 0),
+      oldestLabel: open.length ? (oldest < 1 ? '<1m' : oldest + 'm') : '—',
+      done: done,
+      hasDone: done.length > 0
+    };
+  }
+}
+</script>
+</body>
+</html>

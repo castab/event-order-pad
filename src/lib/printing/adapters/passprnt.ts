@@ -1,4 +1,4 @@
-import { formatTicket } from '../../tickets/format';
+import { prepTicketLayout } from '../../tickets/format';
 import { parseTicket, type OrderTicket } from '../../tickets/ticket';
 import type {
   PrintAttemptResult,
@@ -10,7 +10,6 @@ import type {
 const attemptKey = 'order_pad_attempt';
 // Conservative app limits below Android's documented 1 MB intent ceiling.
 const maxUriBytes = 128 * 1024;
-const maxLines = 240;
 
 export function passPrntSupport(
   userAgent: string,
@@ -35,10 +34,18 @@ function escapeHtml(text: string): string {
 
 /** Self-contained HTML is rasterized by PassPRNT for the IIIU's StarGraphic emulation. */
 export function receiptHtml(ticket: OrderTicket, reprint: boolean): string {
-  const lines = formatTicket(parseTicket(ticket), reprint);
-  if (lines.length > maxLines)
-    throw new Error('Receipt exceeds the application length limit');
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="format-detection" content="telephone=no"><style>html,body{margin:0;padding:0;width:576px;background:white;color:black}body{box-sizing:border-box;padding:8px;font:22px/30px monospace}.line{white-space:pre-wrap;overflow-wrap:anywhere}.heading,.reference,.reprint,.end{text-align:center;font-weight:bold}.reference,.reprint{font-size:36px;line-height:44px}.heading{font-size:26px;line-height:34px}.end{font-size:18px}</style></head><body>${lines.map((line) => `<div class="line ${line.role}">${escapeHtml(line.text) || '&#160;'}</div>`).join('')}</body></html>`;
+  const layout = prepTicketLayout(parseTicket(ticket), reprint);
+  const elements = layout.nodes
+    .map((node) => {
+      const position = `position:absolute;left:${node.x}px;top:${node.y}px;width:${node.width}px;`;
+      if (node.kind === 'text')
+        return `<div style="${position}height:${node.height}px;font-size:${node.size}px;line-height:${node.height}px;text-align:${node.align};font-weight:${node.bold ? 700 : 400};color:${node.inverse ? 'white' : 'black'};white-space:pre">${escapeHtml(node.text)}</div>`;
+      if (node.kind === 'box')
+        return `<div style="${position}height:${node.height}px;box-sizing:border-box;background:${node.filled ? 'black' : 'transparent'};border:${node.stroke}px solid black"></div>`;
+      return `<div style="${position}border-top:${node.stroke}px ${node.dashed ? 'dashed' : 'solid'} black"></div>`;
+    })
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="format-detection" content="telephone=no"><style>html,body{margin:0;padding:0;width:576px;background:white;color:black}body{position:relative;height:${layout.height}px;font-family:monospace}</style></head><body>${elements}</body></html>`;
 }
 
 function encode(value: string): string {

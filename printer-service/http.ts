@@ -1,8 +1,36 @@
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import type { Cups } from './cups';
 import { parseRequest, type Printing } from './printing';
+import { parseTicket } from '../src/lib/tickets/ticket';
+import { OrderNotFound, type Orders } from './orders';
+import { OrderStream } from './order-stream';
+import { trackingDisabledCode } from '../src/lib/orders/features';
+
+class BadRequest extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > 131072) throw new BadRequest(413, 'Request too large.');
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new BadRequest(400, 'Invalid JSON request.');
+  }
+}
+
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -13,6 +41,7 @@ const mime: Record<string, string> = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
 };
 
 export function createApp({
@@ -21,13 +50,18 @@ export function createApp({
   root,
   cups,
   printing,
+  orders,
+  trackingEnabled = true,
 }: {
   origin: URL;
   port: number;
   root: string;
   cups: Pick<Cups, 'check' | 'queue'>;
   printing: Pick<Printing, 'print'>;
+  orders: Pick<Orders, 'upsert' | 'list' | 'changeStatus' | 'subscribe'>;
+  trackingEnabled?: boolean;
 }) {
+  const streams = new Set<OrderStream>();
   const server = createServer(async (req, res) => {
     const json = (status: number, body: unknown) => {
       res.writeHead(status, {
@@ -46,7 +80,128 @@ export function createApp({
       return;
     }
     try {
-      const path = new URL(req.url ?? '/', origin).pathname;
+      const url = new URL(req.url ?? '/', origin);
+      const path = url.pathname;
+      if (
+        req.method === 'POST' &&
+        (path === '/api/print' ||
+          path === '/api/orders' ||
+          path.startsWith('/api/orders/'))
+      ) {
+        if (
+          req.headers.origin !== origin.origin ||
+          req.headers['content-type']?.split(';')[0] !== 'application/json'
+        ) {
+          json(403, { error: 'Use the configured same-origin application.' });
+          return;
+        }
+      }
+      if (req.method === 'GET' && path === '/api/features') {
+        json(200, { trackingEnabled });
+        return;
+      }
+      if (
+        !trackingEnabled &&
+        (path === '/api/orders' || path.startsWith('/api/orders/'))
+      ) {
+        json(404, {
+          error: 'Order tracking is disabled.',
+          code: trackingDisabledCode,
+        });
+        return;
+      }
+      if (req.method === 'GET' && path === '/api/orders/events') {
+        if (
+          (req.headers.origin && req.headers.origin !== origin.origin) ||
+          req.headers['sec-fetch-site'] === 'cross-site'
+        ) {
+          json(403, { error: 'Use the configured same-origin application.' });
+          return;
+        }
+        const stream = new OrderStream(res, () => streams.delete(stream));
+        streams.add(stream);
+        try {
+          stream.start(await orders.subscribe(stream.snapshot));
+        } catch {
+          // No streaming headers have been sent if journal loading failed.
+          if (!res.destroyed)
+            json(503, {
+              error:
+                'Order journal unavailable. Preserve the journal and restore service storage.',
+            });
+          if (res.destroyed) stream.dispose();
+        }
+        return;
+      }
+      if (req.method === 'GET' && path === '/api/orders') {
+        const status = url.searchParams.get('status');
+        if (
+          (status !== null && status !== 'open' && status !== 'done') ||
+          url.searchParams.getAll('status').length > 1
+        )
+          throw new BadRequest(400, 'Status must be open or done.');
+        try {
+          json(200, { orders: await orders.list(status ?? undefined) });
+        } catch {
+          json(503, {
+            error:
+              'Order journal unavailable. Preserve the journal and restore service storage.',
+          });
+        }
+        return;
+      }
+      if (req.method === 'POST' && path === '/api/orders') {
+        let ticket;
+        const body = await readJson(req);
+        try {
+          ticket = parseTicket(body);
+        } catch {
+          throw new BadRequest(400, 'Invalid order ticket.');
+        }
+        try {
+          const saved = await orders.upsert(ticket);
+          json(saved.created ? 201 : 200, saved);
+        } catch {
+          json(503, {
+            error:
+              'Could not save the order. Retry the order update; do not resend a print.',
+          });
+        }
+        return;
+      }
+      const transition = /^\/api\/orders\/([^/]+)\/(done|reopen)$/.exec(path);
+      if (req.method === 'POST' && transition) {
+        await readJson(req);
+        let id: string;
+        try {
+          id = decodeURIComponent(transition[1]);
+        } catch {
+          throw new BadRequest(400, 'Invalid order ID.');
+        }
+        if (
+          !id ||
+          Array.from(id).length > 100 ||
+          /[\p{Cc}\u2028\u2029]/u.test(id)
+        )
+          throw new BadRequest(400, 'Invalid order ID.');
+        try {
+          json(
+            200,
+            await orders.changeStatus(
+              id,
+              transition[2] === 'done' ? 'done' : 'open',
+            ),
+          );
+        } catch (error) {
+          json(error instanceof OrderNotFound ? 404 : 503, {
+            error:
+              error instanceof OrderNotFound
+                ? 'Order not found.'
+                : 'Could not save order status. Refresh the queue before trying again.',
+          });
+        }
+        return;
+      }
       if (req.method === 'GET' && path === '/api/printer') {
         try {
           await cups.check();
@@ -65,33 +220,24 @@ export function createApp({
         return;
       }
       if (req.method === 'POST' && path === '/api/print') {
-        if (
-          req.headers.origin !== origin.origin ||
-          req.headers['content-type']?.split(';')[0] !== 'application/json'
-        ) {
-          json(403, { error: 'Use the configured same-origin application.' });
-          return;
-        }
-        const chunks: Buffer[] = [];
-        let length = 0;
-        for await (const chunk of req) {
-          length += chunk.length;
-          if (length > 131072) {
-            json(413, { error: 'Request too large.' });
-            return;
-          }
-          chunks.push(chunk);
-        }
         let request;
         try {
-          request = parseRequest(
-            JSON.parse(Buffer.concat(chunks).toString('utf8')),
-          );
-        } catch {
+          request = parseRequest(await readJson(req));
+        } catch (error) {
+          if (error instanceof BadRequest) throw error;
           json(400, {
             error: 'Invalid ticket or attempt metadata. No data sent.',
           });
           return;
+        }
+        if (trackingEnabled && !request.reprint) {
+          try {
+            await orders.upsert(request.ticket);
+          } catch {
+            console.warn(
+              'Order journal update failed; the browser outbox will retry without resending the print.',
+            );
+          }
         }
         json(200, {
           attemptId: request.attemptId,
@@ -106,12 +252,18 @@ export function createApp({
         json(404, { error: 'Not found.' });
         return;
       }
-      const file = await realpath(
+      let file = await realpath(
         resolve(
           root,
           `.${decodeURIComponent(path === '/' ? '/index.html' : path)}`,
         ),
       );
+      if (!file.startsWith(`${root}${sep}`)) {
+        json(404, { error: 'Not found.' });
+        return;
+      }
+      if ((await stat(file)).isDirectory())
+        file = await realpath(resolve(file, 'index.html'));
       if (!file.startsWith(`${root}${sep}`) || !(await stat(file)).isFile()) {
         json(404, { error: 'Not found.' });
         return;
@@ -127,6 +279,10 @@ export function createApp({
       });
       res.end(req.method === 'HEAD' ? undefined : bytes);
     } catch (error) {
+      if (error instanceof BadRequest) {
+        json(error.status, { error: error.message });
+        return;
+      }
       if (!res.headersSent)
         json((error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 500, {
           error:
@@ -135,6 +291,11 @@ export function createApp({
       else res.end();
     }
   });
+  const close = server.close;
+  server.close = function (...args: Parameters<typeof close>) {
+    for (const stream of streams) stream.dispose();
+    return close.apply(this, args);
+  };
   server.requestTimeout = 65000;
   return server;
 }

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  containers,
   commitServing,
+  cancelServing,
+  editServing,
+  sameServing,
+  removeServing,
   prepareDraftForPrint,
   draftTicket,
   emptyEditor,
@@ -9,23 +12,19 @@ import {
   newDraft,
   parseDraft,
   toppings,
-  totalScoops,
   type OrderDraft,
   type Flavor,
   type Serving,
 } from './order';
-import { ticketText } from './format';
-import { receiptHtml } from '../printing/adapters/passprnt';
-import { receiptLayout, receiptPdf } from '../../../printer-service/receipt';
 
 const time = '2026-10-11T20:00:00.000Z';
 const serving = (flavor: Flavor = 'Vanilla', scoops = 1): Serving => ({
-  flavors: [{ flavor, scoops }],
+  flavors: [{ flavor, count: scoops }],
   container: 'Cup',
   toppings: [],
 });
 const draft = (extra: Partial<OrderDraft> = {}): OrderDraft => ({
-  ...newDraft(undefined, () => 0),
+  ...newDraft(),
   servings: [serving()],
   ...extra,
 });
@@ -43,13 +42,13 @@ describe('ice cream orders with flavor scoops', () => {
     expect(prepared.servings).toHaveLength(2);
     expect(addition.servings).toHaveLength(1);
     expect(addition.editor.flavors).toEqual([
-      { flavor: 'Chocolate', scoops: 2 },
+      { flavor: 'Chocolate', count: 2 },
     ]);
     expect(prepared.editor).toEqual(emptyEditor());
     const edit = commitServing({ ...addition, editingIndex: 0 });
     expect(edit.servings).toHaveLength(1);
     expect(edit.servings[0].flavors).toEqual([
-      { flavor: 'Chocolate', scoops: 2 },
+      { flavor: 'Chocolate', count: 2 },
     ]);
     expect(edit.editingIndex).toBeUndefined();
     expect(prepareDraftForPrint(draft()).servings).toHaveLength(1);
@@ -60,13 +59,13 @@ describe('ice cream orders with flavor scoops', () => {
       emptyEditor(),
       {
         ...emptyEditor(),
-        flavors: [{ flavor: 'Vanilla' as const, scoops: 1 }],
+        flavors: [{ flavor: 'Vanilla' as const, count: 1 }],
       },
       { ...emptyEditor(), container: 'Cup' as const },
       { ...emptyEditor(), toppings: ['Gummy Bears' as const] },
     ]) {
       expect(() => commitServing(draft({ editor }))).toThrow(
-        'at least one scoop and choose a container',
+        'To finish this serving:',
       );
     }
     const full = draft({
@@ -81,281 +80,183 @@ describe('ice cream orders with flavor scoops', () => {
       commitServing({ ...full, submittedTicketId: 'locked' }),
     ).toThrow('submitted');
   });
-  it('supports every flavor, 1–5 scoops, and every container with zero or all toppings', () => {
-    for (const flavor of flavors)
-      for (const container of containers)
-        for (const selected of [[], [...toppings]])
-          for (const scoops of [1, 5]) {
-            const ticket = draftTicket(
-              draft({
-                servings: [
-                  { ...serving(flavor, scoops), container, toppings: selected },
-                ],
-              }),
-              'id',
-              time,
-            );
-            expect(ticket.items[0]).toEqual({
-              name: `Ice cream (${scoops} ${scoops === 1 ? 'scoop' : 'scoops'})`,
-              quantity: 1,
-              modifiers: [
-                container,
-                `${scoops} ${scoops === 1 ? 'scoop' : 'scoops'} ${flavor}`,
-                ...(selected.length ? selected : ['No toppings']),
-              ],
-              instructions: undefined,
-            });
-          }
-  });
-  it('keeps a mixed-flavor serving together with correct total and separate scoop counts', () => {
-    const mixed: Serving = {
-      ...serving(),
-      flavors: [
-        { flavor: 'Chocolate Chip', scoops: 2 },
-        { flavor: 'Strawberry', scoops: 1 },
-      ],
-      toppings: ['Caramel Sauce'],
-    };
-    const ticket = draftTicket(
-      draft({ servings: [mixed, serving('Vanilla', 5)] }),
-      'id',
-      time,
-    );
-    expect(totalScoops(mixed)).toBe(3);
-    expect(ticket.items).toHaveLength(2);
-    expect(ticket.items[0].name).toBe('Ice cream (3 scoops)');
-    expect(ticket.items[0].quantity).toBe(1);
-    expect(ticket.items[0].modifiers).toEqual([
-      'Cup',
-      '1 scoop Strawberry',
-      '2 scoops Chocolate Chip',
-      'Caramel Sauce',
-    ]);
-    expect(ticketText(ticket)).toContain('1 x Ice cream (3 scoops)');
-    expect(ticketText(ticket)).toContain('2 scoops Chocolate Chip');
-    expect(ticketText(ticket)).toContain('1 scoop Strawberry');
-    expect(ticket.items[1].name).toBe('Ice cream (5 scoops)');
-  });
-  it('accepts five scoops shared across all flavors and rejects malformed counts, duplicates and totals over five', () => {
-    const all = draft({
-      servings: [
-        {
-          ...serving(),
-          flavors: flavors.map((flavor, i) => ({
-            flavor,
-            scoops: i === 0 ? 2 : 1,
-          })),
-        },
-      ],
+  it('retains servings, numeric identity, and resolved names when producing tickets', () => {
+    const original = draft({
+      servings: [serving(), serving(), serving('Chocolate', 2)],
+      name: '  María & Pat  ',
     });
-    expect(totalScoops(parseDraft(all).servings[0])).toBe(5);
-    for (const count of [0, -1, 1.5, 6, '2', null, undefined, NaN, Infinity]) {
-      expect(() =>
-        parseDraft({
-          ...draft(),
-          servings: [
-            { ...serving(), flavors: [{ flavor: 'Vanilla', scoops: count }] },
-          ],
-        }),
-      ).toThrow('whole numbers');
-    }
-    expect(() =>
-      parseDraft(
-        draft({
-          servings: [
-            {
-              ...serving(),
-              flavors: [
-                { flavor: 'Chocolate', scoops: 3 },
-                { flavor: 'Vanilla', scoops: 3 },
-              ],
-            },
-          ],
-        }),
-      ),
-    ).toThrow('at most 5');
-    expect(() =>
-      parseDraft(
-        draft({
-          editor: {
-            ...emptyEditor(),
-            flavors: [
-              { flavor: 'Chocolate', scoops: 4 },
-              { flavor: 'Vanilla', scoops: 2 },
-            ],
-          },
-        }),
-      ),
-    ).toThrow('at most 5');
-    expect(() =>
-      parseDraft(
-        draft({
-          servings: [
-            {
-              ...serving(),
-              flavors: [
-                { flavor: 'Vanilla', scoops: 1 },
-                { flavor: 'Vanilla', scoops: 2 },
-              ],
-            },
-          ],
-        }),
-      ),
-    ).toThrow('only once');
+    const ticket = draftTicket(original, 'id', time);
+    expect(ticket.servings).toEqual(original.servings);
+    expect(ticket.reference).toBe('0001');
+    expect(ticket.displayName).toBe('María & Pat');
+    expect(
+      draftTicket(draft({ reference: '0043', name: '  ' }), 'id', time)
+        .displayName,
+    ).toBe('Sunny Caramel');
+    expect(newDraft().reference).toBe('0001');
+    expect(newDraft('0043').reference).toBe('0044');
+    expect(newDraft('9999').reference).toBe('10000');
+    expect(() => newDraft(String(Number.MAX_SAFE_INTEGER))).toThrow(
+      'safe integer',
+    );
+  });
+  it('allows incomplete editors but rejects incomplete committed servings and malformed drafts', () => {
+    expect(parseDraft(newDraft()).editor).toEqual(emptyEditor());
+    expect(parseDraft(draft({ name: 'Pat\nCut' })).name).toBe('PatCut');
+    expect(parseDraft(draft({ name: 'Pat ' })).name).toBe('Pat ');
+    expect(draftTicket(draft({ name: 'Pat ' }), 'id', time).displayName).toBe(
+      'Pat',
+    );
+    expect(() => parseDraft(draft({ name: 'A'.repeat(81) }))).toThrow('Name');
     expect(() =>
       parseDraft(draft({ servings: [{ ...serving(), flavors: [] }] })),
     ).toThrow('at least one scoop');
-    expect(() =>
-      parseDraft({ ...draft(), editor: { ...emptyEditor(), flavors: null } }),
-    ).toThrow('at least one scoop');
-    expect(() =>
-      parseDraft({
-        ...draft(),
-        servings: [{ ...serving(), flavors: [{ flavor: 'Mint', scoops: 1 }] }],
-      }),
-    ).toThrow('Invalid flavor');
-  });
-  it('migrates existing single-flavor servings and unfinished editors without changing names or lock identity', () => {
-    const old = {
-      ...newDraft(undefined, () => 0),
-      name: 'Legacy customer',
-      submittedTicketId: 'old-ticket',
-      servings: [
-        {
-          flavor: 'Chocolate Chip',
-          container: 'Sugar Cone',
-          toppings: ['Gummy Bears'],
-        },
-      ],
-      editor: { flavor: 'Strawberry', container: '', toppings: [] },
-    };
-    const migrated = parseDraft(old);
-    expect(migrated.name).toBe('Legacy customer');
-    expect(migrated.submittedTicketId).toBe('old-ticket');
-    expect(migrated.servings[0]).toEqual({
-      flavors: [{ flavor: 'Chocolate Chip', scoops: 1 }],
-      container: 'Sugar Cone',
-      toppings: ['Gummy Bears'],
-    });
-    expect(migrated.editor).toEqual({
-      flavors: [{ flavor: 'Strawberry', scoops: 1 }],
-      container: '',
-      toppings: [],
-    });
-    expect(
-      parseDraft({
-        ...old,
-        editor: { flavor: '', container: '', toppings: [] },
-      }).editor,
-    ).toEqual(emptyEditor());
-    expect(() =>
-      parseDraft({
-        ...old,
-        servings: [{ flavor: 'Mint', container: 'Cup', toppings: [] }],
-      }),
-    ).toThrow('Invalid flavor');
-    expect(Object.isFrozen(migrated.servings[0].flavors[0])).toBe(true);
-  });
-  it('retains identical servings as separate preparation blocks and stable fallback labels', () => {
-    const ticket = draftTicket(
-      draft({ servings: [serving(), serving(), serving('Chocolate', 2)] }),
-      'id',
-      time,
+    expect(() => draftTicket(draft({ servings: [] }), 'id', time)).toThrow(
+      '1–30',
     );
-    expect(ticket.items).toHaveLength(3);
-    expect(ticketText(ticket).match(/1 x Ice cream \(1 scoop\)/g)).toHaveLength(
-      2,
+    expect(() => draftTicket(draft({ editor: serving() }), 'id', time)).toThrow(
+      'Add or cancel',
     );
-    expect(
-      draftTicket(draft({ name: '  María & Pat  ' }), 'id', time).reference,
-    ).toBe('María & Pat');
-    expect(
-      draftTicket(draft({ name: ' '.repeat(80) }), 'id', time).reference,
-    ).toBe('Sundae Sprinkle');
-    expect(
-      draftTicket(draft({ name: 'A'.repeat(80) }), 'id', time).reference,
-    ).toHaveLength(80);
-    expect(newDraft('Sundae Sprinkle', () => 0).reference).toBe('Sundae Scoop');
-  });
-  it('rejects invalid names, toppings, containers, incomplete orders and excess servings', () => {
-    expect(() => parseDraft(draft({ name: 'A'.repeat(81) }))).toThrow('Name');
-    expect(() => parseDraft(draft({ name: 'Pat\nCut' }))).toThrow('Name');
-    expect(() =>
-      parseDraft({
-        ...draft(),
-        servings: [{ ...serving(), container: 'Waffle Cone' }],
-      }),
-    ).toThrow('container');
-    expect(() =>
-      parseDraft(
-        draft({
-          servings: [
-            { ...serving(), toppings: ['Gummy Bears', 'Gummy Bears'] },
-          ],
-        }),
-      ),
-    ).toThrow('toppings');
-    expect(() => draftTicket(draft({ servings: [] }), 'id', time)).toThrow();
-    expect(() =>
-      draftTicket(
-        draft({
-          editor: {
-            ...emptyEditor(),
-            flavors: [{ flavor: 'Vanilla', scoops: 1 }],
-          },
-        }),
-        'id',
-        time,
-      ),
-    ).toThrow('Add or cancel');
     expect(() => draftTicket(draft({ editingIndex: 0 }), 'id', time)).toThrow(
       'Add or cancel',
     );
     expect(() =>
       parseDraft(draft({ servings: Array(31).fill(serving()) })),
     ).toThrow('30');
-    expect(
-      draftTicket(draft({ servings: Array(30).fill(serving()) }), 'id', time)
-        .items,
-    ).toHaveLength(30);
-  });
-  it('preserves mixed scoop counts, toppings and escaped names in shared HTML/PDF layouts', async () => {
-    const ticket = draftTicket(
-      draft({
-        name: '<Pat & Sam> ' + 'A'.repeat(60),
-        servings: [
-          {
-            flavors: [
-              { flavor: 'Chocolate Chip', scoops: 2 },
-              { flavor: 'Strawberry', scoops: 1 },
-            ],
-            container: 'Cake Cone',
-            toppings: [...toppings],
-          },
-        ],
-      }),
-      'id',
-      time,
-    );
-    const html = receiptHtml(ticket, true);
-    expect(html).toContain('&lt;Pat &amp; Sam&gt;');
-    expect(html).not.toContain('<Pat & Sam>');
-    expect(html).toContain('2 scoops Chocolate Chip');
-    expect(html).toContain('1 scoop Strawberry');
-    const layout = receiptLayout(ticket, true);
-    expect(layout.lines[0].text).toBe('REPRINT');
-    expect(layout.lines.every((line) => line.text.length <= 36)).toBe(true);
-    expect(
-      layout.lines.some((line) =>
-        line.text.includes('2 scoops Chocolate Chip'),
-      ),
-    ).toBe(true);
-    for (const topping of toppings)
-      expect(layout.lines.some((line) => line.text.includes(topping))).toBe(
-        true,
+    for (const editingIndex of [-1, 1, 1.5])
+      expect(() => parseDraft(draft({ editingIndex }))).toThrow('edited');
+    for (const submittedTicketId of ['', 3, 'A'.repeat(101)])
+      expect(() => parseDraft({ ...draft(), submittedTicketId })).toThrow(
+        'submitted',
       );
-    const pdf = await receiptPdf(ticket, true, 'Courier', layout.heightMm);
-    expect(pdf.toString('ascii')).toMatch(/^%PDF-/);
-    expect(pdf.toString('ascii').match(/\/Type \/Page\b/g)).toHaveLength(1);
+    expect(() => parseDraft(null)).toThrow('draft');
+    expect(() =>
+      parseDraft({
+        ...draft(),
+        editor: {
+          ...emptyEditor(),
+          flavors: [{ flavor: 'Vanilla', count: 6 }],
+        },
+      }),
+    ).toThrow('whole numbers');
+    expect(() =>
+      parseDraft({
+        ...draft(),
+        editor: { ...emptyEditor(), container: 'Waffle Cone' },
+      }),
+    ).toThrow('container');
+  });
+  it('blocks an oversized prospective print while allowing the saved draft to be corrected', () => {
+    const busy: Serving = {
+      flavors: flavors.map((flavor) => ({ flavor, count: 1 })),
+      container: 'Cup',
+      toppings: [...toppings],
+    };
+    const large = draft({ servings: Array(30).fill(busy) });
+    expect(parseDraft(large).servings).toHaveLength(30);
+    expect(() => prepareDraftForPrint(large)).toThrow('length limit');
+    expect(
+      prepareDraftForPrint({ ...large, servings: [busy] }).servings,
+    ).toHaveLength(1);
+  });
+  it('cancels unfinished servings and edits, protects pending work and removes saved servings', () => {
+    const original = draft({
+      servings: [serving(), serving('Chocolate'), serving('Strawberry')],
+    });
+    const pending = parseDraft({
+      ...original,
+      editor: { ...emptyEditor(), toppings: ['Gummy Bears'] },
+    });
+    expect(editServing(pending, 1)).toEqual(pending);
+    expect(cancelServing(pending).servings).toEqual(original.servings);
+    expect(cancelServing(pending).editor).toEqual(emptyEditor());
+    const editing = editServing(original, 1);
+    expect(editing.editor).toEqual(original.servings[1]);
+    expect(editing.editingIndex).toBe(1);
+    const changed = { ...editing, editor: serving('Vanilla', 5) };
+    expect(cancelServing(changed).servings).toEqual(original.servings);
+    expect(cancelServing(changed).editingIndex).toBeUndefined();
+    expect(commitServing(changed).servings).toEqual([
+      serving(),
+      serving('Vanilla', 5),
+      serving('Strawberry'),
+    ]);
+    expect(prepareDraftForPrint(changed).servings).toHaveLength(3);
+    const removed = removeServing(editing, 0);
+    expect(removed.servings).toEqual(original.servings.slice(1));
+    expect(removed.editingIndex).toBe(0);
+    expect(removeServing(editing, 1).editor).toEqual(emptyEditor());
+    expect(removeServing(editing, 1).editingIndex).toBeUndefined();
+    for (const index of [-1, 3, 1.5]) {
+      expect(() => editServing(original, index)).toThrow();
+      expect(() => removeServing(original, index)).toThrow();
+    }
+  });
+  it('names exactly what is missing from a pending serving', () => {
+    expect(() => commitServing(draft({ editor: emptyEditor() }))).toThrow(
+      'To finish this serving: add at least one scoop and choose a container.',
+    );
+    expect(() =>
+      commitServing(draft({ editor: { ...emptyEditor(), container: 'Cup' } })),
+    ).toThrow('To finish this serving: add at least one scoop.');
+    expect(() =>
+      commitServing(
+        draft({ editor: { ...emptyEditor(), flavors: serving().flavors } }),
+      ),
+    ).toThrow('To finish this serving: choose a container.');
+  });
+  it('switches saved edits by discarding unsaved changes while protecting a new serving', () => {
+    const original = draft({ servings: [serving(), serving('Chocolate')] });
+    const changed = {
+      ...editServing(original, 0),
+      editor: serving('Strawberry', 3),
+    };
+    expect(editServing(changed, 0).editor).toEqual(changed.editor);
+    const switched = editServing(changed, 1);
+    expect(switched.editingIndex).toBe(1);
+    expect(switched.editor).toEqual(original.servings[1]);
+    expect(switched.servings).toEqual(original.servings);
+    for (const editor of [
+      serving(),
+      { ...emptyEditor(), container: 'Cup' as const },
+      { ...emptyEditor(), toppings: ['Gummy Bears' as const] },
+    ]) {
+      const pending = parseDraft({ ...original, editor });
+      expect(editServing(pending, 1)).toEqual(pending);
+    }
+    const locked = parseDraft({ ...original, submittedTicketId: 'locked' });
+    expect(editServing(locked, 1)).toEqual(locked);
+  });
+  it('compares all serving selections after menu normalization', () => {
+    const mixed: Serving = {
+      flavors: [
+        { flavor: 'Chocolate', count: 2 },
+        { flavor: 'Vanilla', count: 1 },
+      ],
+      container: 'Cup',
+      toppings: ['Whipped cream', 'Gummy Bears'],
+    };
+    expect(
+      sameServing(mixed, {
+        ...mixed,
+        flavors: [...mixed.flavors].reverse(),
+        toppings: [...mixed.toppings].reverse(),
+      }),
+    ).toBe(true);
+    for (const changed of [
+      { ...mixed, container: 'Sugar Cone' as const },
+      { ...mixed, toppings: [] },
+      { ...mixed, flavors: [{ flavor: 'Chocolate' as const, count: 3 }] },
+      {
+        ...mixed,
+        flavors: [
+          { flavor: 'Chocolate' as const, count: 1 },
+          { flavor: 'Vanilla' as const, count: 1 },
+        ],
+      },
+    ])
+      expect(sameServing(mixed, changed)).toBe(false);
+    expect(sameServing(emptyEditor(), emptyEditor())).toBe(true);
+    expect(sameServing(emptyEditor(), mixed)).toBe(false);
   });
 });

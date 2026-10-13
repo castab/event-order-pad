@@ -1,10 +1,44 @@
 # Order Pad verification
 
+A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
+
+## SvelteKit 3 migration — 2026-10-12
+
+Upgrade from SvelteKit 2 to SvelteKit 3.0.1 (Vite 8.3.4, vite-plugin-svelte 7.3.1, adapter-static 4.0.0, TypeScript 6.0.3) on top of `main` at `0df5798`, uncommitted at the time of the run. After `sv migrate sveltekit-3`, the manual steps were: the service worker moved to `src/service-worker/index.ts` with its own `tsconfig.json` and reads `version` from `$app/env` and the precache list from `$app/manifest` through `$app/paths`; the root `tsconfig.json` excludes it, and `npm run check` now type-checks it separately; the obsolete `cookie` override was removed so SvelteKit gets the `cookie` 2.x it declares; the documented Node floor is now 22.17 (SvelteKit 3 requires it). Checks ran locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.
+
+| Check                 | Result                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| npm run check         | Passed; svelte-check 0 errors / 0 warnings, printer-service and service-worker `tsc` clean |
+| npm run lint          | Passed                                                                                     |
+| npm test              | Passed; 187 tests across 19 files                                                          |
+| npm run build         | Passed                                                                                     |
+| npm run build:printer | Passed                                                                                     |
+| npm run test:e2e      | Passed; 120 Chromium runs                                                                  |
+
+Manual check against `vite preview` in Chromium: the worker registered and took control, its cache held 31 root-absolute entries (18 immutable assets, 11 static files, `/` and `/queue/`), and with the server stopped `/queue/` still loaded from the cache while `/api/features` failed on the network instead of being served from it. The immutable list gains SvelteKit 3’s new `payload` entry. No print job was sent, and no hardware result is claimed.
+
+## Current branch check — 2026-10-12
+
+Documentation pass on `design/order-builder` at `1eda67b`. This branch adds the phase 1–3 work since the entries below: schema 2 structured tickets and the one-time v1 browser reset, the redesigned prep ticket, the responsive order builder, the persistent build queue with SSE, the `ORDER_PAD_TRACKING_ENABLED` flag, automatic service-worker updates, and the Rainbow and Chocolate Sprinkles toppings. All checks were run locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.
+
+| Check                 | Result                                                                                    |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| npm run check         | Passed; svelte-check 0 errors / 0 warnings, printer-service `tsc` clean                   |
+| npm run lint          | Passed                                                                                    |
+| npm test              | Passed; 187 tests across 19 files                                                         |
+| npm run build         | Passed                                                                                    |
+| npm run build:printer | Passed                                                                                    |
+| npm run test:e2e      | Passed; 120 Chromium runs (builder spec at 390×844, 820×1180, 1280×800, plus queue specs) |
+
+No print job was sent, and no hardware result is newly claimed. Physical acceptance of the redesigned prep ticket, REPRINT and recovery flows remains open; follow the checklist in [linux-printing.md](linux-printing.md).
+
 ## Mixed flavors and scoop counts — 2026-10-11
 
 Each serving now has a list of flavors with positive integer scoop counts, capped at **5 scoops total per cup or cone**. Touch-sized +/− controls start at zero, show each flavor’s count and the shared total, disable additions at five, and remove a flavor when its count reaches zero. Container and toppings apply to the whole serving. Printing still includes the complete current serving or edit automatically.
 
 New tickets keep one item per serving (`quantity: 1`), with a heading such as **Ice cream (3 scoops)** and separate modifier lines for **2 scoops Chocolate Chip**, **1 scoop Strawberry**, the container, and toppings. The existing ticket API and receipt renderers need no schema change. Saved single-flavor drafts convert to one-scoop portions during recovery; submitted tickets remain unchanged for deliberate reprinting. No IndexedDB version bump or data clearing is needed.
+
+> Superseded: the later phase 1 domain upgrade replaced this `items`/`quantity` shape with schema 2 `servings` and reset v1 browser data once (IndexedDB version 2). See README.
 
 | Check                 | Result                                                            |
 | --------------------- | ----------------------------------------------------------------- |
@@ -22,7 +56,7 @@ Responsive checks at 360×780, 390×844, 768×1024, and 1024×768 report no hori
 
 ## USB-only ordering UX — 2026-10-11
 
-Implemented Order and Printer settings tabs, automatic use of the server’s local USB queue, live startup/readiness checks, and read-only queue details. Printer selection, simulation controls, recurring setup acknowledgment, and PassPRNT launching are removed from the ordering interface. Historical adapters and stored records remain supported.
+Implemented Order and Printer settings tabs, automatic use of the server’s local USB queue, live startup/readiness checks, and read-only queue details. Printer selection, simulation controls, recurring setup acknowledgment, and PassPRNT launching are removed from the ordering interface. Historical adapters remain available. The later phase 1 domain upgrade resets v1 browser records once, as documented in README.
 
 Print includes a complete pending serving or edit; incomplete selections block submission without dropping them. An accepted result and the next empty draft save in one IndexedDB transaction. Older accepted locked drafts advance safely on reload. Failed/unknown outcomes remain locked for deliberate recovery. Reprinting the previous ticket preserves another active draft. Flavor and container remain unselected by default.
 
@@ -43,9 +77,9 @@ Screenshots at 390×844, 768×1024, and 1024×768 show no horizontal overflow an
 
 Both production outputs have been rebuilt. The existing station service was restarted with its unchanged launcher/configuration after confirming no pending CUPS jobs and no unfinished journal intents. Live Tailscale HTTPS verification returned `ready: true`, `queue: Star_TSP143`, and the new Order/Printer settings tabs with no printer selector. No print job was sent. Cached browser tabs must close/reopen to activate the updated app shell. Follow the updated [physical acceptance checklist](linux-printing.md) on the printer; this UX update’s receipt/cut and recovery behavior have not yet been physically verified. Before committing, `git diff --check` passed using a temporary extracted Ubuntu Git package; Git is not installed system-wide.
 
-## Milestone 2 — order builder (2026-10-11)
+## Order builder — 2026-10-11
 
-Implemented explicit flavor/container selection, any combination of six toppings, separately configured servings with add/edit/remove, optional names and stable two-word fallback labels. New orders and their first intents commit atomically; serialized draft writes restore unfinished editor selections independently from the latest submitted receipt. Reprints preserve the original ticket while a new draft is being built. Existing IndexedDB version/records and both real printer routes are retained.
+Implemented explicit flavor/container selection, any combination of eight toppings, separately configured servings with add/edit/remove, optional names and stable two-word fallback labels. New orders and their first intents commit atomically; serialized draft writes restore unfinished editor selections independently from the latest submitted receipt. Reprints preserve the original ticket while a new draft is being built. Existing IndexedDB version/records and both real printer routes are retained.
 
 | Check                 | Result                                                            |
 | --------------------- | ----------------------------------------------------------------- |
@@ -64,7 +98,7 @@ Browser coverage adds named multi-serving construction, edits/removal, incomplet
 
 The order-builder receipts have not yet been physically accepted on the owner's printer. Follow the named-order, unnamed-order and REPRINT checklist in [Linux printing](linux-printing.md). The earlier phone-to-USB sample success below remains valid evidence for the transport, not acceptance of the new builder. Rebuild/restart the service and reopen cached browser tabs together so client and service both accept the longer name limit.
 
-## Milestone 1 — historical transport checks
+## Printing transport foundation — 2026-10-09 to 2026-10-11
 
 Updated **2026-10-11** for **TSP143IIIU / Galaxy S10e / Android 12**, adding the owner-selected **Mint 22.3 Cinnamon 64-bit** USB host. Local implementation checks run on Windows, Node 26.9.0, npm 11.19.1, Playwright 1.64.0 / Chromium 156.0.8078.4. The implementation agent has no physical printer access.
 
@@ -79,7 +113,7 @@ Updated **2026-10-11** for **TSP143IIIU / Galaxy S10e / Android 12**, adding the
 | npm audit             | 0 vulnerabilities                                     |
 | git diff --check      | Passed                                                |
 
-Unit checks cover immutable tickets, modifiers/instructions, long notes, URI/HTML escaping, USB parameters, partial cut, disabled retry pop-up, unsupported runtimes, structured callback outcomes, intent before handoff, overlap prevention, callback correlation, immutable final outcomes, storage failures and unknown recovery without resend. The old IV adapter and SDK tests were replaced by IIIU PassPRNT coverage; historical IV attempts remain readable.
+Unit checks cover immutable structured servings, menu validation, canonical ordering, sanitized names, numeric references, printable-length limits, the v1 browser-data reset, URI/HTML escaping, USB parameters, partial cut, disabled retry pop-up, unsupported runtimes, structured callback outcomes, intent before handoff, overlap prevention, callback correlation, immutable final outcomes, storage failures and unknown recovery without resend. The old IV adapter and SDK tests were replaced by IIIU PassPRNT coverage; the attempt model retains IV identifiers, while the phase 1 upgrade resets v1 browser history once.
 
 Browser checks cover simulation, reload/reprint, offline shell reopening, duplicate acknowledgment, unsupported real mode, missing IndexedDB, interrupted sends, and no horizontal overflow at 1024×768, 768×1024 and 390×844. New checks cover a pending PassPRNT link after saved intent, matching callback completion through an offline cached shell, repeated callback protection and missing-return recovery. The HTTPS test uses Android user-agent metadata and maps static assets to local production output; it does not open PassPRNT or send USB data.
 
@@ -95,4 +129,4 @@ New browser checks confirm Linux selection/readiness, IndexedDB intent before HT
 
 Temporary sample/reprint PDFs from the actual renderer were checked with Poppler and pypdf: one page, embedded font, complete content, clear reference/REPRINT, no clipping or overlap. The Windows visual check used Cascadia Mono; the Mint runtime embeds DejaVu Sans Mono. Target glyph coverage, CUPS rasterization, variable-length trimming and physical cut still need testing. Temporary PDFs/screenshots are ignored in test-results/.
 
-The Linux service is now running on the owner's Mint machine with Node 24.21.0 and the verified `Star_TSP143` USB queue. The installed PPD exposes `0Variable`, `0NoCutPage`, `1PartialCutDoc`; selecting these advertised values fixed the initial driver mismatch. Prepared jobs carry their selected options independently of concurrent readiness checks. Type checks, 53 unit/HTTP tests, formatting and both production builds passed on Mint. Live Tailscale HTTPS app loading and printer readiness passed, CUPS `abort-job` policy was confirmed, and the first phone-to-printer smoke test succeeded as described above. See [verified Mint setup](linux-printing.md) for the origin, driver, journal IDs and foreground launcher. Boot startup has not been configured. At that transport milestone, the full order-building workflow was deferred; Milestone 2 above implements it. GitHub Actions status is separate from these local checks.
+The Linux service is now running on the owner's Mint machine with Node 24.21.0 and the verified `Star_TSP143` USB queue. The installed PPD exposes `0Variable`, `0NoCutPage`, `1PartialCutDoc`; selecting these advertised values fixed the initial driver mismatch. Prepared jobs carry their selected options independently of concurrent readiness checks. Type checks, 53 unit/HTTP tests, formatting and both production builds passed on Mint. Live Tailscale HTTPS app loading and printer readiness passed, CUPS `abort-job` policy was confirmed, and the first phone-to-printer smoke test succeeded as described above. See [verified Mint setup](linux-printing.md) for the origin, driver, journal IDs and foreground launcher. Boot startup has not been configured. At that point the full order-building workflow was deferred; the order builder entry above implements it. GitHub Actions status is separate from these local checks.

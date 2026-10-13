@@ -1,11 +1,15 @@
 name: Checks
 on:
+  # Branch pushes are covered by their pull request; running both doubles every PR run.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  milestone-one:
+  verify:
+    name: Check, lint, test, build and e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
