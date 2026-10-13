@@ -3,6 +3,11 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Orders } from '../printer-service/orders';
+import {
+  MemoryOrderRepository,
+  testCaptureFrom,
+} from './helpers/order-repository';
+import { MemoryStationRepository } from './helpers/station';
 import { createApp } from '../printer-service/http';
 import type { Request as PrintRequest } from '../printer-service/printing';
 import { sampleTicket } from '../src/lib/tickets/ticket';
@@ -12,6 +17,7 @@ type Service = {
   orders: Orders;
   prints: PrintRequest[];
   activeStreams: () => number;
+  loseNextCommitReply: () => void;
   restart: (trackingEnabled?: boolean) => Promise<void>;
 };
 const test = base.extend<{ service: Service }>({
@@ -22,7 +28,9 @@ const test = base.extend<{ service: Service }>({
     const prints: PrintRequest[] = [];
     let active = 0;
     let trackingEnabled = true;
-    let orders = new Orders(directory);
+    const repository = new MemoryOrderRepository();
+    let orders = new Orders(repository, testCaptureFrom);
+    const station = new MemoryStationRepository(repository);
     const makeServer = () => {
       const server = createApp({
         origin,
@@ -31,6 +39,7 @@ const test = base.extend<{ service: Service }>({
         cups: { queue: 'TestQueue', check: async () => 'Ready' },
         orders,
         trackingEnabled,
+        station,
         printing: {
           print: async (request) => {
             prints.push(request);
@@ -60,19 +69,30 @@ const test = base.extend<{ service: Service }>({
         });
       });
     const close = () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        // Test browsers can race shutdown with a final station request on a reused socket.
+        server.closeAllConnections();
+      });
     await listen();
     const service: Service = {
       url: origin.origin,
       orders,
       prints,
       activeStreams: () => active,
+      loseNextCommitReply: () => {
+        const persist = station.mutate.bind(station);
+        station.mutate = async (value, workspaceId) => {
+          const result = await persist(value, workspaceId);
+          if (value.operation !== 'startOrder') return result;
+          station.mutate = persist;
+          throw new Error('Commit reply lost');
+        };
+      },
       restart: async (enabled = trackingEnabled) => {
         await close();
         trackingEnabled = enabled;
-        orders = new Orders(directory);
+        orders = new Orders(repository, testCaptureFrom);
         service.orders = orders;
         server = makeServer();
         await listen();
@@ -184,7 +204,7 @@ test('native EventSource reconnects after a service restart and receives the com
   expect(await service.orders.list('open')).toHaveLength(1);
 });
 
-test('tracking off hides the queue and keeps prints, reprints and drafts working; re-enable preserves history without backfill', async ({
+test('tracking off hides the queue while capturing orders; re-enable shows their current state', async ({
   page,
   context,
   service,
@@ -232,9 +252,12 @@ test('tracking off hides the queue and keeps prints, reprints and drafts working
   );
   expect(service.prints).toHaveLength(2);
   expect(service.prints[1].reprint).toBe(true);
-  expect(await service.orders.list()).toEqual(history);
+  expect(await service.orders.list('done')).toEqual(history);
+  expect(await service.orders.list('open')).toHaveLength(1);
   expect(service.activeStreams()).toBe(0);
-  expect(requests).toEqual([]);
+  expect(requests.every((url) => new URL(url).pathname === '/api/orders')).toBe(
+    true,
+  );
   await service.restart(true);
   await page.reload();
   await queue.reload();
@@ -245,28 +268,30 @@ test('tracking off hides the queue and keeps prints, reprints and drafts working
   await expect(
     queue.getByRole('button', { name: 'Undo done for #0043', exact: true }),
   ).toBeVisible();
-  await expect(queue.getByRole('article')).toHaveCount(0);
+  await expect(queue.getByRole('article')).toHaveCount(1);
   await page
     .getByRole('button', { name: 'Reprint last order', exact: true })
     .click();
   await expect(page.getByLabel('Print notification')).toContainText(
     'Reprint of #0001 sent',
   );
-  await expect(queue.getByRole('article')).toHaveCount(0);
+  await expect(queue.getByRole('article')).toHaveCount(1);
   await page
     .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
     .click();
   await page.getByRole('button', { name: 'Cup', exact: true }).click();
   await page.getByRole('button', { name: 'Print order', exact: true }).click();
-  await expect(queue.getByRole('article')).toHaveCount(1);
-  await expect(queue.getByRole('article')).toContainText('#0002');
+  await expect(queue.getByRole('article')).toHaveCount(2);
+  await expect(
+    queue.getByRole('article').filter({ hasText: '#0002' }),
+  ).toHaveCount(1);
   expect(await service.orders.list('done')).toEqual(history);
   expect(
     (await service.orders.list('open')).map((order) => order.ticket.reference),
-  ).toEqual(['0002']);
+  ).toEqual(['0001', '0002']);
 });
 
-test('open browsers stop their stream and publication retries after the service disables tracking', async ({
+test('open browsers stop their stream after tracking is disabled while publication remains available', async ({
   page,
   context,
   service,
@@ -283,6 +308,9 @@ test('open browsers stop their stream and publication retries after the service 
     page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toBeVisible();
   await service.restart(false);
+  await page
+    .getByRole('button', { name: 'Check printer', exact: true })
+    .click();
   await expect(
     queue.getByRole('heading', { name: 'Order tracking is turned off' }),
   ).toBeVisible({ timeout: 10000 });
@@ -302,4 +330,35 @@ test('open browsers stop their stream and publication retries after the service 
   expect(queueRequests).toEqual([]);
   expect(service.prints).toEqual([]);
   expect(await service.orders.list()).toEqual([]);
+});
+
+test('a lost database commit reply reconnects the live queue without duplicating or resending a print', async ({
+  page,
+  context,
+  service,
+}) => {
+  const queue = await context.newPage();
+  await page.goto(service.url);
+  await queue.goto(`${service.url}/queue/`);
+  await expect(
+    queue.getByRole('heading', { name: 'All caught up', exact: true }),
+  ).toBeVisible();
+  await expect.poll(service.activeStreams).toBe(1);
+  service.loseNextCommitReply();
+  await page
+    .getByRole('button', { name: 'Add a Vanilla scoop', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Cup', exact: true }).click();
+  await page.getByRole('button', { name: 'Print order', exact: true }).click();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save print intent. No job was sent by this browser.',
+  );
+  await page.reload();
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Outcome unknown',
+  );
+  await expect(queue.getByRole('article')).toHaveCount(1, { timeout: 10000 });
+  await expect.poll(service.activeStreams).toBe(1);
+  expect(service.prints).toHaveLength(0);
+  expect(await service.orders.list('open')).toHaveLength(1);
 });

@@ -6,7 +6,13 @@ import { tmpdir } from 'node:os';
 import type { PrintAttemptResult } from '../src/lib/printing/port';
 import type { Request } from './printing';
 import { Orders } from './orders';
+import {
+  MemoryOrderRepository,
+  testCaptureFrom,
+} from '../tests/helpers/order-repository';
+import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
+import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 
 const closers: (() => Promise<unknown>)[] = [];
@@ -25,12 +31,15 @@ async function app(trackingEnabled = true) {
     }),
   );
   const check = vi.fn(async () => 'Configured queue');
+  const repository = new MemoryOrderRepository();
   const orders = new Orders(
-    join(directory, 'orders'),
+    repository,
+    testCaptureFrom,
     () => '2026-10-12T19:00:00.000Z',
   );
   await mkdir(join(directory, 'queue'));
   await writeFile(join(directory, 'queue/index.html'), '<h1>Build queue</h1>');
+  const station = new MemoryStationRepository(repository);
   const server = createApp({
     origin: new URL('https://mint.test'),
     port: 4174,
@@ -39,6 +48,7 @@ async function app(trackingEnabled = true) {
     printing: { print },
     orders,
     trackingEnabled,
+    station,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   closers.push(
@@ -48,6 +58,7 @@ async function app(trackingEnabled = true) {
       ),
   );
   const port = (server.address() as { port: number }).port;
+  let cookie = '';
   const send = (
     path: string,
     body?: string,
@@ -61,9 +72,15 @@ async function app(trackingEnabled = true) {
             port,
             path,
             method: body === undefined ? 'GET' : 'POST',
-            headers: { Host: 'mint.test', ...headers },
+            headers: {
+              Host: 'mint.test',
+              ...(cookie ? { Cookie: cookie } : {}),
+              ...headers,
+            },
           },
           (res) => {
+            if (res.headers['set-cookie'])
+              cookie = res.headers['set-cookie'][0].split(';')[0];
             let response = '';
             res.on('data', (chunk) => {
               response += chunk.toString();
@@ -81,17 +98,123 @@ async function app(trackingEnabled = true) {
         req.end(body);
       },
     );
-  return { print, check, send, orders, server, port, directory };
+  return { print, check, send, orders, server, port, directory, station };
 }
 const payload = JSON.stringify({
   attemptId: 'attempt-1',
   reprint: false,
-  ticket: sampleTicket('ticket-1', '2026-10-11T20:00:00.000Z'),
+  ticket: {
+    ...sampleTicket('ticket-1', '2026-10-11T20:00:00.000Z'),
+    reference: '0001',
+  },
 });
 const headers = {
   Origin: 'https://mint.test',
   'Content-Type': 'application/json',
 };
+
+async function capture(
+  send: Awaited<ReturnType<typeof app>>['send'],
+  ticket = JSON.parse(payload).ticket,
+) {
+  let state = JSON.parse((await send('/api/station')).body);
+  if (state.draft.submittedTicketId) {
+    const attempt = state.saved.attempts.at(-1);
+    if (!attempt.result) {
+      state = JSON.parse(
+        (
+          await send(
+            '/api/station',
+            JSON.stringify({
+              revision: state.revision,
+              operation: 'finishAttempt',
+              attempt: {
+                ...attempt,
+                completedAt: ticket.createdAt,
+                result: {
+                  status: 'failed',
+                  simulated: false,
+                  code: 'transport',
+                  message: 'Test only. No job submitted.',
+                },
+              },
+            }),
+            headers,
+          )
+        ).body,
+      );
+    }
+    state = JSON.parse(
+      (
+        await send(
+          '/api/station',
+          JSON.stringify({
+            revision: state.revision,
+            operation: 'saveDraft',
+            draft: newDraft(),
+          }),
+          headers,
+        )
+      ).body,
+    );
+  }
+  state = JSON.parse(
+    (
+      await send(
+        '/api/station',
+        JSON.stringify({
+          revision: state.revision,
+          operation: 'saveDraft',
+          draft: {
+            ...newDraft(),
+            name: ticket.customerName ?? '',
+            servings: ticket.servings,
+          },
+        }),
+        headers,
+      )
+    ).body,
+  );
+  const response = await send(
+    '/api/station',
+    JSON.stringify({
+      revision: state.revision,
+      operation: 'startOrder',
+      attempt: {
+        id: ticket.id === 'ticket-1' ? 'attempt-1' : ticket.id,
+        ticketId: ticket.id,
+        mode: 'linux-cups',
+        reprint: false,
+        startedAt: ticket.createdAt,
+      },
+    }),
+    headers,
+  );
+  expect(response.status).toBe(200);
+  return JSON.parse(response.body).saved.ticket;
+}
+
+async function registerReprint(
+  send: Awaited<ReturnType<typeof app>>['send'],
+  id: string,
+) {
+  const state = JSON.parse((await send('/api/station')).body);
+  await send(
+    '/api/station',
+    JSON.stringify({
+      revision: state.revision,
+      operation: 'startAttempt',
+      attempt: {
+        id,
+        ticketId: state.saved.ticket.id,
+        mode: 'linux-cups',
+        reprint: true,
+        startedAt: state.saved.ticket.createdAt,
+      },
+    }),
+    headers,
+  );
+}
 
 it('serves the static app and live status without caching API results', async () => {
   const { send, check } = await app();
@@ -129,6 +252,7 @@ it('rejects unrelated hosts, foreign/missing origins, non-JSON and invalid/overs
       })
     ).status,
   ).toBe(403);
+  await send('/api/station');
   expect((await send('/api/print', '{}', headers)).status).toBe(400);
   expect((await send('/api/print', 'x'.repeat(131073), headers)).status).toBe(
     413,
@@ -137,6 +261,7 @@ it('rejects unrelated hosts, foreign/missing origins, non-JSON and invalid/overs
 });
 it('correlates a same-origin submission and prevents file escape', async () => {
   const { send, print } = await app();
+  await capture(send);
   const result = await send('/api/print', payload, headers);
   expect(result.cache).toBe('no-store');
   expect(JSON.parse(result.body).attemptId).toBe('attempt-1');
@@ -219,13 +344,16 @@ it('first USB submission registers even a failed/unknown result; reprints never 
     headers,
   );
   expect(JSON.parse((await send('/api/orders')).body).orders).toEqual([]);
+  await capture(send);
   await send('/api/print', payload, headers);
   const initial = JSON.parse((await send('/api/orders')).body).orders;
   expect(initial).toHaveLength(1);
+  await registerReprint(send, 'reprint-open');
   await send('/api/print', reprint('reprint-open'), headers);
   expect(JSON.parse((await send('/api/orders')).body).orders).toEqual(initial);
   await send('/api/orders/ticket-1/done', '{}', headers);
   const completed = JSON.parse((await send('/api/orders')).body).orders;
+  await registerReprint(send, 'reprint-done');
   await send('/api/print', reprint('reprint-done'), headers);
   expect(JSON.parse((await send('/api/orders')).body).orders).toEqual(
     completed,
@@ -242,11 +370,12 @@ it('first USB submission registers even a failed/unknown result; reprints never 
       message: 'Inspect output.',
       code: 'printer-error',
     });
+    const assigned = await capture(send, { ...ticket, id: status });
     const next = await send(
       '/api/print',
       JSON.stringify({
         ...JSON.parse(payload),
-        ticket: { ...ticket, id: status },
+        ticket: assigned,
         attemptId: status,
       }),
       headers,
@@ -288,26 +417,20 @@ it('protects every order mutation and rejects invalid data, filters, bodies, IDs
   expect((await send('/api/orders')).cache).toBe('no-store');
 });
 
-it('returns an unavailable queue when storage fails while leaving the print result unchanged', async () => {
-  const { send, orders, print } = await app();
-  vi.spyOn(orders, 'upsert').mockRejectedValue(new Error('Read-only storage'));
-  vi.spyOn(orders, 'list').mockRejectedValue(new Error('Corrupt journal'));
-  const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-  expect(
-    (
-      await send(
-        '/api/orders',
-        JSON.stringify(JSON.parse(payload).ticket),
-        headers,
-      )
-    ).status,
-  ).toBe(503);
-  expect((await send('/api/orders')).status).toBe(503);
-  expect(
-    JSON.parse((await send('/api/print', payload, headers)).body).result.status,
-  ).toBe('accepted');
-  expect(print).toHaveBeenCalledTimes(1);
-  warning.mockRestore();
+it('blocks all API work when the required database is unavailable', async () => {
+  const { send, station, print, check } = await app();
+  vi.spyOn(station, 'check').mockRejectedValue(new Error('Database down'));
+  for (const path of [
+    '/api/database',
+    '/api/station',
+    '/api/printer',
+    '/api/features',
+    '/api/orders',
+  ])
+    expect((await send(path)).status).toBe(503);
+  expect((await send('/api/print', payload, headers)).status).toBe(503);
+  expect(print).not.toHaveBeenCalled();
+  expect(check).not.toHaveBeenCalled();
 });
 
 async function stream(port: number, headers: Record<string, string> = {}) {
@@ -377,6 +500,7 @@ it('streams initial data and durable changes to multiple clients; no-op and repr
   expect(a.response.headers['cache-control']).toContain('no-store');
   expect(a.response.headers['x-accel-buffering']).toBe('no');
   expect(initial).toMatchObject({ revision: 0, orders: [] });
+  await capture(send);
   await send('/api/print', payload, headers);
   expect((await a.next(2)).orders).toHaveLength(1);
   await b.next(2);
@@ -387,6 +511,7 @@ it('streams initial data and durable changes to multiple clients; no-op and repr
   });
   expect((await a.next(3)).orders[0].status).toBe('done');
   await b.next(3);
+  await registerReprint(send, 'reprint');
   await send(
     '/api/print',
     JSON.stringify({
@@ -415,7 +540,7 @@ it('streams initial data and durable changes to multiple clients; no-op and repr
   });
 });
 it('rejects foreign SSE origins and reports unavailable storage before streaming headers', async () => {
-  const { port, send, directory } = await app();
+  const { port, send, orders } = await app();
   expect(
     (
       await send('/api/orders/events', undefined, {
@@ -433,11 +558,12 @@ it('rejects foreign SSE origins and reports unavailable storage before streaming
       })
     ).status,
   ).toBe(403);
-  await mkdir(join(directory, 'orders'));
-  await writeFile(join(directory, 'orders/broken.json'), '{');
+  vi.spyOn(orders, 'subscribe').mockRejectedValue(
+    new Error('Database unavailable'),
+  );
   const failed = await send('/api/orders/events');
   expect(failed.status).toBe(503);
-  expect(JSON.parse(failed.body).error).toContain('journal');
+  expect(JSON.parse(failed.body).error).toContain('database');
 });
 it('closing the HTTP server disconnects SSE clients and releases subscriptions', async () => {
   const { port, server } = await app();
@@ -462,30 +588,32 @@ it('reports the default enabled flag independently of printer readiness', async 
   expect(check).not.toHaveBeenCalled();
 });
 
-it('disabled tracking gates every queue API without touching history or changing print outcomes', async () => {
-  const { send, print, orders, directory } = await app(false);
+it('disabled tracking hides reads but captures submissions and transitions without changing prints', async () => {
+  const { send, print, orders } = await app(false);
   const ticket = sampleTicket('historical', '2026-10-11T20:00:00.000Z');
-  await orders.upsert(ticket);
-  await orders.changeStatus(ticket.id, 'done');
-  const history = await orders.list();
-  const methods = ['upsert', 'list', 'changeStatus', 'subscribe'] as const;
-  const spies = methods.map((method) => vi.spyOn(orders, method));
-  const features = await send('/api/features');
-  expect(features.cache).toBe('no-store');
-  expect(JSON.parse(features.body)).toEqual({ trackingEnabled: false });
-  for (const [path, body] of [
-    ['/api/orders', undefined],
-    ['/api/orders?status=done', undefined],
-    ['/api/orders/events', undefined],
-    ['/api/orders', JSON.stringify(ticket)],
-    ['/api/orders/historical/done', '{}'],
-    ['/api/orders/historical/reopen', '{}'],
-  ] as const) {
-    const response = await send(path, body, headers);
+  expect(JSON.parse((await send('/api/features')).body)).toEqual({
+    trackingEnabled: false,
+  });
+  for (const path of [
+    '/api/orders',
+    '/api/orders?status=done',
+    '/api/orders/events',
+  ]) {
+    const response = await send(path);
     expect(response.status).toBe(404);
-    expect(response.cache).toBe('no-store');
     expect(JSON.parse(response.body).code).toBe('ORDER_TRACKING_DISABLED');
   }
+  expect(
+    (await send('/api/orders', JSON.stringify(ticket), headers)).status,
+  ).toBe(201);
+  expect(
+    (await send('/api/orders/historical/done', '{}', headers)).status,
+  ).toBe(200);
+  expect((await orders.list('done'))[0].ticket).toEqual(ticket);
+  expect(
+    (await send('/api/orders/historical/reopen', '{}', headers)).status,
+  ).toBe(200);
+  await capture(send);
   for (const status of ['accepted', 'failed', 'outcome-unknown'] as const) {
     for (const reprint of [false, true]) {
       const result: PrintAttemptResult = {
@@ -504,14 +632,89 @@ it('disabled tracking gates every queue API without touching history or changing
     }
   }
   expect(print).toHaveBeenCalledTimes(6);
-  for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-  expect((await send('/api/print', '{}', headers)).status).toBe(400);
+  expect(await orders.list('open')).toHaveLength(2);
   expect((await send('/api/orders', '{}')).status).toBe(403);
+  expect((await send('/api/orders/historical/done', '{}')).status).toBe(403);
+});
+
+it('blocks prints during a database outage even when tracking is disabled', async () => {
+  const { send, station, print } = await app(false);
+  vi.spyOn(station, 'check').mockRejectedValue(
+    new Error('Database unavailable'),
+  );
   expect(
-    (await send('/api/features', undefined, { Host: 'evil.test' })).status,
+    (
+      await send(
+        '/api/orders',
+        JSON.stringify(JSON.parse(payload).ticket),
+        headers,
+      )
+    ).status,
+  ).toBe(503);
+  expect((await send('/api/print', payload, headers)).status).toBe(503);
+  expect(print).not.toHaveBeenCalled();
+});
+
+it('guards station mutations, validates bodies, and rejects stale revisions without a write', async () => {
+  const { send } = await app();
+  const state = JSON.parse((await send('/api/station')).body);
+  const body = JSON.stringify({
+    revision: state.revision,
+    operation: 'saveDraft',
+    draft: { ...state.draft, name: 'Updated draft' },
+  });
+  expect((await send('/api/station', body)).status).toBe(403);
+  expect(
+    (
+      await send('/api/station', body, {
+        ...headers,
+        Origin: 'https://evil.test',
+      })
+    ).status,
   ).toBe(403);
-  // Disabled APIs cannot alter the journal; a subsequent enabled service reads it intact.
-  const reloaded = new Orders(join(directory, 'orders'));
-  expect(await reloaded.list()).toEqual(history);
-  expect((await send('/queue/')).body).toContain('Build queue');
+  expect((await send('/api/station', '{}', headers)).status).toBe(400);
+  expect((await send('/api/station', 'x'.repeat(131073), headers)).status).toBe(
+    413,
+  );
+  expect((await send('/api/station', body, headers)).status).toBe(200);
+  expect((await send('/api/station', body, headers)).status).toBe(409);
+  expect((await send('/api/station')).cache).toBe('no-store');
+});
+
+it('issues a private workspace cookie and rejects missing-cookie writes without mutations', async () => {
+  const { send, station, print } = await app();
+  const result = await send(
+    '/api/station',
+    JSON.stringify({
+      operation: 'saveDraft',
+      revision: 0,
+      draft: { ...newDraft(), name: 'No workspace' },
+    }),
+    headers,
+  );
+  expect(result.status).toBe(409);
+  expect((await station.load()).draft.name).toBe('');
+  expect((await send('/api/print', payload, headers)).status).toBe(409);
+  expect(print).not.toHaveBeenCalled();
+  const first = await send('/api/station');
+  expect(first.status).toBe(200);
+  const changed = await send(
+    '/api/station',
+    JSON.stringify({
+      operation: 'saveDraft',
+      revision: JSON.parse(first.body).revision,
+      draft: { ...newDraft(), name: 'My workspace' },
+    }),
+    headers,
+  );
+  expect(changed.status).toBe(200);
+  expect(JSON.parse((await send('/api/station')).body).draft.name).toBe(
+    'My workspace',
+  );
+  const foreign = await send('/api/print', payload, {
+    ...headers,
+    Cookie: '__Host-order-pad-workspace=' + 'f'.repeat(64),
+  });
+  expect(foreign.status).toBe(409);
+  expect(print).not.toHaveBeenCalled();
 });

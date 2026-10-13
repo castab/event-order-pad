@@ -77,7 +77,11 @@ describe('ice cream orders with flavor scoops', () => {
       prepareDraftForPrint({ ...full, editingIndex: 29 }).servings,
     ).toHaveLength(30);
     expect(() =>
-      commitServing({ ...full, submittedTicketId: 'locked' }),
+      commitServing({
+        ...full,
+        submittedTicketId: 'locked',
+        reference: '0001',
+      }),
     ).toThrow('submitted');
   });
   it('retains servings, numeric identity, and resolved names when producing tickets', () => {
@@ -85,7 +89,7 @@ describe('ice cream orders with flavor scoops', () => {
       servings: [serving(), serving(), serving('Chocolate', 2)],
       name: '  María & Pat  ',
     });
-    const ticket = draftTicket(original, 'id', time);
+    const ticket = draftTicket(original, 'id', time, '0001');
     expect(ticket.servings).toEqual(original.servings);
     expect(ticket.reference).toBe('0001');
     expect(ticket.displayName).toBe('María & Pat');
@@ -93,27 +97,23 @@ describe('ice cream orders with flavor scoops', () => {
       draftTicket(draft({ reference: '0043', name: '  ' }), 'id', time)
         .displayName,
     ).toBe('Sunny Caramel');
-    expect(newDraft().reference).toBe('0001');
-    expect(newDraft('0043').reference).toBe('0044');
-    expect(newDraft('9999').reference).toBe('10000');
-    expect(() => newDraft(String(Number.MAX_SAFE_INTEGER))).toThrow(
-      'safe integer',
-    );
+    expect(newDraft().reference).toBeUndefined();
+    expect(() => draftTicket(draft(), 'id', time)).toThrow('reference');
   });
   it('allows incomplete editors but rejects incomplete committed servings and malformed drafts', () => {
     expect(parseDraft(newDraft()).editor).toEqual(emptyEditor());
     expect(parseDraft(draft({ name: 'Pat\nCut' })).name).toBe('PatCut');
     expect(parseDraft(draft({ name: 'Pat ' })).name).toBe('Pat ');
-    expect(draftTicket(draft({ name: 'Pat ' }), 'id', time).displayName).toBe(
-      'Pat',
-    );
+    expect(
+      draftTicket(draft({ name: 'Pat ' }), 'id', time, '0001').displayName,
+    ).toBe('Pat');
     expect(() => parseDraft(draft({ name: 'A'.repeat(81) }))).toThrow('Name');
     expect(() =>
       parseDraft(draft({ servings: [{ ...serving(), flavors: [] }] })),
     ).toThrow('at least one scoop');
-    expect(() => draftTicket(draft({ servings: [] }), 'id', time)).toThrow(
-      '1–30',
-    );
+    expect(() =>
+      draftTicket(draft({ servings: [] }), 'id', time, '0001'),
+    ).toThrow('1–30');
     expect(() => draftTicket(draft({ editor: serving() }), 'id', time)).toThrow(
       'Add or cancel',
     );
@@ -224,7 +224,11 @@ describe('ice cream orders with flavor scoops', () => {
       const pending = parseDraft({ ...original, editor });
       expect(editServing(pending, 1)).toEqual(pending);
     }
-    const locked = parseDraft({ ...original, submittedTicketId: 'locked' });
+    const locked = parseDraft({
+      ...original,
+      submittedTicketId: 'locked',
+      reference: '0001',
+    });
     expect(editServing(locked, 1)).toEqual(locked);
   });
   it('compares all serving selections after menu normalization', () => {

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
@@ -6,6 +7,8 @@ import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
 import { OrderStream } from './order-stream';
+import { StationConflict, type StationRepository } from './station-database';
+import { parseStationCommand } from '../src/lib/storage/ticket-store';
 import { trackingDisabledCode } from '../src/lib/orders/features';
 
 class BadRequest extends Error {
@@ -52,13 +55,23 @@ export function createApp({
   printing,
   orders,
   trackingEnabled = true,
+  station,
 }: {
   origin: URL;
   port: number;
   root: string;
   cups: Pick<Cups, 'check' | 'queue'>;
   printing: Pick<Printing, 'print'>;
-  orders: Pick<Orders, 'upsert' | 'list' | 'changeStatus' | 'subscribe'>;
+  orders: Pick<
+    Orders,
+    | 'upsert'
+    | 'list'
+    | 'changeStatus'
+    | 'subscribe'
+    | 'stationChanged'
+    | 'stationUncertain'
+  >;
+  station: StationRepository;
   trackingEnabled?: boolean;
 }) {
   const streams = new Set<OrderStream>();
@@ -82,9 +95,19 @@ export function createApp({
     try {
       const url = new URL(req.url ?? '/', origin);
       const path = url.pathname;
+      const workspaceCookie = req.headers.cookie
+        ?.split(';')
+        .map((value) => value.trim())
+        .find((value) => value.startsWith('__Host-order-pad-workspace='))
+        ?.split('=')[1];
+      const workspaceId =
+        workspaceCookie && /^[a-f0-9]{64}$/.test(workspaceCookie)
+          ? workspaceCookie
+          : undefined;
       if (
         req.method === 'POST' &&
-        (path === '/api/print' ||
+        (path === '/api/station' ||
+          path === '/api/print' ||
           path === '/api/orders' ||
           path.startsWith('/api/orders/'))
       ) {
@@ -96,11 +119,80 @@ export function createApp({
           return;
         }
       }
+      if (path.startsWith('/api/')) {
+        try {
+          await station.check();
+        } catch {
+          orders.stationUncertain();
+          json(503, {
+            error:
+              'Database unavailable. Restore Postgres on this machine and reload. No new job was submitted.',
+            code: 'database-unavailable',
+          });
+          return;
+        }
+      }
+      if (req.method === 'GET' && path === '/api/database') {
+        json(200, { ready: true });
+        return;
+      }
+      if (req.method === 'GET' && path === '/api/station') {
+        try {
+          const id = workspaceId ?? randomBytes(32).toString('hex');
+          const snapshot = await station.load(id);
+          res.setHeader(
+            'Set-Cookie',
+            `__Host-order-pad-workspace=${id}; Max-Age=31536000; Path=/; Secure; HttpOnly; SameSite=Strict`,
+          );
+          json(200, snapshot);
+        } catch {
+          json(503, {
+            error: 'Database unavailable. Restore Postgres and reload.',
+          });
+        }
+        return;
+      }
+      if (req.method === 'POST' && path === '/api/station') {
+        if (!workspaceId) {
+          json(409, {
+            error: 'Workspace not initialized. Reload before continuing.',
+          });
+          return;
+        }
+        let command;
+        const body = await readJson(req);
+        try {
+          command = parseStationCommand(body);
+        } catch {
+          throw new BadRequest(400, 'Invalid station operation.');
+        }
+        try {
+          const snapshot = await station.mutate(command, workspaceId);
+          if (command.operation === 'startOrder') {
+            try {
+              await orders.stationChanged();
+            } catch {
+              orders.stationUncertain();
+            }
+          }
+          json(200, snapshot);
+        } catch (error) {
+          if (!(error instanceof StationConflict)) orders.stationUncertain();
+          json(error instanceof StationConflict ? 409 : 503, {
+            error:
+              error instanceof StationConflict
+                ? error.message
+                : 'Database write unavailable. Reload to recover committed state; no print will be resent.',
+          });
+        }
+        return;
+      }
       if (req.method === 'GET' && path === '/api/features') {
         json(200, { trackingEnabled });
         return;
       }
       if (
+        req.method === 'GET' &&
         !trackingEnabled &&
         (path === '/api/orders' || path.startsWith('/api/orders/'))
       ) {
@@ -121,13 +213,13 @@ export function createApp({
         const stream = new OrderStream(res, () => streams.delete(stream));
         streams.add(stream);
         try {
-          stream.start(await orders.subscribe(stream.snapshot));
+          stream.start(await orders.subscribe(stream.snapshot, stream.dispose));
         } catch {
           // No streaming headers have been sent if journal loading failed.
           if (!res.destroyed)
             json(503, {
               error:
-                'Order journal unavailable. Preserve the journal and restore service storage.',
+                'Order database unavailable. Check Postgres and the service connection.',
             });
           if (res.destroyed) stream.dispose();
         }
@@ -145,7 +237,7 @@ export function createApp({
         } catch {
           json(503, {
             error:
-              'Order journal unavailable. Preserve the journal and restore service storage.',
+              'Order database unavailable. Check Postgres and the service connection.',
           });
         }
         return;
@@ -160,7 +252,7 @@ export function createApp({
         }
         try {
           const saved = await orders.upsert(ticket);
-          json(saved.created ? 201 : 200, saved);
+          json('excluded' in saved || !saved.created ? 200 : 201, saved);
         } catch {
           json(503, {
             error:
@@ -220,6 +312,13 @@ export function createApp({
         return;
       }
       if (req.method === 'POST' && path === '/api/print') {
+        if (!workspaceId) {
+          json(409, {
+            error:
+              'Workspace not initialized. No job was submitted. Reload before continuing.',
+          });
+          return;
+        }
         let request;
         try {
           request = parseRequest(await readJson(req));
@@ -230,14 +329,20 @@ export function createApp({
           });
           return;
         }
-        if (trackingEnabled && !request.reprint) {
-          try {
-            await orders.upsert(request.ticket);
-          } catch {
-            console.warn(
-              'Order journal update failed; the browser outbox will retry without resending the print.',
-            );
-          }
+        try {
+          await station.authorizePrint(request, workspaceId);
+        } catch (error) {
+          json(error instanceof StationConflict ? 409 : 503, {
+            error:
+              error instanceof StationConflict
+                ? error.message
+                : 'Database unavailable.',
+            code:
+              error instanceof StationConflict
+                ? 'workspace-conflict'
+                : 'database-unavailable',
+          });
+          return;
         }
         json(200, {
           attemptId: request.attemptId,

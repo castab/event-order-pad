@@ -9,5 +9,9 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["printer-service/**/*.ts", "vite.printer.config.ts"]
+  "include": [
+    "printer-service/**/*.ts",
+    "vite.printer.config.ts",
+    "prisma.config.ts"
+  ]
 }

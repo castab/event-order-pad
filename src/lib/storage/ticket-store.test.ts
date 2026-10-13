@@ -1,257 +1,83 @@
-import { IDBFactory } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
-import { IndexedDbTicketStore } from './ticket-store';
+import { expect, it, vi } from 'vitest';
+import {
+  DatabaseTicketStore,
+  parseStationSnapshot,
+  parseStationCommand,
+} from './ticket-store';
 import { newDraft } from '../tickets/order';
 import { sampleTicket } from '../tickets/ticket';
-import { PrintSession } from '../printing/session';
-import { SimulatedPrinter } from '../printing/adapters/simulated';
 
-function open(factory: IDBFactory, version?: number) {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('history', version);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore('tickets', { keyPath: 'id' });
-      request.result.createObjectStore('attempts', { keyPath: 'id' });
-      request.result.createObjectStore('settings');
-    };
+it('loads server state and sends ordered revisions without browser storage or retries', async () => {
+  const draft = newDraft();
+  let revision = 7;
+  const send = vi.fn<typeof fetch>(async (_url, init) => {
+    if (init?.method === 'POST') {
+      const command = JSON.parse(init.body as string);
+      expect(command.revision).toBe(revision);
+      revision++;
+    }
+    expect(init?.cache).toBe('no-store');
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    return Response.json({ revision, draft });
   });
-}
-async function transaction(
-  db: IDBDatabase,
-  work: (tx: IDBTransaction) => void,
-) {
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(['tickets', 'attempts', 'settings'], 'readwrite');
-    tx.oncomplete = () => resolve();
-    tx.onabort = () => reject(tx.error);
-    work(tx);
-  });
-}
-async function counter(factory: IDBFactory) {
-  const db = await open(factory);
-  try {
-    return await new Promise<number>((resolve, reject) => {
-      const request = db
-        .transaction('settings')
-        .objectStore('settings')
-        .get('referenceCounter');
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-const serving = {
-  flavors: [{ flavor: 'Vanilla' as const, count: 1 }],
-  container: 'Cup' as const,
-  toppings: [],
-};
-
-describe('v2 browser storage and numeric references', () => {
-  it('automatically resets v1 tickets, attempts and drafts, preserving unrelated settings', async () => {
-    const factory = new IDBFactory();
-    const old = await open(factory, 1);
-    await transaction(old, (tx) => {
-      tx.objectStore('tickets').put({
-        id: 'old',
-        items: [{ name: 'Ice cream' }],
-      });
-      tx.objectStore('attempts').put({ id: 'unfinished', ticketId: 'old' });
-      const settings = tx.objectStore('settings');
-      settings.put('old', 'latest');
-      settings.put({ reference: 'Sundae Sprinkle' }, 'draft');
-      settings.put('preserve', 'unrelated');
-    });
-    old.close();
-    const store = new IndexedDbTicketStore(factory, 'history');
-    expect(await store.load()).toBeUndefined();
-    expect(await store.loadDraft()).toBeUndefined();
-    expect(await counter(factory)).toBe(0);
-    const db = await open(factory);
-    expect(db.version).toBe(2);
-    await transaction(db, (tx) => {
-      const tickets = tx.objectStore('tickets').count();
-      tickets.onsuccess = () => expect(tickets.result).toBe(0);
-      const attempts = tx.objectStore('attempts').count();
-      attempts.onsuccess = () => expect(attempts.result).toBe(0);
-      const unrelated = tx.objectStore('settings').get('unrelated');
-      unrelated.onsuccess = () => expect(unrelated.result).toBe('preserve');
-    });
-    db.close();
-    const ticket = sampleTicket('new', '2026-10-12T02:42:00.000Z');
-    await store.saveTicket(ticket);
-    await store.saveDraft({ ...newDraft('0043'), name: 'Recovered draft' });
-    const reload = new IndexedDbTicketStore(factory, 'history');
-    expect((await reload.load())?.ticket).toEqual(ticket);
-    expect((await reload.loadDraft())?.name).toBe('Recovered draft');
-    expect(await counter(factory)).toBe(44);
-  });
-  it('recovers the next reference from the counter when the draft is absent', async () => {
-    const factory = new IDBFactory();
-    const store = new IndexedDbTicketStore(factory, 'history');
-    await store.saveDraft(newDraft('0099'));
-    const db = await open(factory);
-    await transaction(db, (tx) => {
-      tx.objectStore('settings').delete('draft');
-    });
-    db.close();
-    expect((await store.loadDraft())?.reference).toBe('0101');
-    await store.saveDraft((await store.loadDraft())!);
-    expect(await counter(factory)).toBe(101);
-  });
-  it('advances across acceptance and abandonment, survives reloads, and does not advance on reprint', async () => {
-    const factory = new IDBFactory();
-    const store = new IndexedDbTicketStore(factory, 'history');
-    let id = 0;
-    const session = new PrintSession(
-      store,
-      () => {},
-      () => `id-${++id}`,
-    );
-    const accepted = new SimulatedPrinter('accepted', 0);
-    await session.initialize();
-    expect(session.state.draft?.reference).toBe('0001');
-    await session.newOrder();
-    expect(session.state.draft?.reference).toBe('0002');
-    session.updateDraft({ ...session.state.draft!, servings: [serving] });
-    await session.submit(accepted);
-    expect(session.state.ticket?.reference).toBe('0002');
-    expect(session.state.draft?.reference).toBe('0003');
-    expect(await counter(factory)).toBe(3);
-    const original = session.state.ticket;
-    await session.print(accepted, true);
-    expect(session.state.ticket).toEqual(original);
-    expect(await counter(factory)).toBe(3);
-    const reload = new PrintSession(
-      new IndexedDbTicketStore(factory, 'history'),
-      () => {},
-    );
-    await reload.initialize();
-    expect(reload.state.draft?.reference).toBe('0003');
-    expect(reload.state.ticket).toEqual(original);
-    expect(reload.state.attempts).toHaveLength(2);
-  });
-  it('rolls back counter and first intent when a duplicate ticket cannot commit', async () => {
-    const factory = new IDBFactory();
-    const store = new IndexedDbTicketStore(factory, 'history');
-    const ticket = sampleTicket('same-id', '2026-10-12T02:42:00.000Z');
-    await store.saveTicket(ticket);
-    await expect(
-      store.startOrder(
-        { ...ticket, reference: '0099' },
-        { ...newDraft('0098'), submittedTicketId: ticket.id },
-        {
-          id: 'a',
-          ticketId: ticket.id,
-          mode: 'simulated',
-          startedAt: ticket.createdAt,
-          reprint: false,
-        },
-      ),
-    ).rejects.toThrow();
-    expect(await counter(factory)).toBe(43);
-    expect((await store.load())?.attempts).toEqual([]);
-    expect((await store.load())?.ticket).toEqual(ticket);
-    expect(await store.pendingOrders()).toEqual([]);
-  });
-});
-
-it('persists first-print order outbox with intent across reloads; reprints never add an outbox entry', async () => {
-  const factory = new IDBFactory();
-  const store = new IndexedDbTicketStore(factory, 'history');
-  let id = 0;
-  const session = new PrintSession(
-    store,
-    () => {},
-    () => `id-${++id}`,
-  );
-  const printer = new SimulatedPrinter('accepted', 0);
-  await session.initialize();
-  session.updateDraft({ ...session.state.draft!, servings: [serving] });
-  expect(await store.pendingOrders()).toEqual([]);
-  await session.submit(printer);
-  const ticket = session.state.ticket!;
-  const reload = new IndexedDbTicketStore(factory, 'history');
-  expect(await reload.pendingOrders()).toEqual([ticket]);
-  await session.print(printer, true);
-  expect(await reload.pendingOrders()).toEqual([ticket]);
-  await reload.acknowledgeOrder(ticket.id);
-  await session.print(printer, true);
-  expect(await store.pendingOrders()).toEqual([]);
-  await store.saveTicket(
-    sampleTicket('historical-ticket', '2026-10-11T20:00:00.000Z'),
-  );
-  expect(await store.pendingOrders()).toEqual([]);
-});
-
-it('disabling tracking discards only queue metadata and never backfills disabled orders on re-enable', async () => {
-  const factory = new IDBFactory();
-  const store = new IndexedDbTicketStore(factory, 'history');
-  let id = 0;
-  const session = new PrintSession(
-    store,
-    () => {},
-    () => `id-${++id}`,
-  );
-  const printer = new SimulatedPrinter('accepted', 0);
-  await session.initialize();
-  session.updateDraft({ ...session.state.draft!, servings: [serving] });
-  await session.submit(printer);
-  const ticket = session.state.ticket!;
-  const saved = await store.load();
-  const draft = await store.loadDraft();
-  const reference = await counter(factory);
-  expect(await store.pendingOrders()).toEqual([ticket]);
-  await store.setTrackingEnabled(false);
-  expect(await store.pendingOrders()).toEqual([]);
-  expect(await store.load()).toEqual(saved);
+  const store = new DatabaseTicketStore(send);
+  expect(await store.load()).toBeUndefined();
   expect(await store.loadDraft()).toEqual(draft);
-  expect(await counter(factory)).toBe(reference);
-  await session.print(printer, true);
-  session.updateDraft({ ...session.state.draft!, servings: [serving] });
-  await session.submit(printer);
-  const untracked = session.state.ticket!;
-  expect(untracked.reference).toBe('0002');
-  expect(await store.pendingOrders()).toEqual([]);
-  const reload = new IndexedDbTicketStore(factory, 'history', false);
-  expect((await reload.load())?.ticket).toEqual(untracked);
-  await reload.setTrackingEnabled(true);
-  expect(await reload.pendingOrders()).toEqual([]);
-  const resumed = new PrintSession(
-    reload,
-    () => {},
-    () => `id-${++id}`,
-  );
-  await resumed.initialize();
-  await resumed.print(printer, true);
-  expect(await reload.pendingOrders()).toEqual([]);
-  resumed.updateDraft({ ...resumed.state.draft!, servings: [serving] });
-  await resumed.submit(printer);
-  expect(resumed.state.ticket?.reference).toBe('0003');
-  expect(await reload.pendingOrders()).toEqual([resumed.state.ticket]);
+  await store.saveDraft(draft);
+  await store.saveDraft(draft);
+  expect(send).toHaveBeenCalledTimes(3);
 });
-
-it('a store opened with tracking disabled still commits print intent and recovery', async () => {
-  const factory = new IDBFactory();
-  const store = new IndexedDbTicketStore(factory, 'history', false);
-  const session = new PrintSession(store, () => {});
-  await session.initialize();
-  session.updateDraft({ ...session.state.draft!, servings: [serving] });
-  await session.submit(new SimulatedPrinter('outcome-unknown', 0));
-  expect(session.state.phase).toBe('ready');
-  expect((await store.load())?.attempts[0].result?.status).toBe(
-    'outcome-unknown',
+it.each([409, 503])(
+  'blocks failed writes (%s) and never retries them',
+  async (status) => {
+    const send = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ revision: 0, draft: newDraft() }))
+      .mockResolvedValueOnce(Response.json({}, { status }));
+    const store = new DatabaseTicketStore(send);
+    await store.load();
+    await expect(store.saveDraft(newDraft())).rejects.toThrow(
+      status === 409 ? 'another tab' : 'Database unavailable',
+    );
+    expect(send).toHaveBeenCalledTimes(2);
+  },
+);
+it('rejects malformed or mismatched database state and operations', () => {
+  const ticket = sampleTicket('ticket', '2026-10-11T20:00:00.000Z');
+  expect(() =>
+    parseStationSnapshot({ revision: -1, draft: newDraft() }),
+  ).toThrow();
+  expect(() =>
+    parseStationSnapshot({
+      revision: 0,
+      draft: newDraft(),
+      saved: {
+        ticket,
+        attempts: [
+          {
+            id: 'a',
+            ticketId: 'different',
+            mode: 'linux-cups',
+            reprint: false,
+            startedAt: ticket.createdAt,
+          },
+        ],
+      },
+    }),
+  ).toThrow();
+  expect(() =>
+    parseStationCommand({ revision: 0, operation: 'erase' }),
+  ).toThrow();
+  const snapshot = parseStationSnapshot({
+    revision: 0,
+    draft: newDraft(),
+    saved: { ticket, attempts: [] },
+  });
+  expect(Object.isFrozen(snapshot.saved?.ticket.servings)).toBe(true);
+});
+it('requires an affirmative database health response', async () => {
+  const store = new DatabaseTicketStore(async () =>
+    Response.json({ ready: false }),
   );
-  expect(await store.pendingOrders()).toEqual([]);
-  const reload = new PrintSession(
-    new IndexedDbTicketStore(factory, 'history', false),
-    () => {},
-  );
-  await reload.initialize();
-  expect(reload.state.ticket).toEqual(session.state.ticket);
-  expect(reload.state.draft).toEqual(session.state.draft);
-  expect(reload.state.attempts).toEqual(session.state.attempts);
+  await expect(store.check()).rejects.toThrow();
 });

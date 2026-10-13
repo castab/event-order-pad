@@ -14,5 +14,6 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts', 'printer-service/**/*.test.ts'],
     environment: 'node',
+    exclude: ['printer-service/**/*.postgres.test.ts'],
   },
 });

@@ -1,5 +1,3 @@
-import { mkdir, open, readFile, rename } from 'node:fs/promises';
-import { join } from 'node:path';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
 import type { PrintAttemptResult } from '../src/lib/printing/port';
 import { Cups } from './cups';
@@ -10,9 +8,15 @@ export interface Request {
   reprint: boolean;
   ticket: OrderTicket;
 }
-interface Record {
+export interface PrintRecord {
   request: Request;
   result?: PrintAttemptResult;
+}
+export interface PrintJournal {
+  get(id: string): Promise<PrintRecord | undefined>;
+  begin(request: Request): Promise<void>;
+  finish(request: Request, result: PrintAttemptResult): Promise<void>;
+  assertPending(request: Request): Promise<void>;
 }
 const failed = (
   message: string,
@@ -41,122 +45,194 @@ export function parseRequest(value: unknown): Request {
     typeof input.reprint !== 'boolean'
   )
     throw new Error('Invalid attempt ID or reprint flag.');
-  return {
+  return Object.freeze({
     attemptId: input.attemptId,
     reprint: input.reprint,
     ticket: parseTicket(input.ticket),
-  };
+  });
 }
 
-async function syncDirectory(directory: string) {
-  if (process.platform !== 'linux') return;
-  const handle = await open(directory, 'r');
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function save(path: string, value: Record, directory: string) {
-  const file = await open(path, 'wx', 0o600);
-  try {
-    await file.writeFile(JSON.stringify(value));
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-  await syncDirectory(directory);
-}
-
-/** Small durable attempt journal, not a background queue. Pending intent is never replayed. */
+/** Database dispatch intent precedes lp. Pending intent is never replayed. */
 export class Printing {
   private busy = false;
   private blocked = false;
+  private readonly inflight = new Map<
+    string,
+    { request: Request; promise: Promise<PrintAttemptResult> }
+  >();
+  private readonly waiting: { run: () => void; expire: () => void }[] = [];
   constructor(
     private cups: Cups,
-    private directory: string,
+    private journal: PrintJournal,
     private font: string,
     private render = receiptPdf,
   ) {}
-  async print(request: Request): Promise<PrintAttemptResult> {
-    const path = join(this.directory, `${request.attemptId}.json`);
+  print(value: Request): Promise<PrintAttemptResult> {
+    const request = parseRequest(value);
+    const existing = this.inflight.get(request.attemptId);
+    if (existing)
+      return JSON.stringify(existing.request) === JSON.stringify(request)
+        ? existing.promise
+        : Promise.resolve(
+            failed(
+              'Attempt ID was already used for different ticket content.',
+              'invalid-ticket',
+            ),
+          );
+    if (this.busy && this.waiting.length >= 8)
+      return this.notSubmitted(
+        request,
+        'The submission queue is full. No job was submitted.',
+      );
+    let resolve!: (result: PrintAttemptResult) => void;
+    const promise = new Promise<PrintAttemptResult>((done) => {
+      resolve = done;
+    });
+    this.inflight.set(request.attemptId, { request, promise });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const entry = {
+      run: () => {
+        clearTimeout(timer);
+        this.busy = true;
+        void this.execute(request)
+          .catch(() => unknown())
+          .then((result) => {
+            this.inflight.delete(request.attemptId);
+            resolve(result);
+            this.busy = false;
+            this.waiting.shift()?.run();
+          });
+      },
+      expire: () => {
+        const index = this.waiting.indexOf(entry);
+        if (index < 0) return;
+        this.waiting.splice(index, 1);
+        void this.notSubmitted(
+          request,
+          'The submission queue did not clear within 30 seconds. No job was submitted.',
+        ).then((result) => {
+          this.inflight.delete(request.attemptId);
+          resolve(result);
+        });
+      },
+    };
+    if (this.busy) {
+      this.waiting.push(entry);
+      timer = setTimeout(entry.expire, 30000);
+    } else entry.run();
+    return promise;
+  }
+
+  private async notSubmitted(
+    request: Request,
+    message: string,
+  ): Promise<PrintAttemptResult> {
     try {
-      const existing = JSON.parse(await readFile(path, 'utf8')) as Record;
-      if (JSON.stringify(existing.request) !== JSON.stringify(request))
-        return failed(
-          'Attempt ID was already used for different ticket content.',
-          'invalid-ticket',
-        );
-      return existing.result ?? unknown();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-        return failed('Print history cannot be read. No new job was sent.');
+      const record = await this.journal.get(request.attemptId);
+      if (record) {
+        if (
+          JSON.stringify(parseRequest(record.request)) !==
+          JSON.stringify(request)
+        )
+          return failed(
+            'Attempt ID was already used for different ticket content.',
+            'invalid-ticket',
+          );
+        return record.result ?? unknown();
+      }
+      return failed(message, 'printer-busy');
+    } catch {
+      return unknown();
+    }
+  }
+
+  private async execute(request: Request): Promise<PrintAttemptResult> {
+    request = parseRequest(request);
+    try {
+      const existing = await this.journal.get(request.attemptId);
+      if (existing) {
+        if (
+          JSON.stringify(parseRequest(existing.request)) !==
+          JSON.stringify(request)
+        )
+          return failed(
+            'Attempt ID was already used for different ticket content.',
+            'invalid-ticket',
+          );
+        return existing.result ?? unknown();
+      }
+    } catch {
+      return failed(
+        'Database unavailable. No new job was submitted. Restore Postgres and reload.',
+      );
     }
     if (this.blocked)
       return failed(
         'Print history needs recovery. Restart the service and inspect CUPS jobs before printing.',
       );
-    if (this.busy)
-      return failed(
-        'Another submission is in progress. No job was sent for this attempt.',
-        'printer-busy',
-      );
-    this.busy = true;
     try {
-      let pdf: Buffer;
-      let media: string;
-      let jobOptions: string[];
+      await this.journal.begin(request);
+    } catch {
+      return failed(
+        'Could not save exclusive print intent. No job was submitted; inspect existing attempt history before trying again.',
+      );
+    }
+    let pdf: Buffer;
+    let media: string;
+    let jobOptions: string[];
+    try {
+      await this.cups.waitUntilIdle();
+      const paper = await this.cups.prepare(
+        receiptLayout(request.ticket, request.reprint).heightMm,
+      );
+      media = paper.media;
+      jobOptions = paper.jobOptions;
+      pdf = await this.render(
+        request.ticket,
+        request.reprint,
+        this.font,
+        paper.heightMm,
+      );
+    } catch (error) {
+      const result = failed(
+        `${(error as Error).message} No job was submitted.`,
+      );
       try {
-        const paper = await this.cups.prepare(
-          receiptLayout(request.ticket, request.reprint).heightMm,
-        );
-        media = paper.media;
-        jobOptions = paper.jobOptions;
-        pdf = await this.render(
-          request.ticket,
-          request.reprint,
-          this.font,
-          paper.heightMm,
-        );
-      } catch (error) {
-        return failed(`${(error as Error).message} No job was submitted.`);
-      }
-      try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        await save(path, { request }, this.directory);
-      } catch {
-        return failed(
-          'Could not save exclusive print intent. No job was submitted; inspect existing attempt history before trying again.',
-        );
-      }
-      let result: PrintAttemptResult;
-      try {
-        const job = await this.cups.submit(
-          pdf,
-          media,
-          request.attemptId,
-          jobOptions,
-        );
-        result = {
-          status: 'accepted',
-          simulated: false,
-          message: `CUPS accepted job ${job}. This confirms queue submission only. Check the physical ticket and cut; a pending job may print later.`,
-        };
-      } catch {
-        result = unknown();
-      }
-      try {
-        const temporary = `${path}.complete`;
-        await save(temporary, { request, result }, this.directory);
-        await rename(temporary, path);
-        await syncDirectory(this.directory);
+        await this.journal.finish(request, result);
       } catch {
         this.blocked = true;
         return unknown();
       }
       return result;
-    } finally {
-      this.busy = false;
     }
+    try {
+      await this.journal.assertPending(request);
+    } catch {
+      // Recovery may finalize a waiting attempt. It must never reach lp afterward.
+      return unknown();
+    }
+    let result: PrintAttemptResult;
+    try {
+      const job = await this.cups.submit(
+        pdf,
+        media,
+        request.attemptId,
+        jobOptions,
+      );
+      result = {
+        status: 'accepted',
+        simulated: false,
+        message: `CUPS accepted job ${job}. This confirms queue submission only. Check the physical ticket and cut; a pending job may print later.`,
+      };
+    } catch {
+      result = unknown();
+    }
+    try {
+      await this.journal.finish(request, result);
+    } catch {
+      this.blocked = true;
+      return unknown();
+    }
+    return result;
   }
 }

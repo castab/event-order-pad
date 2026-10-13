@@ -3,9 +3,9 @@
 > **Status (2026-10-12): implemented.** All three suggested phases are built. This brief is kept as the original handoff and the source of the ordering rules and layout intent. Where it and the code differ, the code and [README](../README.md) are authoritative. Known differences:
 >
 > - The build queue screen is titled **Now Scooping** (route `/queue/`), not "BUILD QUEUE".
-> - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and order tracking can be switched off with `ORDER_PAD_TRACKING_ENABLED=false`.
-> - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration happens both in `POST /api/print` and through the browser outbox.
-> - Order numbers are still allocated per browser; moving allocation to the service remains deferred.
+> - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and queue visibility can be switched off while event capture continues with `ORDER_PAD_TRACKING_ENABLED=false`.
+> - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration commits atomically with print intent through `POST /api/station`. Postgres on the app host owns drafts, counters, tickets, attempts and dispatch records; database failure blocks order work. The browser has no persistence or outbox.
+> - Postgres stores independent anonymous browser workspaces. Only order numbering is global; the service assigns a number atomically with print intent. Same-workspace revision checks reject stale tabs.
 > - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.
 
 This folder is the design handoff for the order builder and build queue: touch order entry that prints a
@@ -73,6 +73,9 @@ Soft serve is not offered for now.
   ("To finish this serving: add at least one scoop and choose a container.").
 - **Customer name:** optional, ≤80 printable characters (strip control characters). If blank,
   use a stable two-word label (below).
+- Editable orders display “New order”; draft previews and blank-name placeholders display “Assigned when printed”. The service assigns the number and resolves the blank-name label only when committing the order for printing.
+- Separate browser profiles can edit independently. An automatic persistent opaque cookie restores each profile’s database draft and latest receipt; there is no station setup. Tabs in the same profile share a workspace.
+- Concurrent printing is serialized, with up to eight waiting requests and a 30-second slot timeout. Pending CUPS jobs receive a further 30-second wait; timeout means nothing was submitted. Waiting requests never replay after restart.
 - No prices or payments anywhere.
 - After printing, **Reprint last order** prints the previous ticket again with the REPRINT marker
   and the same ticket ID.
@@ -125,8 +128,7 @@ export interface OrderTicket {
   (`schema: 2`) and keep a read-only parser for v1 history, or document a one-time reset. Don't
   let old records crash history.
 - `sampleTicket()` should become the #0043 order shown in `screens/prep-ticket.dc.html`.
-- The order reference needs a persistent, increasing counter (IndexedDB now; the shared store
-  later, see the build queue).
+- The order reference needs a persistent, increasing counter in Postgres on the app host.
 
 ## The prep ticket (`formatTicket` and the PassPRNT/PDF renderers)
 

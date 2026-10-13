@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../printer-service/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model OrderEvent {
+  eventId    BigInt   @id @default(autoincrement()) @map("event_id")
+  orderId    String   @map("order_id")
+  occurredAt DateTime @db.Timestamptz(3) @map("occurred_at")
+  eventType  String   @map("event_type")
+  orderJsonb Json     @db.JsonB @map("order_jsonb")
+
+  @@index([orderId, eventId(sort: Desc)], map: "order_events_latest_idx")
+  @@map("order_events")
+}
+
+model Station {
+  id Int @id
+  referenceCounter BigInt @default(0) @map("reference_counter")
+  @@map("station")
+}
+
+model Workspace {
+  id String @id
+  cookieId String? @unique @map("cookie_id")
+  revision Int @default(0)
+  draft Json @db.JsonB
+  latestTicketId String? @map("latest_ticket_id")
+  latestTicket Ticket? @relation("latest", fields: [latestTicketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tickets Ticket[] @relation("owner")
+  @@map("workspaces")
+}
+
+model Ticket {
+  id      String @id
+  content Json   @db.JsonB
+  attempts Attempt[]
+  workspaceId String @map("workspace_id")
+  workspace Workspace @relation("owner", fields: [workspaceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  latestFor Workspace[] @relation("latest")
+
+  @@map("tickets")
+}
+
+model Attempt {
+  id       String @id
+  ticketId String @map("ticket_id")
+  content  Json   @db.JsonB
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  dispatch PrintDispatch?
+
+  @@index([ticketId])
+  @@map("print_attempts")
+}
+
+model PrintDispatch {
+  attemptId String @id @map("attempt_id")
+  request   Json   @db.JsonB
+  result    Json?  @db.JsonB
+  completedAt DateTime? @db.Timestamptz(3) @map("completed_at")
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("print_dispatches")
+}

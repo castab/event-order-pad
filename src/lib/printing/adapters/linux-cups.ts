@@ -53,10 +53,69 @@ export class LinuxCupsPrinter implements TicketPrinter {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ticket, ...options }),
         cache: 'no-store',
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(240000),
       });
       const data = await response.json();
       if (
+        !response.ok &&
+        data?.attemptId === undefined &&
+        data?.result === undefined
+      ) {
+        if (response.status === 409)
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'Workspace or print intent changed. No job was submitted. Reload before continuing.',
+          };
+        if (response.status === 503 && data?.code === 'database-unavailable')
+          return {
+            status: 'failed',
+            code: 'transport',
+            simulated: false,
+            message:
+              'Database unavailable. No new job was submitted. Restore Postgres on this machine and reload.',
+          };
+        if (
+          response.status === 403 &&
+          [
+            'Unrecognized host.',
+            'Use the configured same-origin application.',
+          ].includes(data?.error)
+        )
+          return {
+            status: 'failed',
+            code: 'permission-denied',
+            simulated: false,
+            message:
+              'The service rejected this address. Open the configured HTTPS address. No job was submitted.',
+          };
+        if (
+          response.status === 400 &&
+          [
+            'Invalid ticket or attempt metadata. No data sent.',
+            'Invalid JSON request.',
+          ].includes(data?.error)
+        )
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'The service rejected the ticket. Reload the app to match the service. No job was submitted.',
+          };
+        if (response.status === 413 && data?.error === 'Request too large.')
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'The service rejected the request because it is too large. No job was submitted.',
+          };
+      }
+      if (
+        response.ok &&
         data.attemptId === options.attemptId &&
         data.result?.simulated === false &&
         typeof data.result.message === 'string' &&

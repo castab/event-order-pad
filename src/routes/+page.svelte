@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { fetchTrackingEnabled } from '#lib/orders/features.js';
-  import { OrderPublisher } from '#lib/orders/publisher.js';
   import { formatTicket } from '#lib/tickets/format.js';
   import { blankNameLabel, cleanCustomerName } from '#lib/tickets/ticket.js';
   import {
@@ -24,20 +23,18 @@
   } from '#lib/tickets/order.js';
   import { holdUpdates } from '#lib/app-update.js';
   import { PrintSession, type SessionState } from '#lib/printing/session.js';
-  import { IndexedDbTicketStore } from '#lib/storage/ticket-store.js';
+  import { DatabaseTicketStore } from '#lib/storage/ticket-store.js';
   import {
     LinuxCupsPrinter,
     linuxPrinterStatus,
     type LinuxPrinterStatus,
   } from '#lib/printing/adapters/linux-cups.js';
 
-  let queueNotice = $state('');
   let trackingEnabled = $state(false);
   let mounted = false;
-  let store: IndexedDbTicketStore | undefined;
+  let store: DatabaseTicketStore | undefined;
   let featuresCheck: Promise<void> | undefined;
   let featuresController: AbortController | undefined;
-  let publisher: OrderPublisher | undefined;
   let toolsOpen = $state(false);
   let toast = $state<{
     title: string;
@@ -69,6 +66,7 @@
   $effect(() => {
     if (
       working ||
+      viewState.savingDraft ||
       needsConfirmation ||
       viewState.phase === 'loading' ||
       viewState.phase === 'blocked'
@@ -115,12 +113,29 @@
   const draftPreview = $derived.by(() => {
     if (!prepared) return undefined;
     try {
-      return draftTicket(prepared, 'Assigned when printed', previewTimestamp);
+      return draftTicket(
+        prepared,
+        'Draft preview',
+        previewTimestamp,
+        prepared.reference ?? '0001',
+      );
     } catch {
       return undefined;
     }
   });
-  const preview = $derived(draftPreview ? formatTicket(draftPreview) : []);
+  const preview = $derived(
+    draftPreview
+      ? formatTicket(draftPreview).map((line) =>
+          !prepared?.reference && line.role === 'reference'
+            ? { ...line, text: 'ORDER — Assigned when printed' }
+            : !prepared?.reference &&
+                !prepared?.name.trim() &&
+                line.role === 'name'
+              ? { ...line, text: 'Assigned when printed' }
+              : line,
+        )
+      : [],
+  );
   const lastPreview = $derived(
     viewState.ticket
       ? formatTicket(viewState.ticket, last?.reprint ?? false)
@@ -142,7 +157,9 @@
     editable && editorComplete && !full && !unchangedEdit,
   );
   const fallbackName = $derived(
-    draft ? blankNameLabel(Number(draft.reference)) : '',
+    draft?.reference
+      ? blankNameLabel(Number(draft.reference))
+      : 'Assigned when printed',
   );
   const recoveryNeeded = $derived(
     !!viewState.notice ||
@@ -164,41 +181,39 @@
   onMount(() => {
     const updateOnline = () => {
       online = navigator.onLine;
+      if (!online && mounted) session?.block();
     };
     updateOnline();
     window.addEventListener('online', updateOnline);
     window.addEventListener('offline', updateOnline);
     let cancelled = false;
     mounted = true;
-    try {
-      store = new IndexedDbTicketStore(indexedDB, 'order-pad-v1', false);
-      session = new PrintSession(store, (next) => {
-        viewState = next;
-        if (
-          next.phase === 'printing' &&
-          next.attempts.at(-1)?.reprint === false
-        )
-          void publisher?.flush();
-      });
-      void session.initialize().then(() => {
-        if (!cancelled && trackingEnabled && viewState.phase === 'ready')
-          publisher?.start();
-      });
-    } catch {
-      viewState = {
-        phase: 'blocked',
-        attempts: [],
-        notice:
-          'IndexedDB is unavailable in this browser. Printing is blocked because tickets and attempts cannot be saved.',
-      };
-    }
+    store = new DatabaseTicketStore();
+    session = new PrintSession(store, (next) => {
+      viewState = next;
+    });
+    void session.initialize();
+    let healthRunning = false;
+    const health = async () => {
+      if (cancelled || healthRunning || working || viewState.phase !== 'ready')
+        return;
+      healthRunning = true;
+      try {
+        await store!.check();
+      } catch {
+        if (!cancelled) session.block();
+      } finally {
+        healthRunning = false;
+      }
+    };
+    const healthTimer = setInterval(() => void health(), 5000);
     void checkPrinter();
     const checkCache = async () => {
       try {
         const names = await caches.keys();
         if (!cancelled)
           offlineStatus = names.some((name) => name.startsWith('order-pad-'))
-            ? 'App assets cached · printer host connection required'
+            ? 'App assets cached · app host and database connection required'
             : 'App assets not cached yet';
       } catch {
         if (!cancelled)
@@ -213,7 +228,7 @@
       mounted = false;
       featuresController?.abort();
       clearTimeout(toastTimer);
-      publisher?.stop();
+      clearInterval(healthTimer);
       window.removeEventListener('online', updateOnline);
       window.removeEventListener('offline', updateOnline);
     };
@@ -227,33 +242,7 @@
       try {
         const enabled = await fetchTrackingEnabled(featuresController!.signal);
         if (!mounted) return;
-        if (!enabled) {
-          publisher?.stop();
-          publisher = undefined;
-          trackingEnabled = false;
-          queueNotice = '';
-        }
-        await store!.setTrackingEnabled(enabled);
-        if (!mounted) return;
         trackingEnabled = enabled;
-        if (enabled && !publisher) {
-          publisher = new OrderPublisher(
-            store!,
-            (notice) => {
-              if (mounted) queueNotice = notice;
-            },
-            undefined,
-            undefined,
-            () => {
-              if (mounted) {
-                trackingEnabled = false;
-                queueNotice = '';
-                publisher = undefined;
-              }
-            },
-          );
-          if (viewState.phase === 'ready') publisher.start();
-        }
       } catch {
         // Optional tracking configuration must never block ordinary printing.
       } finally {
@@ -374,7 +363,7 @@
     sending = true;
     dismissToast();
     const previousAttempt = last?.id;
-    const previousReference = draft?.reference;
+    const previousDraft = draft;
     try {
       if (reprint) await session.print(printer, true, confirmed);
       else await session.submit(printer, confirmed);
@@ -389,7 +378,10 @@
       ) {
         if (completed.result.status === 'accepted') {
           previewTimestamp = new Date().toISOString();
-          if (viewState.draft?.reference !== previousReference) {
+          if (
+            previousDraft !== viewState.draft &&
+            !viewState.draft?.submittedTicketId
+          ) {
             await tick();
             resetScroll();
           }
@@ -504,7 +496,8 @@
       height="44"
     />
     <div class="header-order">
-      <span>Order #{draft?.reference ?? '…'}</span>
+      <span>{draft?.reference ? `Order #${draft.reference}` : 'New order'}</span
+      >
       <button
         class="icon-button"
         aria-label="Reprint last order"
@@ -565,7 +558,11 @@
           aria-label="Print recovery"
         >
           {#if viewState.notice}<div role="alert">
-              <strong>Storage needs attention</strong>
+              <strong
+                >{viewState.conflict
+                  ? 'Open in another tab'
+                  : 'Database needs attention'}</strong
+              >
               <p>{viewState.notice}</p>
             </div>{/if}
           {#if formError}<p role="alert">{formError}</p>{/if}
@@ -631,7 +628,11 @@
             aria-describedby="name-hint"
             oninput={(event) => changeName(event.currentTarget)}
           />
-          <p id="name-hint">Left blank, the ticket says “{fallbackName}”</p>
+          <p id="name-hint">
+            {draft.reference
+              ? `Left blank, the ticket says “${fallbackName}”`
+              : 'Left blank, a name is assigned when printed.'}
+          </p>
         </div>
         {#if draft.servings.length && !draft.submittedTicketId}
           <section class="saved-section" aria-labelledby="saved-title">
@@ -803,7 +804,7 @@
             <h1>Your serving</h1>
             <p>
               {viewState.phase === 'blocked'
-                ? 'Resolve the storage issue to recover your order.'
+                ? 'Restore the database connection to recover your order.'
                 : 'Loading your order…'}
             </p>
           </section>{/if}
@@ -821,12 +822,7 @@
             {#if trackingEnabled}<a class="queue-link" href="/queue/"
                 >Now Scooping</a
               >{/if}
-            {#if trackingEnabled && queueNotice}<p
-                role="status"
-                aria-label="Queue synchronization"
-              >
-                {queueNotice}
-              </p>{/if}
+
             <section aria-labelledby="usb-title" class="tools-card">
               <h2 id="usb-title">Printer settings</h2>
               <p>
@@ -879,14 +875,14 @@
                 </p>
               </details>
               <details>
-                <summary>Connection and local storage</summary>
+                <summary>Connection and database</summary>
                 <p>
                   {online ? 'Network available' : 'Device offline'} · {offlineStatus}
                 </p>
                 <p>
-                  Drafts and the last submitted receipt are saved in this
-                  browser. Printing requires this server. Keep one Order Pad tab
-                  open per station and preserve browser storage during recovery.
+                  Drafts, order numbers and print history are saved in the
+                  station’s local database. The server and database must run on
+                  the same machine. Keep one active Order Pad tab per station.
                 </p>
               </details>
             </section>

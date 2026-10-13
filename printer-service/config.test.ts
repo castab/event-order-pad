@@ -16,3 +16,35 @@ it.each(['', 'TRUE', 'False', '0', '1', 'yes', ' false '])(
     );
   },
 );
+
+it('validates database URLs without echoing credentials in errors', async () => {
+  const { parseDatabaseUrl } = await import('./config');
+  expect(parseDatabaseUrl('postgresql://user:secret@localhost/order_pad')).toBe(
+    'postgresql://user:secret@localhost/order_pad',
+  );
+  for (const url of [
+    undefined,
+    '',
+    'https://host/db',
+    'postgresql://host/',
+    'postgresql://remote.example/db',
+    'postgresql://127.0.0.1/db?host=remote.example',
+    'postgresql://127.0.0.1/db?hostaddr=192.0.2.1',
+  ])
+    expect(() => parseDatabaseUrl(url)).toThrow('DATABASE_URL');
+});
+
+it('requires a stable canonical capture cutoff', async () => {
+  const { parseCaptureFrom } = await import('./config');
+  expect(parseCaptureFrom('2026-10-13T00:00:00.000Z')).toBe(
+    '2026-10-13T00:00:00.000Z',
+  );
+  for (const date of [
+    undefined,
+    '',
+    '2026-10-13',
+    '2026-10-13T00:00:00Z',
+    '2026-02-30T00:00:00.000Z',
+  ])
+    expect(() => parseCaptureFrom(date)).toThrow('ORDER_PAD_CAPTURE_FROM');
+});

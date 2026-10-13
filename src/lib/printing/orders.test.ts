@@ -1,6 +1,5 @@
-import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it, vi } from 'vitest';
-import { IndexedDbTicketStore } from '../storage/ticket-store';
+import { MemoryTicketStore } from '../../../tests/helpers/ticket-store';
 import { sampleTicket } from '../tickets/ticket';
 import { emptyEditor, newDraft, type OrderDraft } from '../tickets/order';
 import { PrintSession } from './session';
@@ -8,7 +7,7 @@ import { SimulatedPrinter } from './adapters/simulated';
 import type { TicketPrinter } from './port';
 
 function fixture() {
-  const store = new IndexedDbTicketStore(new IDBFactory(), 'orders');
+  const store = new MemoryTicketStore();
   let id = 0;
   const session = new PrintSession(
     store,
@@ -189,6 +188,7 @@ describe('successive orders and draft recovery', () => {
     await session.submit(accepted());
     await store.saveDraft({
       ...locked,
+      reference: session.state.ticket!.reference,
       submittedTicketId: session.state.ticket!.id,
     });
     const reload = new PrintSession(store, () => {});
@@ -286,17 +286,13 @@ describe('successive orders and draft recovery', () => {
       ),
     ).rejects.toThrow();
     await expect(
-      store.startOrder(
-        saved!.ticket,
-        { ...draft!, submittedTicketId: saved!.ticket.id },
-        {
-          id: 'new-attempt',
-          ticketId: saved!.ticket.id,
-          mode: 'simulated',
-          reprint: false,
-          startedAt: saved!.ticket.createdAt,
-        },
-      ),
+      store.startOrder({
+        id: 'new-attempt',
+        ticketId: saved!.ticket.id,
+        mode: 'simulated',
+        reprint: false,
+        startedAt: saved!.ticket.createdAt,
+      }),
     ).rejects.toThrow();
     expect(await store.load()).toEqual(saved);
     expect(await store.loadDraft()).toEqual(draft);
