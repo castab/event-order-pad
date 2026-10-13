@@ -876,6 +876,15 @@ for (const viewport of [
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    expect(
+      await page.evaluate(() => {
+        scrollTo(0, 500);
+        return {
+          overflow: document.documentElement.scrollHeight - innerHeight,
+          scrollY,
+        };
+      }),
+    ).toEqual({ overflow: 0, scrollY: 0 });
     const bounds = await page
       .getByRole('button', { name: 'Mark #0040 done', exact: true })
       .boundingBox();

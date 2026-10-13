@@ -968,6 +968,16 @@ for (const viewport of [
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    // Only the inner panels may scroll; a scrollable document shifts the app off-screen when installed.
+    expect(
+      await page.evaluate(() => {
+        scrollTo(0, 500);
+        return {
+          overflow: document.documentElement.scrollHeight - innerHeight,
+          scrollY,
+        };
+      }),
+    ).toEqual({ overflow: 0, scrollY: 0 });
     const targets = await page
       .locator(
         '.builder-header button, .serving-card button, .builder-actions button',
