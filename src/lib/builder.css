@@ -25,6 +25,14 @@
 * {
   box-sizing: border-box;
 }
+/* Installed Android PWAs can report vh/dvh taller than the visible window, which let the
+   document itself scroll. Size from the layout viewport and keep scrolling in the panels. */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 body {
   margin: 0;
   background: var(--surface-page);
@@ -55,8 +63,7 @@ button:disabled {
   position: relative;
   max-width: 560px;
   margin: auto;
-  height: 100vh;
-  height: 100dvh;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
