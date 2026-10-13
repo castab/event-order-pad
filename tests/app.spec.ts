@@ -862,13 +862,13 @@ test('cached app assets cannot recover orders without the required database', as
   ).toHaveText('1');
 });
 
-test('a database outage during editing blocks all order work until reload', async ({
+test('a database outage during editing blocks order work until it reconnects', async ({
   page,
 }) => {
   const { fail, submitted } = await mockUsb(page);
   await page.clock.install();
   await page.goto('/');
-  await chooseServing(page);
+  await chooseServing(page, 'Chocolate', 'Cup');
   await expect(printButton(page)).toBeEnabled();
   fail(true);
   await page.clock.runFor(5001);
@@ -877,10 +877,74 @@ test('a database outage during editing blocks all order work until reload', asyn
   );
   await expect(printButton(page)).toBeDisabled();
   await expect(page.getByLabel('Customer name (optional)')).toBeDisabled();
-  expect(submitted).toHaveLength(0);
+  await page.clock.runFor(5001);
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Database connection lost',
+  );
   fail(false);
-  await page.reload();
+  await page.clock.runFor(5001);
+  await expect(page.getByLabel('Print recovery')).toHaveCount(0);
   await expect(printButton(page)).toBeEnabled();
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  expect(submitted).toHaveLength(0);
+});
+
+test('a sleeping page skips health checks and rechecks when it becomes visible', async ({
+  page,
+}) => {
+  const { fail } = await mockUsb(page);
+  await page.clock.install();
+  await page.goto('/');
+  await chooseServing(page);
+  await expect(printButton(page)).toBeEnabled();
+  const setVisibility = (state: 'hidden' | 'visible') =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => value,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, state);
+  await setVisibility('hidden');
+  fail(true);
+  await page.clock.runFor(30_000);
+  await expect(page.getByLabel('Print recovery')).toHaveCount(0);
+  await setVisibility('visible');
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Database connection lost',
+  );
+  fail(false);
+  await page.clock.runFor(5001);
+  await expect(page.getByLabel('Print recovery')).toHaveCount(0);
+  await expect(printButton(page)).toBeEnabled();
+});
+
+test('a failed draft save recovers on demand without a reload', async ({
+  page,
+}) => {
+  const { fail, submitted } = await mockUsb(page);
+  await page.clock.install();
+  await page.goto('/');
+  await chooseServing(page, 'Chocolate', 'Cup');
+  await expect
+    .poll(async () => (await readDraft(page)).editor.flavors[0]?.flavor)
+    .toBe('Chocolate');
+  fail(true);
+  await page.getByLabel('Customer name (optional)').fill('Alex');
+  await expect(page.getByLabel('Print recovery')).toContainText(
+    'Could not save the order draft',
+  );
+  await expect(printButton(page)).toBeDisabled();
+  fail(false);
+  await page.getByRole('button', { name: 'Reconnect now' }).click();
+  await expect(page.getByLabel('Print recovery')).toHaveCount(0);
+  await expect(printButton(page)).toBeEnabled();
+  await expect(
+    page.getByLabel('Chocolate scoop count', { exact: true }),
+  ).toHaveText('1');
+  expect(submitted).toHaveLength(0);
 });
 
 for (const viewport of [

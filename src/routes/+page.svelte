@@ -54,6 +54,8 @@
   let outputConfirmed = $state(false);
   let formError = $state('');
   let online = $state(true);
+  let healthRunning = $state(false);
+  let connectionCheck: (() => Promise<void>) | undefined;
   let offlineStatus = $state('Checking offline availability…');
   let previewTimestamp = $state(new Date().toISOString());
   const printer = new LinuxCupsPrinter();
@@ -182,6 +184,7 @@
     const updateOnline = () => {
       online = navigator.onLine;
       if (!online && mounted) session?.block();
+      else void connectionCheck?.();
     };
     updateOnline();
     window.addEventListener('online', updateOnline);
@@ -193,20 +196,33 @@
       viewState = next;
     });
     void session.initialize();
-    let healthRunning = false;
-    const health = async () => {
-      if (cancelled || healthRunning || working || viewState.phase !== 'ready')
-        return;
+    connectionCheck = async () => {
+      if (cancelled || healthRunning || working) return;
+      const recovering = viewState.phase === 'blocked' && !viewState.conflict;
+      if (viewState.phase !== 'ready' && !recovering) return;
       healthRunning = true;
       try {
         await store!.check();
+        if (recovering && !cancelled) {
+          await session.recover();
+          if (!cancelled && viewState.phase === 'ready') void checkPrinter();
+        }
       } catch {
-        if (!cancelled) session.block();
+        if (!cancelled && !recovering) session.block();
       } finally {
         healthRunning = false;
       }
     };
-    const healthTimer = setInterval(() => void health(), 5000);
+    // Throttled background ticks during device sleep must not block the station.
+    const healthTimer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') void connectionCheck?.();
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void connectionCheck?.();
+    };
+    const onShow = () => void connectionCheck?.();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onShow);
     void checkPrinter();
     const checkCache = async () => {
       try {
@@ -229,6 +245,9 @@
       featuresController?.abort();
       clearTimeout(toastTimer);
       clearInterval(healthTimer);
+      connectionCheck = undefined;
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onShow);
       window.removeEventListener('online', updateOnline);
       window.removeEventListener('offline', updateOnline);
     };
@@ -564,7 +583,19 @@
                   : 'Database needs attention'}</strong
               >
               <p>{viewState.notice}</p>
-            </div>{/if}
+            </div>
+            {#if viewState.phase === 'blocked' && !viewState.conflict}
+              <p>
+                {healthRunning
+                  ? 'Reconnecting…'
+                  : 'Reconnecting automatically every few seconds.'}
+              </p>
+              <button
+                class="secondary"
+                onclick={() => void connectionCheck?.()}
+                disabled={healthRunning}>Reconnect now</button
+              >
+            {/if}{/if}
           {#if formError}<p role="alert">{formError}</p>{/if}
           {#if last?.result && last.result.status !== 'accepted'}
             <strong
@@ -804,7 +835,7 @@
             <h1>Your serving</h1>
             <p>
               {viewState.phase === 'blocked'
-                ? 'Restore the database connection to recover your order.'
+                ? 'Your order returns when the database reconnects.'
                 : 'Loading your order…'}
             </p>
           </section>{/if}
