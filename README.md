@@ -10,26 +10,76 @@ The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A sma
 
 ```mermaid
 flowchart TB
-  subgraph Ordering["Ordering device (phone or tablet browser)"]
-    B["Order builder / (transient view state)"]
+  subgraph Devices["Browsers on the tailnet"]
+    B["Order builder /<br/>view state only, nothing stored in the browser<br/>except the workspace cookie"]
+    Q["Now Scooping /queue/<br/>live build queue"]
   end
-  subgraph Station["Build-station browser"]
-    Q["Now Scooping /queue/"]
+  subgraph Host["One Linux machine"]
+    TS["Tailscale Serve<br/>HTTPS :443"]
+    subgraph Svc["printer-service (Node) on 127.0.0.1:4174"]
+      H["http.ts<br/>Host / Origin / JSON guards, database gate,<br/>routing, static files from build/"]
+      SR["Station repository<br/>workspaces, drafts, numbers,<br/>tickets, attempts"]
+      PR["Printing + Cups<br/>one print at a time,<br/>PDF rendered with PDFKit"]
+      OR["Orders + OrderStream<br/>order events, SSE snapshots"]
+    end
+    DB[("PostgreSQL 18, loopback only<br/>station, workspaces, tickets, print_attempts,<br/>print_dispatches, order_events")]
+    C["CUPS queue"]
+    P["Star TSP143IIIU"]
   end
-  subgraph Host["Linux host"]
-    TS["Tailscale Serve HTTPS :443"] --> S["printer-service (Node) 127.0.0.1:4174"]
-    S --- DB[("Local PostgreSQL 18: drafts, numbers, tickets, attempts, dispatches, order events")]
-    S -- "PDF via lp" --> C["CUPS queue"] -- USB --> P["Star TSP143IIIU"]
-  end
-  B -- "GET/POST /api/station, GET /api/database, POST /api/print" --> TS
-  Q -- "SSE /api/orders/events, POST done / reopen" --> TS
+  B -- "page + GET/POST /api/station, GET /api/database,<br/>GET /api/printer, GET /api/features, POST /api/print" --> TS
+  Q -- "page + GET /api/features, GET /api/orders/events (SSE),<br/>POST /api/orders/:id/done and /reopen" --> TS
+  TS --> H
+  H --> SR
+  H --> PR
+  H --> OR
+  SR --- DB
+  PR -- "dispatch claim and result" --- DB
+  OR -- "append and read events" --- DB
+  PR -- "PDF via lp" --> C
+  C -- USB --> P
+```
+
+The first print of an order crosses these boundaries in a fixed order. Nothing reaches `lp` until Postgres holds both the browser's intent and the service's own dispatch claim:
+
+```mermaid
+sequenceDiagram
+  participant B as Browser (PrintSession)
+  participant S as Service (http.ts)
+  participant D as PostgreSQL
+  participant C as CUPS and printer
+  B->>S: POST /api/station startOrder (revision, attempt)
+  S->>D: One transaction: number, immutable ticket, locked draft, pending attempt, submitted order event
+  S-->>B: Snapshot with the committed ticket
+  Note over B: A failed or uncertain commit stops here. Nothing is printed.
+  B->>S: POST /api/print (ticket, attemptId)
+  S->>D: Confirm the attempt belongs to this workspace, then insert the exclusive dispatch claim
+  S->>C: Wait for an idle queue, then lp with the PDF
+  C-->>S: Job accepted, or an error
+  S->>D: Record the result on the dispatch
+  S-->>B: accepted, failed or outcome-unknown
+  B->>S: POST /api/station finishAttempt
+  S->>D: Final attempt result and, if accepted, the next empty draft
 ```
 
 - **Ordering device** opens the Linux host's HTTPS URL in a browser. Each browser profile has its own database-backed draft, last submitted ticket and print recovery state. An automatic anonymous workspace cookie restores them after reload or browser restart; no station names or setup are needed. Separate devices can take orders concurrently. No order data is persisted in the browser.
-- **Linux host** runs `printer-service/`. It serves the static app from `build/`, renders each ticket as a PDF, submits it with `lp` to a local CUPS queue, and stores all station state and append-only order history in PostgreSQL 18 on the same host. Tailscale Serve provides private HTTPS on the tailnet.
+- **Linux host** runs `printer-service/`. It serves the static app from `build/`, renders each ticket as a PDF, submits it with `lp` to a local CUPS queue, and stores all station state and append-only order history in PostgreSQL 18 on the same host. Tailscale Serve provides private HTTPS on the tailnet. The docs call this machine the "Linux host", or "Mint" for the verified station.
 - **Build station** opens `/queue/` on the same origin and receives live updates over Server-Sent Events (SSE).
 
 The only supported print path from the UI is the Linux service. The repository also contains simulated and Android PassPRNT adapters; they are kept for unit tests and history and cannot be selected in the interface.
+
+### Terms used throughout
+
+| Term               | Meaning                                                                                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Serving**        | One cup or cone with its scoops, flavors and toppings.                                                                                                           |
+| **Order** / ticket | One customer's 1–30 servings. The immutable `OrderTicket` is the order; its ID is the order's identity everywhere.                                               |
+| **Workspace**      | The Postgres row that holds one browser profile's draft and latest ticket, identified by the anonymous cookie. Only order numbers are shared between workspaces. |
+| **Attempt**        | One try at printing a ticket, first print or REPRINT. It ends as `accepted`, `failed` or `outcome-unknown`.                                                      |
+| **Dispatch**       | The service's own exclusive claim on an attempt, committed before `lp`. A claim without a result is never replayed.                                              |
+| **Order event**    | An append-only `submitted`, `completed` or `reopened` row. The latest event for a ticket ID decides whether its queue card is open or done.                      |
+| **Tracking**       | `ORDER_PAD_TRACKING_ENABLED`. It only decides whether the queue is visible. Orders are recorded either way.                                                      |
+| **Capture cutoff** | `ORDER_PAD_CAPTURE_FROM`. Tickets created before it are excluded from the queue, and the service refuses to start new orders before it.                          |
+| **Accepted**       | CUPS queued the job. It does not prove paper came out.                                                                                                           |
 
 **Station status.** The verified station (2026-10-11) is Linux Mint 22.3 with Node 24, the CUPS queue `Star_TSP143` using the Star TSP100 Cutter driver, and a Galaxy S10e as the ordering device over Tailscale HTTPS. The owner reported a successful CUPS test page and successful Order Pad prints from that phone, including a built order. The detailed physical acceptance checklist (layout, REPRINT, interruptions and recovery) is not yet recorded as complete. See [docs/linux-printing.md](docs/linux-printing.md).
 
@@ -54,30 +104,31 @@ Full print and queue flows run in the Playwright suite, which mocks the API or s
 
 ## Commands
 
-| Command                             | What it does                                                                                                                                    |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                       | Vite dev server for the UI (port 5173, all interfaces).                                                                                         |
-| `npm run db:generate`               | Generates the server-only Prisma client.                                                                                                        |
-| `npm run db:migrate -- --name NAME` | Creates/applies a development migration; requires a development database and shadow database privileges.                                        |
-| `npm run db:deploy`                 | Applies committed migrations to the configured database; run explicitly before deployment.                                                      |
-| `npm run db:studio`                 | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                 |
-| `npm run test:postgres`             | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`.                                         |
-| `npm run check`                     | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, then `tsc -p tsconfig.printer.json` for `printer-service/`.               |
-| `npm run lint`                      | Prettier check of the whole repository. `npm run format` rewrites files.                                                                        |
-| `npm test`                          | Vitest unit and HTTP tests; Postgres integration tests run separately. `npm run test:watch` re-runs on change.                                  |
-| `npm run build`                     | Static app and service worker into `build/`.                                                                                                    |
-| `npm run build:printer`             | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                 |
-| `npm run start:printer`             | Runs the bundled service. Linux only; run it from the repository root (see [Configuration](#configuration)).                                    |
-| `npm run preview`                   | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                    |
-| `npx playwright install chromium`   | One-time browser download for the end-to-end tests.                                                                                             |
-| `npm run test:e2e`                  | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`. |
+| Command                             | What it does                                                                                                                                                   |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                       | Vite dev server for the UI (port 5173, all interfaces).                                                                                                        |
+| `npm run db:generate`               | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                             |
+| `npm run db:migrate -- --name NAME` | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                      |
+| `npm run db:deploy`                 | Applies committed migrations to the configured database; run explicitly before deployment.                                                                     |
+| `npm run db:studio`                 | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                |
+| `npm run test:postgres`             | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                 |
+| `npm run test:postgres:volume`      | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                      |
+| `npm run check`                     | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker. |
+| `npm run lint`                      | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                       |
+| `npm test`                          | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                       |
+| `npm run build`                     | Static app and service worker into `build/`.                                                                                                                   |
+| `npm run build:printer`             | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                |
+| `npm run start:printer`             | Runs the bundled service with `.env` loaded when present. Linux only; run it from the repository root (see [Configuration](#configuration)).                   |
+| `npm run preview`                   | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                   |
+| `npx playwright install chromium`   | One-time browser download for the end-to-end tests.                                                                                                            |
+| `npm run test:e2e`                  | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                |
 
 To run everything CI runs, in CI's order:
 
 ```sh
 npm ci
-npm run test:postgres:volume  # disposable PostgreSQL 18 Docker volume check
-npm run test:postgres  # configure a separate *_test database first
+npm run test:postgres  # needs TEST_DATABASE_URL for a separate *_test database
+npm run test:postgres:volume  # needs Docker; uses its own disposable container
 npm run check
 npm run lint
 npm test
@@ -103,10 +154,14 @@ src/
   routes/+page.svelte         Order builder (/)
   routes/queue/+page.svelte   Now Scooping (/queue/)
   service-worker/     Versioned offline shell cache (own tsconfig; excluded from the root project)
-printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, Postgres dispatch journal, Prisma station/order stores, SSE
-prisma/               Station and order-event schemas and committed PostgreSQL migrations
-compose.yaml          Local PostgreSQL 18 with a persistent named volume
-tests/                Playwright specs (app.spec.ts, queue.spec.ts, queue-live.spec.ts)
+printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, Postgres dispatch journal, Prisma station/order stores, SSE.
+                      Its Prisma client is generated into printer-service/generated/ (Git-ignored); `*.postgres.test.ts` need a real database.
+prisma/               Schema and committed PostgreSQL migrations (prisma.config.ts at the root loads .env for the db:* commands)
+compose.yaml          Local PostgreSQL 18 with a persistent named volume, bound to loopback
+tests/                Playwright specs: app.spec.ts (builder, mocked API), queue.spec.ts (queue, mocked API and EventSource), queue-live.spec.ts and stations-live.spec.ts (real HTTP service with in-memory repositories and stubbed CUPS); helpers/ holds the in-memory test doubles
+scripts/              test-postgres.mjs and test-postgres-volume.mjs, the runners behind the two Postgres test commands
+.env.example          Template for the Git-ignored .env (service, Docker Compose and test variables)
+.github/workflows/    CI (checks.yml)
 static/               Poppins fonts, logo, icons, web app manifest
 design/               Design handoff (brief, reference screens, tokens). tokens/tokens.css ships in the app.
 docs/                 Station setup, hardware notes, verification log
@@ -219,17 +274,27 @@ There is no background print queue or exactly-once print guarantee. Postgres cen
 
 ## Configuration
 
-The service reads environment variables at startup. `npm run start:printer` also loads `.env` when present; exported variables take precedence:
+The service reads environment variables once at startup. `npm run start:printer` loads `.env` when it exists (`node --env-file-if-exists=.env`); variables already exported in the shell take precedence over `.env`. Copy [.env.example](.env.example) to start. Every variable is validated, and an invalid or missing required value stops startup:
 
-| Variable                     | Default                                               | Notes                                                                                                                                             |
-| ---------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`               | _required_                                            | Postgres URL using `127.0.0.1`, `localhost` or `[::1]`. Remote hosts and connection-host overrides are rejected. Never supplied to the browser.   |
-| `ORDER_PAD_CAPTURE_FROM`     | _required_                                            | Fixed ISO UTC timestamp with milliseconds, e.g. `2026-10-13T00:00:00.000Z`. Tickets older than this are excluded. Keep the value across restarts. |
-| `ORDER_PAD_ORIGIN`           | _required_                                            | Root HTTPS origin the browsers use, such as `https://host.tailnet.ts.net`. It must be `https:` with no path, query or credentials.                |
-| `ORDER_PAD_QUEUE`            | `OrderPad`                                            | Name of the local USB CUPS queue. The verified station uses `Star_TSP143`.                                                                        |
-| `ORDER_PAD_PORT`             | `4174`                                                | Loopback port (1024–65535). The service binds to `127.0.0.1` only.                                                                                |
-| `ORDER_PAD_FONT`             | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | Font embedded in receipt PDFs (`apt install fonts-dejavu-core`).                                                                                  |
-| `ORDER_PAD_TRACKING_ENABLED` | `true`                                                | Exactly `true` or `false`. See [Optional order tracking](#optional-order-tracking).                                                               |
+| Variable                     | Default                                               | Notes                                                                                                                                                                         |
+| ---------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`               | _required_                                            | Postgres URL using `127.0.0.1`, `localhost` or `[::1]`. Remote hosts and connection-host overrides are rejected. Never supplied to the browser.                               |
+| `ORDER_PAD_CAPTURE_FROM`     | _required_                                            | Fixed ISO UTC timestamp with milliseconds, e.g. `2026-10-13T00:00:00.000Z`. Set it once to the rollout time and keep it across restarts. See below.                           |
+| `ORDER_PAD_ORIGIN`           | _required_                                            | Root HTTPS origin the browsers use, such as `https://host.tailnet.ts.net`. It must be `https:` with no path, query or credentials.                                            |
+| `ORDER_PAD_QUEUE`            | `OrderPad`                                            | Name of the local USB CUPS queue: letters, digits, `_` and `-`, up to 80 characters. The default is not a real queue name; set this. The verified station uses `Star_TSP143`. |
+| `ORDER_PAD_PORT`             | `4174`                                                | Loopback port (1024–65535). The service binds to `127.0.0.1` only.                                                                                                            |
+| `ORDER_PAD_FONT`             | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | Font embedded in receipt PDFs (`apt install fonts-dejavu-core`).                                                                                                              |
+| `ORDER_PAD_TRACKING_ENABLED` | `true`                                                | Exactly `true` or `false`. See [Optional order tracking](#optional-order-tracking).                                                                                           |
+
+**Capture cutoff.** `ORDER_PAD_CAPTURE_FROM` separates old history from the live station. A ticket created before it is never added to the queue (`POST /api/orders` answers `{ excluded: true }`), and the service rejects `startOrder` when its own clock is earlier than the cutoff, so a cutoff in the future blocks all new orders until that time. The service uses its own clock for ticket timestamps, so keep the host clock accurate. Do not change the value after rollout, and never lower it to backfill history; events already stored are not removed or re-evaluated.
+
+**Variables used outside the service.** Docker Compose and the tests read these from `.env` too; the service ignores them:
+
+| Variable                                            | Used by                                                                                                                       |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `compose.yaml` creates the local database with them. Keep `DATABASE_URL` consistent with them (the example uses `order_pad`). |
+| `POSTGRES_PORT`                                     | Host loopback port Compose publishes (default `5432`). Keep `DATABASE_URL` consistent with it.                                |
+| `TEST_DATABASE_URL`                                 | `npm run test:postgres`. Must name a separate disposable database ending in `_test`; the tests clear its tables.              |
 
 **Start the service from the repository root.** It serves `./build` and checks the migrated database before listening. An unreachable database or missing schema stops startup. Keep environment configuration stable across restarts.
 
@@ -253,7 +318,18 @@ All `/api` responses are JSON with `Cache-Control: no-store`, except the SSE str
 | `POST /api/orders/:id/done`   | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `POST /api/orders/:id/reopen` | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent; keeps the original submission time.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
-A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `submittedAt` is the ticket's own `createdAt`, so a delayed publication does not reset its wait time. With tracking off, only queue GET routes return 404 with `code: "ORDER_TRACKING_DISABLED"`. Order POST routes remain available with tracking off. Unknown order IDs return 404 and an unavailable order database returns 503. Every API route requires the database. A failed database check returns 503 with `code: "database-unavailable"` before CUPS is invoked; queue visibility cannot bypass this gate. Done/Undo requests are not automatically retried: refresh before trying again after an ambiguous response. Any other non-`/api` GET or HEAD request serves a file from `build/`. Files under `/_app/immutable/` are cached for a year; everything else is `no-cache`.
+A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `submittedAt` is the ticket's own `createdAt`, so a delayed publication does not reset its wait time.
+
+**Who calls what.** The builder calls `/api/database` (health check), `/api/station`, `/api/printer`, `/api/features` and `/api/print`. The queue calls `/api/features`, `/api/orders/events` and the Done/Undo POSTs. The app itself never calls `POST /api/orders` or `GET /api/orders`: the first order commits through `POST /api/station`. Those two routes remain for diagnostics and authorized same-origin clients, and they obey the same cutoff, tracking and database rules.
+
+**Request rules and failures:**
+
+- **Every `/api` route requires the database.** A failed schema check returns 503 with `code: "database-unavailable"` before CUPS is touched, and queue visibility cannot bypass this gate.
+- **Host and Origin.** A wrong `Host` returns 403. A POST to `/api/station`, `/api/print` or `/api/orders*` with the wrong `Origin` or a non-JSON `Content-Type` returns 403. The SSE endpoint rejects a foreign `Origin` or `Sec-Fetch-Site: cross-site` with 403.
+- **Tracking off.** Only the queue GET routes (`/api/orders`, `/api/orders/events`) return 404 with `code: "ORDER_TRACKING_DISABLED"`. Every order POST stays available.
+- **Other errors.** Unknown order IDs return 404, an unknown `/api` path returns 404, and a request body over 128 KiB returns 413. An unavailable order database returns 503.
+- **No automatic retries.** Done and Undo are not retried. After an ambiguous response, refresh the queue before trying again.
+- **Static files.** Any other GET or HEAD outside `/api` serves a file from `build/`. Files under `/_app/immutable/` are cached for a year and everything else is `no-cache`.
 
 ## Data and persistence
 
@@ -327,7 +403,7 @@ An open tab checks for a new version on load, when you return to the tab, when t
 
 ## Upgrading a station with old browser data
 
-This release stops opening `order-pad-v1` entirely. It does not rename, migrate, clear or reset v1/v2 browser records. It also stops reading/writing `.print-data/` print journals. Preserve both archives for manual reconciliation, and inspect pending output before rollout. Previous browser drafts, last receipts, attempts and unpublished outbox entries are not automatically transferred to Postgres; complete or reconcile them with the old version first. Existing centralized queue events remain available. See the [station upgrade steps](#set-up-postgres-and-upgrade-the-station).
+The Postgres-backed app never opens `order-pad-v1`. It does not rename, migrate, clear or reset v1/v2 browser records, and it no longer reads or writes `.print-data/` print journals. Preserve both archives for manual reconciliation, and inspect pending output before rollout. Previous browser drafts, last receipts, attempts and unpublished outbox entries are not automatically transferred to Postgres; complete or reconcile them with the old version first. Existing centralized queue events remain available. See the [station upgrade steps](#set-up-postgres-and-upgrade-the-station).
 
 ## Known limits and deferred work
 
