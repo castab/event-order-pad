@@ -98,7 +98,7 @@ export function formatTicket(
   );
   rule('=');
   ticket.servings.forEach((serving, i) => {
-    add(`[ ] SERVING ${i + 1} OF ${ticket.servings.length}`);
+    add(`SERVING ${i + 1} OF ${ticket.servings.length}`);
     add(
       `${plural(scoops(serving), 'SCOOP')} - ${serving.container.toUpperCase()}`,
       'body',
@@ -252,12 +252,11 @@ export function prepTicketLayout(
   rule(y, 8);
   y += 28;
   ticket.servings.forEach((serving, i) => {
-    box(24, y, 40, 40, false, 4);
     text(
       `SERVING ${i + 1} OF ${ticket.servings.length}`,
-      80,
+      24,
       y + 5,
-      472,
+      528,
       24,
       32,
     );

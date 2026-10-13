@@ -140,7 +140,7 @@ Layout, top to bottom (see `screens/prep-ticket.dc.html`):
 4. Display name, large, uppercase.
 5. Totals box: `3 SERVINGS | 7 SCOOPS`.
 6. Heavy rule, then one block per serving, always in this field order:
-   - tick box + `SERVING 1 OF 3`
+   - `SERVING 1 OF 3` (no tick box; orders are small enough to build without checking off servings)
    - scoop total in an inverse tag + container: `[3] SCOOPS · SUGAR CONE`
    - one line per flavor: `2 × Chocolate Chip`
    - `TOPPINGS` + comma list, or `No toppings`
@@ -156,7 +156,7 @@ ORDER #0043
 MARIA
 3 SERVINGS | 7 SCOOPS
 ==========================================
-[ ] SERVING 1 OF 3
+SERVING 1 OF 3
     3 SCOOPS - SUGAR CONE
     2 x Chocolate Chip
     1 x Strawberry
