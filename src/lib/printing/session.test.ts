@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryTicketStore } from '../../../tests/helpers/ticket-store';
 import { PrintSession } from './session';
+import { StationConflict } from '../storage/ticket-store';
 import { sampleTicket } from '../tickets/ticket';
 import { SimulatedPrinter } from './adapters/simulated';
 import { passPrntReturn } from './adapters/passprnt';
@@ -195,6 +196,50 @@ describe('durable print state', () => {
     const reload = new PrintSession(store, () => {});
     await reload.initialize();
     expect(reload.state.attempts[0].result?.status).toBe('outcome-unknown');
+  });
+  it('recovers a lost connection in place without sending', async () => {
+    const { store, session } = await fixture();
+    await session.initialize();
+    const draft = { ...session.state.draft!, name: 'Alex' };
+    session.updateDraft(draft);
+    await vi.waitFor(() => expect(session.state.savingDraft).toBe(false));
+    session.block();
+    expect(session.state.phase).toBe('blocked');
+    await session.recover();
+    expect(session.state.phase).toBe('ready');
+    expect(session.state.notice).toBeUndefined();
+    expect(session.state.draft?.name).toBe('Alex');
+    expect((await store.loadDraft())?.name).toBe('Alex');
+  });
+  it('recovers an unsaved outcome as unknown and still requires confirmation', async () => {
+    const { store, session } = await fixture();
+    await session.initialize();
+    vi.spyOn(store, 'finishAttempt').mockRejectedValueOnce(new Error('asleep'));
+    const printer = new SimulatedPrinter('accepted', 0);
+    const send = vi.spyOn(printer, 'print');
+    await session.print(printer, false);
+    expect(session.state.phase).toBe('blocked');
+    await session.recover();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(session.state.phase).toBe('ready');
+    expect(session.state.attempts.at(-1)?.result?.status).toBe(
+      'outcome-unknown',
+    );
+    await session.print(printer, true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it('leaves a stale-tab conflict blocked until reload', async () => {
+    const { store, session } = await fixture();
+    await session.initialize();
+    vi.spyOn(store, 'saveDraft').mockRejectedValueOnce(
+      new StationConflict('The station changed in another tab.'),
+    );
+    session.updateDraft({ ...session.state.draft!, name: 'Alex' });
+    await vi.waitFor(() => expect(session.state.conflict).toBe(true));
+    const load = vi.spyOn(store, 'load');
+    await session.recover();
+    expect(load).not.toHaveBeenCalled();
+    expect(session.state.phase).toBe('blocked');
   });
   it('conservatively records an adapter exception as unknown', async () => {
     const { session } = await fixture();

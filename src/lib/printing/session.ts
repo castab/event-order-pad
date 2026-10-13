@@ -106,7 +106,7 @@ export class PrintSession {
         attempts: [],
         ...blockedNotice(
           error,
-          'Database unavailable or station state changed. Order editing and printing are blocked. Restore Postgres on the app machine and reload to recover saved state.',
+          'Database unavailable. Order editing and printing are paused until it reconnects. Nothing will be resent automatically.',
         ),
       });
     }
@@ -134,7 +134,7 @@ export class PrintSession {
           phase: 'blocked',
           ...blockedNotice(
             error,
-            'Could not save the order draft. Printing is blocked. Reopen the page to recover the last saved draft.',
+            'Could not save the order draft. Printing is paused until the database reconnects; the last saved draft returns automatically.',
           ),
         });
       }
@@ -148,8 +148,21 @@ export class PrintSession {
       phase: 'blocked',
       conflict: false,
       notice:
-        'Database connection lost. Order editing and printing are blocked. Restore Postgres on this machine and reload. Nothing will be resent automatically.',
+        'Database connection lost. Order editing and printing are paused until it reconnects. Nothing will be resent automatically.',
     });
+  }
+
+  /** Reload saved state from Postgres, exactly as a page reload would. Never sends. */
+  async recover(): Promise<void> {
+    if (this.busy || this.state.phase !== 'blocked' || this.state.conflict)
+      return;
+    this.busy = true;
+    try {
+      await this.draftWrites;
+      await this.initialize();
+    } finally {
+      this.busy = false;
+    }
   }
 
   private requiresConfirmation(): boolean {
@@ -180,7 +193,7 @@ export class PrintSession {
         phase: 'blocked',
         ...blockedNotice(
           error,
-          'Could not save the new order. No data was sent. Restore Postgres and reload to recover saved state.',
+          'Could not save the new order. No data was sent. Saved state returns automatically when the database reconnects.',
         ),
       });
     } finally {
@@ -233,7 +246,7 @@ export class PrintSession {
         phase: 'blocked',
         ...blockedNotice(
           error,
-          'Could not save print intent. No job was sent by this browser. Reload to recover committed state. Nothing will be resent automatically.',
+          'Could not save print intent. No job was sent by this browser. Committed state returns when the database reconnects. Nothing will be resent automatically.',
         ),
       });
     } finally {
@@ -292,7 +305,7 @@ export class PrintSession {
         attempts: previous,
         ...blockedNotice(
           error,
-          'Could not save print intent. No data was sent. Restore Postgres and reload to recover saved state.',
+          'Could not save print intent. No data was sent. Saved state returns automatically when the database reconnects.',
         ),
       });
       return;
@@ -363,7 +376,7 @@ export class PrintSession {
         attempts: [...previous, completed],
         conflict: false,
         notice:
-          'The send finished but its outcome could not be saved. Printing is blocked. Reload to recover the database outcome. If it is still unknown, check the physical ticket.',
+          'The send finished but its outcome could not be saved. Printing is paused until the database reconnects and returns its outcome. If it is still unknown, check the physical ticket.',
       });
     } finally {
       this.busy = false;
