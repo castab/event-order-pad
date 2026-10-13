@@ -6,7 +6,7 @@ This guide is for AI coding agents and human contributors. [README.md](README.md
 
 Fiona's Order Pad is an ice cream order builder that prints preparation tickets on a Star TSP143IIIU receipt printer. It has two parts:
 
-- **Browser app** (`src/`): a SvelteKit 2 / Svelte 5 static PWA with two screens, the order builder at `/` and **Now Scooping** (the build queue) at `/queue/`. It saves drafts, tickets and print attempts in IndexedDB.
+- **Browser app** (`src/`): a SvelteKit 3 / Svelte 5 static PWA with two screens, the order builder at `/` and **Now Scooping** (the build queue) at `/queue/`. It saves drafts, tickets and print attempts in IndexedDB.
 - **Linux service** (`printer-service/`): a dependency-light Node HTTP server. It serves `build/`, renders tickets to PDF with PDFKit, submits them to CUPS with `lp`, keeps a durable print-attempt journal and order store, and streams queue snapshots over SSE.
 
 The service imports domain code from `src/lib/` directly, so the browser and the server share one ticket model and one validator. There are no prices, payments or accounts.

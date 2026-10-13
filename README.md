@@ -2,7 +2,7 @@
 
 Touch-friendly order entry for an ice cream stand. Staff build each customer's order on a phone or tablet, a USB receipt printer attached to a Linux server prints a preparation ticket, and a second screen, **Now Scooping**, shows the build station which orders are still open. There are no prices, payments or user accounts.
 
-The app is a prerendered SvelteKit 2 / Svelte 5 PWA written in TypeScript. A small Node service on the Linux host serves it, prints through CUPS and keeps the shared order queue.
+The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A small Node service on the Linux host serves it, prints through CUPS and keeps the shared order queue.
 
 > **Coding agents and new contributors:** start with [AGENTS.md](AGENTS.md). It lists the invariants that must not break, where each concern lives, and how to verify a change.
 
@@ -80,7 +80,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these on Node 24 for every pull request and every push to `main`, with `--with-deps` on the Playwright install. To check a branch that has no pull request, start the workflow manually from the Actions tab. Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins dependencies, and the `cookie` override in `package.json` resolves an upstream SvelteKit 2 advisory.
+CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these on Node 24 for every pull request and every push to `main`, with `--with-deps` on the Playwright install. To check a branch that has no pull request, start the workflow manually from the Actions tab. Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins the SvelteKit 3 toolchain.
 
 ## Project layout
 
