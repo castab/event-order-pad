@@ -866,10 +866,10 @@ test('a database outage during editing blocks all order work until reload', asyn
   page,
 }) => {
   const { fail, submitted } = await mockUsb(page);
+  await page.clock.install();
   await page.goto('/');
   await chooseServing(page);
   await expect(printButton(page)).toBeEnabled();
-  await page.clock.install();
   fail(true);
   await page.clock.runFor(5001);
   await expect(page.getByLabel('Print recovery')).toContainText(
