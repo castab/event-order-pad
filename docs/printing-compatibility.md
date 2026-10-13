@@ -10,13 +10,13 @@ The Linux route is implemented and is the only route the UI uses: **phone browse
 
 ## Android PassPRNT route (historical)
 
-**Static HTTPS app in Android Chrome → Star PassPRNT → phone USB-C host/OTG → printer USB-B.** This was the original route and is no longer reachable from the ordering UI (see the note above). The ticket domain, simulator and IndexedDB remain printer-neutral. No custom native app was added.
+**Static HTTPS app in Android Chrome → Star PassPRNT → phone USB-C host/OTG → printer USB-B.** This was the original route and is no longer reachable from the ordering UI (see the note above). The ticket domain and simulator remain printer-neutral. (This route stored history in browser IndexedDB; the current app uses Postgres.) No custom native app was added.
 
 The [IIIU USB manual](https://www.star-m.jp/products/s_print/tsp100iiiu/manual/en/installing/connectingUSBCable.htm) assigns Android communication to **USB-B** with a suitable device cable/adapter. USB-A only charges Android; USB-B does not charge the phone. Use a USB-C host/OTG adapter plus an A-to-B data cable, or a compatible C-to-B data cable. Exact cable/phone compatibility needs testing. This is different from the former IV AOA route.
 
 [PassPRNT's Android table](https://www.star-m.jp/products/s_print/sdk/passprnt/manual/android/en/functions.html) lists TSP100IIIU USB, firmware 1.0+, empty settings, and Android 9+ for PassPRNT 2.8+. Android 12 meets the OS baseline but does not prove the installed apps, USB permission or cable work. Manual 1.9.0 describes Android app 2.11.0; record the installed version.
 
-The [supported devices PDF, TSP100IIIU table (page 21)](https://star-m.jp/wp-content/uploads/supported_peripheral_devices_en.pdf) marks PassPRNT USB printing supported and webPRNT Browser / StarXpand Web unsupported. The old IV adapter and vendor scripts have been removed; the attempt model retains the `star-usb` identifier for IV compatibility. Phase 1 performs a one-time reset of v1 browser tickets and attempts (see README).
+The [supported devices PDF, TSP100IIIU table (page 21)](https://star-m.jp/wp-content/uploads/supported_peripheral_devices_en.pdf) marks PassPRNT USB printing supported and webPRNT Browser / StarXpand Web unsupported. The old IV adapter and vendor scripts have been removed; the attempt model retains the `star-usb` identifier for IV compatibility. Old v1 browser tickets and attempts are left untouched as archives and are never imported (see README, “Upgrading a station with old browser data”).
 
 ## Implemented protocol
 

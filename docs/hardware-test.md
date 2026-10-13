@@ -41,7 +41,7 @@ For the current Linux route, follow [Linux setup and acceptance](linux-printing.
 - Missing launch/return: close PassPRNT and inspect output, then **Recover without resending**. One saved attempt becomes unknown; reprint requires duplicate acknowledgment.
 - Mid-send cancellation/disconnection: check unknown outcome and no automatic retry. Never interrupt firmware maintenance. Close active PassPRNT jobs before another attempt.
 - Late/repeated callback: final outcome must stay unchanged. Late success after unknown recovery remains unknown.
-- Reload: same ticket/history, simulation default, intentional real-mode selection. The attempt model still supports the IV identifier; phase 1 resets v1 browser history once (see README).
+- Reload: same ticket/history, simulation default, intentional real-mode selection. The attempt model still supports the IV identifier. (Historical: browser history then lived in IndexedDB. The current app stores everything in Postgres and leaves legacy browser data untouched; see README.)
 
 ## Offline acceptance
 

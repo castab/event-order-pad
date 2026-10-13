@@ -38,7 +38,7 @@ npm run build:printer
 tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
 ```
 
-Set the printed Mint hostname as the HTTPS origin, replacing the example:
+Put the printed Mint hostname in `.env` as `ORDER_PAD_ORIGIN`, together with `ORDER_PAD_QUEUE`, `DATABASE_URL` and `ORDER_PAD_CAPTURE_FROM` (see [.env.example](../.env.example)). `npm run start:printer` loads `.env`; variables exported in the shell override it. For a one-off run you can export them instead, replacing the example:
 
 ```sh
 export ORDER_PAD_ORIGIN='https://YOUR-MINT-HOST.YOUR-TAILNET.ts.net'
@@ -72,13 +72,15 @@ Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each b
 - The ordering interface uses this USB route exclusively. A static-only host or cached shell cannot edit/recover drafts or print. Both the app service and local Postgres are required. Simulation/PassPRNT adapters remain available for compatibility tests. Legacy v1/v2 browser records are left untouched.
 - Printed ticket times use the **Mint host’s** local time zone, because the service renders the PDF. Check it with `timedatectl` before an event. Browser previews and the queue use each device’s own time zone.
 
-Required: `DATABASE_URL` (loopback Postgres connection URL; remote hosts/host overrides are rejected), `ORDER_PAD_CAPTURE_FROM` (fixed UTC capture cutoff with milliseconds), and `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to hide the queue while retaining order capture; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
+Required: `DATABASE_URL` (loopback Postgres connection URL; remote hosts/host overrides are rejected), `ORDER_PAD_CAPTURE_FROM` (fixed UTC capture cutoff with milliseconds, set once at rollout; a cutoff later than the host clock makes every new order fail until that time, so check `date -u` first), and `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to hide the queue while retaining order capture; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
 
 Start the service **from the repository root**: it serves `./build`, checks the migrated database before listening, and exits if either is unavailable.
 
 The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`. Its `WorkingDirectory` is the repository root and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. Tailscale `--bg` persists the proxy, not Node. Disable host sleep for event use.
 
 ## Verified Mint setup — 2026-10-11
+
+This section is a dated record of the first station check, not current instructions. It predates the Postgres store, workspaces and the removal of the printer selector, so its test counts and the UI steps in its last paragraph (the printer selector and **Print Test Ticket**) no longer apply as written. Current status is in [verification.md](verification.md).
 
 - Node **24.21.0**, npm **11.19.0**; locked dependencies installed with zero audit vulnerabilities.
 - Existing queue **Star_TSP143**, local Star USB backend, accepting jobs and idle with no pending jobs before the phone test. Driver: **Star TSP100 Cutter**, PPD `FileVersion` **2.1**, `rastertostar` filter. PPD version does not establish the driver package version.
@@ -126,7 +128,6 @@ For physical acceptance of the simplified workflow:
 4. Open **Order tools**, inspect the `Star_TSP143` queue under Printer settings, tap **Check printer**, and close Order tools. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
 5. Inspect printer output and pending jobs during a controlled connection interruption. Verify the UI retains an unknown order and requires acknowledgment before continuing, without automatically resending.
 6. On any printed ticket, verify each serving block starts with `SERVING n OF m` (for example `SERVING 1 OF 2`) at the left margin, with no empty box before it, and that the line stays clear of the black scoop-count tag below it.
-
 7. With no print in progress, stop local Postgres and verify editing, New order, reprints and Print order become blocked. Verify no CUPS job is created. Restore Postgres and reload; confirm the saved draft and any committed ticket number return. Also verify the service refuses to start while Postgres is down.
 8. Open two browser profiles/devices. Confirm independent names and servings, “New order” before submission, and no draft-save conflict when the other prints. Print concurrently and verify distinct numbers and one physical ticket per attempt. Reload/restart each browser and verify its own draft and receipt return. In two tabs of one profile, verify stale edits cannot replace newer saved state.
 9. During a controlled pending CUPS job, verify a second request waits and submits once after the queue clears. Keep a job pending beyond 30 seconds and verify the second attempt reports that no job was submitted. Restart during a wait and verify no waiting request replays; inspect output before acknowledging any unknown outcome.
@@ -135,7 +136,7 @@ These are physical acceptance steps, not claims that this interaction update has
 
 ## Still to test
 
-Detailed content/glyph inspection beyond the first owner-confirmed readable sample; REPRINT and stable ID; rapid taps; host restart/browser recovery; disconnect/cover/paper errors and delayed jobs; network loss during submission; cached phone reopening with host reachable. The successful smoke test does not establish these recovery and failure cases.
+Detailed content/glyph inspection beyond the first owner-confirmed readable sample; REPRINT and stable ID; rapid taps; host restart/browser recovery; disconnect/cover/paper errors and delayed jobs; network loss during submission; cached phone reopening with host reachable; the Postgres-outage, two-profile and pending-CUPS-job checks (acceptance steps 7–9 above). The successful smoke test does not establish these recovery and failure cases.
 
 Inspect pending jobs before retrying:
 

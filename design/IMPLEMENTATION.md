@@ -7,6 +7,9 @@
 > - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration commits atomically with print intent through `POST /api/station`. Postgres on the app host owns drafts, counters, tickets, attempts and dispatch records; database failure blocks order work. The browser has no persistence or outbox.
 > - Postgres stores independent anonymous browser workspaces. Only order numbering is global; the service assigns a number atomically with print intent. Same-workspace revision checks reject stale tabs.
 > - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.
+> - The header shows **New order** until the service assigns a number when the order is committed for printing, and only then `Order #0043`.
+> - The “Shared order store” section below is the original proposal. Order events live in Postgres (`order_events`, append-only, latest event wins), not on disk. The queue never polls. The builder never calls `POST /api/orders`; the first order is recorded by `POST /api/station`. `GET`/`POST /api/orders*` remain for diagnostics and same-origin clients.
+> - Tickets stored in IndexedDB (the “legacy history” discussion below) are no longer used. Only `schema: 2` tickets parse; v1 `items` data is rejected and never imported.
 
 This folder is the design handoff for the order builder and build queue: touch order entry that prints a
 preparation ticket, plus a second screen where the build station tracks open orders and marks
