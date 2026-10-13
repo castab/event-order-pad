@@ -132,6 +132,7 @@ For physical acceptance of the simplified workflow:
 3. Begin another draft with a different name and unfinished selections. Deliberately **Reprint last order**. Verify REPRINT, original label/content/ID/timestamp, and that the new draft is unchanged.
 4. Open **Order tools**, inspect the `Star_TSP143` queue under Printer settings, tap **Check printer**, and close Order tools. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
 5. Inspect printer output and pending jobs during a controlled connection interruption. Verify the UI retains an unknown order and requires acknowledgment before continuing, without automatically resending.
+6. On any printed ticket, verify each serving block starts with `SERVING n OF m` (for example `SERVING 1 OF 2`) at the left margin, with no empty box before it, and that the line stays clear of the black scoop-count tag below it.
 
 These are physical acceptance steps, not claims that this interaction update has already been tested on hardware.
 
