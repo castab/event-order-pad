@@ -60,6 +60,7 @@ Full print and queue flows run in the Playwright suite, which mocks the API or s
 | `npm run db:generate`               | Generates the server-only Prisma client.                                                                                                        |
 | `npm run db:migrate -- --name NAME` | Creates/applies a development migration; requires a development database and shadow database privileges.                                        |
 | `npm run db:deploy`                 | Applies committed migrations to the configured database; run explicitly before deployment.                                                      |
+| `npm run db:studio`                 | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                 |
 | `npm run test:postgres`             | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`.                                         |
 | `npm run check`                     | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, then `tsc -p tsconfig.printer.json` for `printer-service/`.               |
 | `npm run lint`                      | Prettier check of the whole repository. `npm run format` rewrites files.                                                                        |
@@ -288,6 +289,35 @@ Database waits are bounded (1 s service-operation queue, 1 s connection/acquisit
 For integration tests, create a separate disposable database ending in `_test`, set `TEST_DATABASE_URL`, and run `npm run test:postgres`. The script applies migrations and clears only that test database’s workspace, counter, attempt, ticket and event tables between tests. With the example Docker configuration, create it using `docker compose exec postgres sh -c 'createdb -U "$POSTGRES_USER" order_pad_test'`. CI provisions its own PostgreSQL 18 service. Do not point tests at station history.
 
 Back up all Postgres tables together, for example with `pg_dump` through the container. Keep the volume intact across updates. Database loss includes drafts and print history, so never reset or restore it while a print may be unresolved. A restore to an earlier backup cannot establish whether a newer physical ticket printed; reconcile paper and CUPS first.
+
+### Inspect the database
+
+`npm run db:studio` starts Prisma Studio, which ships with the Prisma CLI, at `http://localhost:5555` and opens it in your browser. It listens on loopback only and reads `DATABASE_URL` from `.env`. Add `-- --port 5556` to choose another port.
+
+Use Studio to look, not to edit. Studio can change and delete rows, and every hand edit is a direct database write the service does not expect:
+
+- `order_events` is append-only, and the latest event decides an order’s state. Changing or deleting a row can reopen a completed order or hide an open one.
+- Tickets are immutable and re-validated on every read. A hand-edited ticket the menu rejects makes the station return 503.
+- Changing a workspace draft or revision causes conflicts in open browsers.
+- Changing an attempt or dispatch can hide an unknown print outcome, so staff may reprint a ticket that already printed.
+
+On the station database, connect with a read-only role so a stray click cannot write. Create it once (with the example Docker configuration, run `docker compose exec postgres psql -U order_pad order_pad`):
+
+```sql
+CREATE ROLE order_pad_readonly LOGIN PASSWORD 'choose-a-password';
+GRANT CONNECT ON DATABASE order_pad TO order_pad_readonly;
+GRANT USAGE ON SCHEMA public TO order_pad_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO order_pad_readonly;
+ALTER DEFAULT PRIVILEGES FOR ROLE order_pad IN SCHEMA public GRANT SELECT ON TABLES TO order_pad_readonly;
+```
+
+Then pass its URL instead of the service’s:
+
+```sh
+npm run db:studio -- --url="postgresql://order_pad_readonly:choose-a-password@127.0.0.1:5432/order_pad"
+```
+
+Edits in Studio then fail with a permission error. Never use Studio to repair a print record; reconcile paper and CUPS first.
 
 ## Updates and offline use
 

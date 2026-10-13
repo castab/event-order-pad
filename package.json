@@ -18,6 +18,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
     "precheck": "npm run db:generate",
     "prebuild:printer": "npm run db:generate",
     "test:postgres": "node --env-file-if-exists=.env scripts/test-postgres.mjs",
