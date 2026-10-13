@@ -62,7 +62,7 @@ Screenshots at 390×844, 768×1024, and 1024×768 show no horizontal overflow an
 
 Both production outputs have been rebuilt. The existing station service was restarted with its unchanged launcher/configuration after confirming no pending CUPS jobs and no unfinished journal intents. Live Tailscale HTTPS verification returned `ready: true`, `queue: Star_TSP143`, and the new Order/Printer settings tabs with no printer selector. No print job was sent. Cached browser tabs must close/reopen to activate the updated app shell. Follow the updated [physical acceptance checklist](linux-printing.md) on the printer; this UX update’s receipt/cut and recovery behavior have not yet been physically verified. Before committing, `git diff --check` passed using a temporary extracted Ubuntu Git package; Git is not installed system-wide.
 
-## Milestone 2 — order builder (2026-10-11)
+## Order builder — 2026-10-11
 
 Implemented explicit flavor/container selection, any combination of eight toppings, separately configured servings with add/edit/remove, optional names and stable two-word fallback labels. New orders and their first intents commit atomically; serialized draft writes restore unfinished editor selections independently from the latest submitted receipt. Reprints preserve the original ticket while a new draft is being built. Existing IndexedDB version/records and both real printer routes are retained.
 
@@ -83,7 +83,7 @@ Browser coverage adds named multi-serving construction, edits/removal, incomplet
 
 The order-builder receipts have not yet been physically accepted on the owner's printer. Follow the named-order, unnamed-order and REPRINT checklist in [Linux printing](linux-printing.md). The earlier phone-to-USB sample success below remains valid evidence for the transport, not acceptance of the new builder. Rebuild/restart the service and reopen cached browser tabs together so client and service both accept the longer name limit.
 
-## Milestone 1 — historical transport checks
+## Printing transport foundation — 2026-10-09 to 2026-10-11
 
 Updated **2026-10-11** for **TSP143IIIU / Galaxy S10e / Android 12**, adding the owner-selected **Mint 22.3 Cinnamon 64-bit** USB host. Local implementation checks run on Windows, Node 26.9.0, npm 11.19.1, Playwright 1.64.0 / Chromium 156.0.8078.4. The implementation agent has no physical printer access.
 
@@ -114,4 +114,4 @@ New browser checks confirm Linux selection/readiness, IndexedDB intent before HT
 
 Temporary sample/reprint PDFs from the actual renderer were checked with Poppler and pypdf: one page, embedded font, complete content, clear reference/REPRINT, no clipping or overlap. The Windows visual check used Cascadia Mono; the Mint runtime embeds DejaVu Sans Mono. Target glyph coverage, CUPS rasterization, variable-length trimming and physical cut still need testing. Temporary PDFs/screenshots are ignored in test-results/.
 
-The Linux service is now running on the owner's Mint machine with Node 24.21.0 and the verified `Star_TSP143` USB queue. The installed PPD exposes `0Variable`, `0NoCutPage`, `1PartialCutDoc`; selecting these advertised values fixed the initial driver mismatch. Prepared jobs carry their selected options independently of concurrent readiness checks. Type checks, 53 unit/HTTP tests, formatting and both production builds passed on Mint. Live Tailscale HTTPS app loading and printer readiness passed, CUPS `abort-job` policy was confirmed, and the first phone-to-printer smoke test succeeded as described above. See [verified Mint setup](linux-printing.md) for the origin, driver, journal IDs and foreground launcher. Boot startup has not been configured. At that transport milestone, the full order-building workflow was deferred; Milestone 2 above implements it. GitHub Actions status is separate from these local checks.
+The Linux service is now running on the owner's Mint machine with Node 24.21.0 and the verified `Star_TSP143` USB queue. The installed PPD exposes `0Variable`, `0NoCutPage`, `1PartialCutDoc`; selecting these advertised values fixed the initial driver mismatch. Prepared jobs carry their selected options independently of concurrent readiness checks. Type checks, 53 unit/HTTP tests, formatting and both production builds passed on Mint. Live Tailscale HTTPS app loading and printer readiness passed, CUPS `abort-job` policy was confirmed, and the first phone-to-printer smoke test succeeded as described above. See [verified Mint setup](linux-printing.md) for the origin, driver, journal IDs and foreground launcher. Boot startup has not been configured. At that point the full order-building workflow was deferred; the order builder entry above implements it. GitHub Actions status is separate from these local checks.

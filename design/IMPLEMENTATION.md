@@ -8,7 +8,7 @@
 > - Order numbers are still allocated per browser; moving allocation to the service remains deferred.
 > - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.
 
-This folder is the design handoff for the next milestone: touch order entry that prints a
+This folder is the design handoff for the order builder and build queue: touch order entry that prints a
 preparation ticket, plus a second screen where the build station tracks open orders and marks
 them done. It replaces handwritten notepad orders with a fixed, repeatable format.
 

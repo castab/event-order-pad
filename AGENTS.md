@@ -192,7 +192,6 @@ Follow invariant 12. Write data for the same order in one transaction (`startOrd
 - `ORDER_PAD_ORIGIN` must be HTTPS. POSTs from `http://localhost:4174` are rejected by the Origin guard, even though GETs from that address are allowed.
 - Order numbers come from a per-browser counter (`settings.referenceCounter`), so two ordering devices will issue the same numbers. Queue identity uses ticket IDs and is unaffected.
 - On Windows, `.gitattributes` (`text=auto`) and Prettier's `endOfLine: auto` keep line endings from causing lint failures.
-- The CI job is still named `milestone-one`. The name is historical; the job runs the full suite.
 
 ## Keep the docs in sync
 

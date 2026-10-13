@@ -2,7 +2,7 @@
 
 Target: **TSP143IIIU**, USB-B to Intel/AMD Mint **22.3 Cinnamon 64-bit**. On 2026-10-11 the owner reported a successful CUPS test page/receipt, followed by a successful Order Pad receipt from the Galaxy S10e browser over Tailscale HTTPS. Queue/driver options and CUPS job completion were inspected directly; physical readability, end marker and partial cut were owner-confirmed. Mint shares Ubuntu 24.04's base; Star lists Ubuntu 24.04 64-bit, not Mint explicitly. Compatibility is an inference supported by these tests, not certification.
 
-The service hosts the static app and accepts same-origin print requests. The phone remains a browser client; this mode uses neither phone USB nor PassPRNT. Keep one station/tab. Milestone 2 adds separately configured ice cream servings and optional names to the same print route. This Linux route follows the owner's move to a separate USB host after Android PassPRNT testing.
+The service hosts the static app and accepts same-origin print requests. The phone remains a browser client; this mode uses neither phone USB nor PassPRNT. Keep one station/tab. Orders with separately configured ice cream servings and optional names use the same print route. This Linux route follows the owner's move to a separate USB host after Android PassPRNT testing.
 
 ## Start on Mint
 
