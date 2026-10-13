@@ -3,9 +3,13 @@ import { resolve } from 'node:path';
 import { Cups } from './cups';
 import { Printing } from './printing';
 import { Orders } from './orders';
-import { join } from 'node:path';
+import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
-import { parseTrackingEnabled } from './config';
+import {
+  parseTrackingEnabled,
+  parseDatabaseUrl,
+  parseCaptureFrom,
+} from './config';
 
 if (process.platform !== 'linux')
   throw new Error(
@@ -37,10 +41,14 @@ const printing = new Printing(
   process.env.ORDER_PAD_FONT ??
     '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
 );
-const orders = new Orders(
-  join(resolve(process.env.ORDER_PAD_DATA ?? '.print-data'), 'orders'),
+const database = createOrderDatabase(
+  parseDatabaseUrl(process.env.DATABASE_URL),
 );
-createApp({
+const orders = new Orders(
+  new PostgresOrderRepository(database),
+  parseCaptureFrom(process.env.ORDER_PAD_CAPTURE_FROM),
+);
+const server = createApp({
   origin,
   port,
   root,
@@ -53,3 +61,11 @@ createApp({
     `Order Pad Linux service listening on 127.0.0.1:${port}; open ${origin.origin}`,
   ),
 );
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    server.close(() => {
+      void database.$disconnect();
+    });
+  });
+}

@@ -11,6 +11,20 @@ jobs:
   verify:
     name: Check, lint, test, build and e2e
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: order_pad_test
+          POSTGRES_PASSWORD: order_pad_test
+          POSTGRES_DB: order_pad_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U order_pad_test -d order_pad_test"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgresql://order_pad_test:order_pad_test@127.0.0.1:5432/order_pad_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,6 +32,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run test:postgres
+      - run: npm run test:postgres:volume
       - run: npm run check
       - run: npm run lint
       - run: npm test

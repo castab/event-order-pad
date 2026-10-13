@@ -4,6 +4,7 @@ import { sampleTicket } from '../tickets/ticket';
 const ticket = sampleTicket('ticket-43', '2026-10-11T20:00:00.000Z');
 const response = () =>
   Response.json({
+    created: false,
     order: {
       ticket,
       submittedAt: ticket.createdAt,
@@ -16,7 +17,6 @@ afterEach(() => vi.useRealTimers());
 it('retries only the order outbox, acknowledges an existing done order and retains original ticket identity', async () => {
   const pending = [ticket];
   const store = {
-    setTrackingEnabled: vi.fn(async () => {}),
     pendingOrders: vi.fn(async () => pending),
     acknowledgeOrder: vi.fn(async () => {
       pending.splice(0);
@@ -27,7 +27,7 @@ it('retries only the order outbox, acknowledges an existing done order and retai
     .mockRejectedValueOnce(new Error('offline'))
     .mockResolvedValueOnce(response());
   const notice = vi.fn();
-  const publisher = new OrderPublisher(store, notice, send, async () => true);
+  const publisher = new OrderPublisher(store, notice, send);
   await publisher.flush();
   expect(store.acknowledgeOrder).not.toHaveBeenCalled();
   expect(notice).toHaveBeenLastCalledWith(
@@ -44,7 +44,6 @@ it('retries only the order outbox, acknowledges an existing done order and retai
 });
 it('does not clear unacknowledged updates on failed or mismatched responses', async () => {
   const store = {
-    setTrackingEnabled: vi.fn(async () => {}),
     pendingOrders: vi.fn(async () => [ticket]),
     acknowledgeOrder: vi.fn(),
   };
@@ -63,7 +62,6 @@ it('does not clear unacknowledged updates on failed or mismatched responses', as
       store,
       vi.fn(),
       vi.fn<typeof fetch>().mockResolvedValue(response),
-      async () => true,
     );
     await publisher.flush();
     publisher.stop();
@@ -73,12 +71,11 @@ it('does not clear unacknowledged updates on failed or mismatched responses', as
 it('serializes publication, retries in the background and stops timers after unmount', async () => {
   vi.useFakeTimers();
   const store = {
-    setTrackingEnabled: vi.fn(async () => {}),
     pendingOrders: vi.fn(async () => [ticket]),
     acknowledgeOrder: vi.fn(),
   };
   const send = vi.fn<typeof fetch>().mockRejectedValue(new Error('offline'));
-  const publisher = new OrderPublisher(store, vi.fn(), send, async () => true);
+  const publisher = new OrderPublisher(store, vi.fn(), send);
   await Promise.all([publisher.flush(), publisher.flush()]);
   expect(send).toHaveBeenCalledTimes(1);
   publisher.start();
@@ -89,75 +86,63 @@ it('serializes publication, retries in the background and stops timers after unm
   expect(send).toHaveBeenCalledTimes(3);
 });
 
-it('discards pending queue updates and stops retries when tracking is disabled', async () => {
-  vi.useFakeTimers();
+it('publishes without consulting tracking settings and accepts matching cutoff exclusions', async () => {
   const store = {
     pendingOrders: vi.fn(async () => [ticket]),
     acknowledgeOrder: vi.fn(),
-    setTrackingEnabled: vi.fn(async () => {}),
   };
   const send = vi
     .fn<typeof fetch>()
-    .mockResolvedValue(Response.json({ trackingEnabled: false }));
-  const disabled = vi.fn();
-  const notice = vi.fn();
-  const publisher = new OrderPublisher(
-    store,
-    notice,
-    send,
-    undefined,
-    disabled,
-  );
-  publisher.start();
-  await vi.advanceTimersByTimeAsync(20000);
-  expect(send).toHaveBeenCalledTimes(1);
-  expect(send.mock.calls[0][0]).toBe('/api/features');
-  expect(store.pendingOrders).not.toHaveBeenCalled();
-  expect(store.acknowledgeOrder).not.toHaveBeenCalled();
-  expect(store.setTrackingEnabled).toHaveBeenCalledExactlyOnceWith(false);
-  expect(disabled).toHaveBeenCalledTimes(1);
-  expect(notice).toHaveBeenLastCalledWith('');
-});
-
-it('handles tracking being disabled between the settings check and publication', async () => {
-  const store = {
-    pendingOrders: vi.fn(async () => [ticket, { ...ticket, id: 'second' }]),
-    acknowledgeOrder: vi.fn(),
-    setTrackingEnabled: vi.fn(async () => {}),
-  };
-  const send = vi
-    .fn<typeof fetch>()
-    .mockResolvedValueOnce(Response.json({ trackingEnabled: true }))
-    .mockResolvedValueOnce(
-      Response.json({ code: 'ORDER_TRACKING_DISABLED' }, { status: 404 }),
-    );
+    .mockResolvedValue(Response.json({ excluded: true, ticketId: ticket.id }));
   const publisher = new OrderPublisher(store, vi.fn(), send);
   await publisher.flush();
-  await publisher.flush();
-  expect(send.mock.calls.map(([path]) => path)).toEqual([
-    '/api/features',
-    '/api/orders',
-  ]);
-  expect(store.setTrackingEnabled).toHaveBeenCalledExactlyOnceWith(false);
-  expect(store.acknowledgeOrder).not.toHaveBeenCalled();
+  expect(send.mock.calls.map(([path]) => path)).toEqual(['/api/orders']);
+  expect(store.acknowledgeOrder).toHaveBeenCalledExactlyOnceWith(ticket.id);
+  publisher.stop();
 });
 
-it('retains pending updates without publishing when feature settings are unavailable', async () => {
+it.each([
+  { excluded: true, ticketId: 'other' },
+  { excluded: false, ticketId: ticket.id },
+  { excluded: true },
+  { excluded: true, ticketId: ticket.id, order: {} },
+  { order: { ticket, submittedAt: ticket.createdAt, status: 'open' } },
+])(
+  'retains orders after malformed exclusions or incomplete acknowledgments: %j',
+  async (body) => {
+    const store = {
+      pendingOrders: async () => [ticket],
+      acknowledgeOrder: vi.fn(),
+    };
+    const publisher = new OrderPublisher(
+      store,
+      vi.fn(),
+      vi.fn<typeof fetch>().mockResolvedValue(Response.json(body)),
+    );
+    await publisher.flush();
+    expect(store.acknowledgeOrder).not.toHaveBeenCalled();
+    publisher.stop();
+  },
+);
+
+it('does not acknowledge a completed response after stop', async () => {
+  let resolve!: (value: Response) => void;
   const store = {
-    pendingOrders: vi.fn(async () => [ticket]),
+    pendingOrders: async () => [ticket],
     acknowledgeOrder: vi.fn(),
-    setTrackingEnabled: vi.fn(async () => {}),
   };
-  const notice = vi.fn();
-  const send = vi.fn<typeof fetch>().mockRejectedValue(new Error('offline'));
-  const publisher = new OrderPublisher(store, notice, send);
-  await publisher.flush();
-  expect(send).toHaveBeenCalledTimes(1);
-  expect(send.mock.calls[0][0]).toBe('/api/features');
-  expect(store.pendingOrders).not.toHaveBeenCalled();
-  expect(store.setTrackingEnabled).not.toHaveBeenCalled();
-  expect(notice).toHaveBeenCalledWith(
-    expect.stringContaining('no print will be resent'),
+  const publisher = new OrderPublisher(
+    store,
+    vi.fn(),
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
   );
+  const pending = publisher.flush();
+  await vi.waitFor(() => expect(resolve).toBeDefined());
   publisher.stop();
+  resolve(response());
+  await pending;
+  expect(store.acknowledgeOrder).not.toHaveBeenCalled();
 });

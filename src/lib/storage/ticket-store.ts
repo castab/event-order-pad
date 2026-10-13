@@ -26,7 +26,6 @@ export class IndexedDbTicketStore implements TicketStore {
   constructor(
     private factory: IDBFactory = indexedDB,
     private name = 'order-pad-v1',
-    private trackingEnabled = true,
   ) {}
 
   private open(): Promise<IDBDatabase> {
@@ -201,35 +200,12 @@ export class IndexedDbTicketStore implements TicketStore {
         tx.objectStore('tickets').add(valid);
         tx.objectStore('settings').put(valid.id, 'latest');
         tx.objectStore('settings').put(locked, 'draft');
-        if (this.trackingEnabled)
-          tx.objectStore('settings').put(valid, `queueOrder:${valid.id}`);
+        tx.objectStore('settings').put(valid, `queueOrder:${valid.id}`);
         this.recordReference(tx, valid.reference);
         tx.objectStore('attempts').add(attempt);
         done(undefined);
       },
     );
-  }
-
-  /** Disabling tracking drops only unpublished queue metadata, never print history. */
-  async setTrackingEnabled(enabled: boolean): Promise<void> {
-    this.trackingEnabled = enabled;
-    if (enabled) return;
-    await this.transaction<void>(['settings'], 'readwrite', (tx, done) => {
-      const request = tx.objectStore('settings').openCursor();
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) {
-          done(undefined);
-          return;
-        }
-        if (
-          typeof cursor.key === 'string' &&
-          cursor.key.startsWith('queueOrder:')
-        )
-          cursor.delete();
-        cursor.continue();
-      };
-    });
   }
 
   /** First-print queue updates commit with intent; reprints never enter this outbox. */

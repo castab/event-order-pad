@@ -6,6 +6,10 @@ import { tmpdir } from 'node:os';
 import type { PrintAttemptResult } from '../src/lib/printing/port';
 import type { Request } from './printing';
 import { Orders } from './orders';
+import {
+  MemoryOrderRepository,
+  testCaptureFrom,
+} from '../tests/helpers/order-repository';
 import { createApp } from './http';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 
@@ -26,7 +30,8 @@ async function app(trackingEnabled = true) {
   );
   const check = vi.fn(async () => 'Configured queue');
   const orders = new Orders(
-    join(directory, 'orders'),
+    new MemoryOrderRepository(),
+    testCaptureFrom,
     () => '2026-10-12T19:00:00.000Z',
   );
   await mkdir(join(directory, 'queue'));
@@ -415,7 +420,7 @@ it('streams initial data and durable changes to multiple clients; no-op and repr
   });
 });
 it('rejects foreign SSE origins and reports unavailable storage before streaming headers', async () => {
-  const { port, send, directory } = await app();
+  const { port, send, orders } = await app();
   expect(
     (
       await send('/api/orders/events', undefined, {
@@ -433,11 +438,12 @@ it('rejects foreign SSE origins and reports unavailable storage before streaming
       })
     ).status,
   ).toBe(403);
-  await mkdir(join(directory, 'orders'));
-  await writeFile(join(directory, 'orders/broken.json'), '{');
+  vi.spyOn(orders, 'subscribe').mockRejectedValue(
+    new Error('Database unavailable'),
+  );
   const failed = await send('/api/orders/events');
   expect(failed.status).toBe(503);
-  expect(JSON.parse(failed.body).error).toContain('journal');
+  expect(JSON.parse(failed.body).error).toContain('database');
 });
 it('closing the HTTP server disconnects SSE clients and releases subscriptions', async () => {
   const { port, server } = await app();
@@ -462,30 +468,31 @@ it('reports the default enabled flag independently of printer readiness', async 
   expect(check).not.toHaveBeenCalled();
 });
 
-it('disabled tracking gates every queue API without touching history or changing print outcomes', async () => {
-  const { send, print, orders, directory } = await app(false);
+it('disabled tracking hides reads but captures submissions and transitions without changing prints', async () => {
+  const { send, print, orders } = await app(false);
   const ticket = sampleTicket('historical', '2026-10-11T20:00:00.000Z');
-  await orders.upsert(ticket);
-  await orders.changeStatus(ticket.id, 'done');
-  const history = await orders.list();
-  const methods = ['upsert', 'list', 'changeStatus', 'subscribe'] as const;
-  const spies = methods.map((method) => vi.spyOn(orders, method));
-  const features = await send('/api/features');
-  expect(features.cache).toBe('no-store');
-  expect(JSON.parse(features.body)).toEqual({ trackingEnabled: false });
-  for (const [path, body] of [
-    ['/api/orders', undefined],
-    ['/api/orders?status=done', undefined],
-    ['/api/orders/events', undefined],
-    ['/api/orders', JSON.stringify(ticket)],
-    ['/api/orders/historical/done', '{}'],
-    ['/api/orders/historical/reopen', '{}'],
-  ] as const) {
-    const response = await send(path, body, headers);
+  expect(JSON.parse((await send('/api/features')).body)).toEqual({
+    trackingEnabled: false,
+  });
+  for (const path of [
+    '/api/orders',
+    '/api/orders?status=done',
+    '/api/orders/events',
+  ]) {
+    const response = await send(path);
     expect(response.status).toBe(404);
-    expect(response.cache).toBe('no-store');
     expect(JSON.parse(response.body).code).toBe('ORDER_TRACKING_DISABLED');
   }
+  expect(
+    (await send('/api/orders', JSON.stringify(ticket), headers)).status,
+  ).toBe(201);
+  expect(
+    (await send('/api/orders/historical/done', '{}', headers)).status,
+  ).toBe(200);
+  expect((await orders.list('done'))[0].ticket).toEqual(ticket);
+  expect(
+    (await send('/api/orders/historical/reopen', '{}', headers)).status,
+  ).toBe(200);
   for (const status of ['accepted', 'failed', 'outcome-unknown'] as const) {
     for (const reprint of [false, true]) {
       const result: PrintAttemptResult = {
@@ -504,14 +511,27 @@ it('disabled tracking gates every queue API without touching history or changing
     }
   }
   expect(print).toHaveBeenCalledTimes(6);
-  for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-  expect((await send('/api/print', '{}', headers)).status).toBe(400);
+  expect(await orders.list('open')).toHaveLength(2);
   expect((await send('/api/orders', '{}')).status).toBe(403);
+  expect((await send('/api/orders/historical/done', '{}')).status).toBe(403);
+});
+
+it('continues printing during a database outage even when tracking is disabled', async () => {
+  const { send, orders, print } = await app(false);
+  vi.spyOn(orders, 'upsert').mockRejectedValue(
+    new Error('Database unavailable'),
+  );
   expect(
-    (await send('/api/features', undefined, { Host: 'evil.test' })).status,
-  ).toBe(403);
-  // Disabled APIs cannot alter the journal; a subsequent enabled service reads it intact.
-  const reloaded = new Orders(join(directory, 'orders'));
-  expect(await reloaded.list()).toEqual(history);
-  expect((await send('/queue/')).body).toContain('Build queue');
+    (
+      await send(
+        '/api/orders',
+        JSON.stringify(JSON.parse(payload).ticket),
+        headers,
+      )
+    ).status,
+  ).toBe(503);
+  expect(
+    JSON.parse((await send('/api/print', payload, headers)).body).result.status,
+  ).toBe('accepted');
+  expect(print).toHaveBeenCalledExactlyOnceWith(JSON.parse(payload));
 });

@@ -2,6 +2,43 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Print rejection diagnosis and station restart — 2026-10-12
+
+The browser’s generic “The Linux service did not return a matching result” message hid explicit service validation/origin rejections. The Linux adapter now recognizes the service’s known 400/403/413 error bodies as failed before submission, with actionable “No job was submitted” copy. Unexpected errors, malformed responses, timeouts, wrong attempt IDs, and non-success responses containing apparent accepted results remain unknown. No print retry or historical result rewrite was added.
+
+Inspection found that the Mint systemd service was still the pre-Postgres process, while rebuilt files were already served. `.env` also contained a misspelled HTTPS hostname. Corrected the hostname to the observed Tailscale Serve origin, updated the ignored local launcher to load `.env`, and prepared a systemd environment-file drop-in. The owner installed it and restarted `order-pad.service`; verified the new process loads the repository’s `.env`. Read-only HTTPS checks reported a ready Star queue and a working empty Postgres order projection. Deliberately invalid empty POST requests returned 400 without submitting anything; CUPS reported no pending jobs. A temporary alternate-port service used only for readiness checks was stopped.
+
+| Check                 | Result                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| npm run check         | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean                                   |
+| npm run lint          | Passed                                                                                                        |
+| npm test              | Passed; 205 tests across 19 files, including recognized pre-submit errors and ambiguous-response preservation |
+| npm run build         | Passed                                                                                                        |
+| npm run build:printer | Passed                                                                                                        |
+| npm run test:e2e      | Passed; 124 Chromium runs                                                                                     |
+
+The owner reloaded the app and confirmed “Print now works” after the service restart. This is owner-reported evidence that printing resumed; receipt layout, cut quality, and interruption recovery were not separately checked. No valid print request was sent by the agent. Previous unknown attempts remain immutable and still require operator acknowledgment.
+
+## PostgreSQL 18 order history — 2026-10-12
+
+Implemented Prisma 7.10.0 and PostgreSQL 18 as the primary order store, using one append-only `order_events` table and latest-event queue projection. Capture is independent of queue visibility. Pre-cutoff submissions receive explicit exclusion acknowledgments; browser storage stays at version 2 and local order files remain archives. Checks ran on Linux with Node 24.21.0 and real PostgreSQL 18 in a disposable Docker container.
+
+| Check                        | Result                                                                                                                                                                                                                                                            |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres        | Passed; 6 real database integration tests, including migrations, cross-client concurrent submission/completion, immutable history, restart reads, latest-state filtering, tracking-disabled capture, cutoff exclusion, and database outages with stubbed printing |
+| npm run test:postgres:volume | Passed; PostgreSQL 18 named-volume data survived container removal and recreation; disposable container and volume cleaned up                                                                                                                                     |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings, printer-service and service-worker TypeScript clean                                                                                                                                                                   |
+| npm run lint                 | Passed                                                                                                                                                                                                                                                            |
+| npm test                     | Passed; 194 tests across 19 files                                                                                                                                                                                                                                 |
+| npm run build                | Passed                                                                                                                                                                                                                                                            |
+| npm run build:printer        | Passed                                                                                                                                                                                                                                                            |
+| npm run test:e2e             | Passed; 124 Chromium runs including disabled capture, outbox reload recovery, cutoff acknowledgment, and live-queue recovery after a lost commit reply                                                                                                            |
+| npm install audit            | 0 vulnerabilities after pinning patched `deepmerge-ts` and `mysql2` CLI dependencies through package overrides                                                                                                                                                    |
+
+Read-only runtime smoke check: the bundled service served `/api/orders` from the real Postgres test database on an isolated loopback port. The browser service fixture explicitly closes raced keepalive connections during teardown. Queued order operations time out without executing expired writes, and failed snapshot delivery disconnects SSE while preserving successful mutations. Uncertain write failures retire old stream versions and force snapshots that discover commits with lost replies.
+
+No physical print job was sent and no hardware result is claimed. Station rollout still requires a configured `.env`, an explicitly chosen fixed capture cutoff, migration deployment, and coordinated service/browser reloads; see README’s Postgres setup steps. Test database storage is disposable and separate from station history.
+
 ## SvelteKit 3 migration — 2026-10-12
 
 Upgrade from SvelteKit 2 to SvelteKit 3.0.1 (Vite 8.3.4, vite-plugin-svelte 7.3.1, adapter-static 4.0.0, TypeScript 6.0.3) on top of `main` at `0df5798`, uncommitted at the time of the run. After `sv migrate sveltekit-3`, the manual steps were: the service worker moved to `src/service-worker/index.ts` with its own `tsconfig.json` and reads `version` from `$app/env` and the precache list from `$app/manifest` through `$app/paths`; the root `tsconfig.json` excludes it, and `npm run check` now type-checks it separately; the obsolete `cookie` override was removed so SvelteKit gets the `cookie` 2.x it declares; the documented Node floor is now 22.17 (SvelteKit 3 requires it). Checks ran locally on Windows 11 with Node 26.9.0, npm 11.19.1 and Playwright 1.64.0.

@@ -1,0 +1,19 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../printer-service/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model OrderEvent {
+  eventId    BigInt   @id @default(autoincrement()) @map("event_id")
+  orderId    String   @map("order_id")
+  occurredAt DateTime @db.Timestamptz(3) @map("occurred_at")
+  eventType  String   @map("event_type")
+  orderJsonb Json     @db.JsonB @map("order_jsonb")
+
+  @@index([orderId, eventId(sort: Desc)], map: "order_events_latest_idx")
+  @@map("order_events")
+}

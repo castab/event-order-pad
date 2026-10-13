@@ -1509,5 +1509,67 @@ test('unavailable tracking settings do not block printing or reprints', async ({
     page.getByRole('link', { name: 'Now Scooping', exact: true }),
   ).toHaveCount(0);
   expect(submitted).toHaveLength(2);
-  expect(publications).toBe(0);
+  await expect.poll(() => publications).toBeGreaterThan(0);
+  await expect(page.getByLabel('Queue synchronization')).toContainText(
+    'Order persistence pending',
+  );
+});
+
+test('tracking-disabled submissions survive reload and clear only after explicit persistence exclusion', async ({
+  page,
+}) => {
+  const { submitted } = await mockUsb(page);
+  await page.route('**/api/features', (route) =>
+    route.fulfill({ json: { trackingEnabled: false } }),
+  );
+  let acknowledge = false;
+  await page.route('**/api/orders', (route) => {
+    const ticket = route.request().postDataJSON() as OrderTicket;
+    return route.fulfill(
+      acknowledge
+        ? { json: { excluded: true, ticketId: ticket.id } }
+        : { status: 503, json: {} },
+    );
+  });
+  const pending = () =>
+    page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open('order-pad-v1', 2);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      try {
+        const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+          const request = db
+            .transaction('settings')
+            .objectStore('settings')
+            .getAllKeys();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        return keys.filter(
+          (key) => typeof key === 'string' && key.startsWith('queueOrder:'),
+        ).length;
+      } finally {
+        db.close();
+      }
+    });
+  await page.goto('/');
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(page.getByLabel('Print notification')).toContainText(
+    'Order #0001 sent',
+  );
+  await expect.poll(pending).toBe(1);
+  await openTools(page);
+  await expect(page.getByLabel('Queue synchronization')).toContainText(
+    'Order persistence pending',
+  );
+  await expect(
+    page.getByRole('link', { name: 'Now Scooping', exact: true }),
+  ).toHaveCount(0);
+  acknowledge = true;
+  await page.reload();
+  await expect.poll(pending).toBe(0);
+  expect(submitted).toHaveLength(1);
 });

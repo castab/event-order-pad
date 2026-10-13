@@ -7,14 +7,21 @@
     "dev": "vite dev --host 0.0.0.0",
     "build": "vite build",
     "build:printer": "vite build --config vite.printer.config.ts",
-    "start:printer": "node build-printer/server.mjs",
+    "start:printer": "node --env-file-if-exists=.env build-printer/server.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && tsc -p tsconfig.printer.json && tsc -p src/service-worker/tsconfig.json",
     "lint": "prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "precheck": "npm run db:generate",
+    "prebuild:printer": "npm run db:generate",
+    "test:postgres": "node --env-file-if-exists=.env scripts/test-postgres.mjs",
+    "test:postgres:volume": "node scripts/test-postgres-volume.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
@@ -23,9 +30,11 @@
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^24.0.0",
     "@types/pdfkit": "0.17.6",
+    "@types/pg": "8.20.0",
     "fake-indexeddb": "^6.2.5",
     "prettier": "^3.6.2",
     "prettier-plugin-svelte": "^3.4.0",
+    "prisma": "7.10.0",
     "svelte": "5.57.2",
     "svelte-check": "4.7.6",
     "typescript": "^6.0.0",
@@ -33,10 +42,21 @@
     "vitest": "4.1.11"
   },
   "dependencies": {
-    "pdfkit": "0.20.2"
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "pdfkit": "0.20.2",
+    "pg": "8.22.0"
   },
   "imports": {
     "#lib": "./src/lib/index.js",
     "#lib/*": "./src/lib/*"
+  },
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2"
+    },
+    "prisma": {
+      "mysql2": "3.24.5"
+    }
   }
 }

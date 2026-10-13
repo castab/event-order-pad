@@ -6,3 +6,5 @@ build-printer/
 test-results/
 playwright-report/
 *.local
+.env
+printer-service/generated/

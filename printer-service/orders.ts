@@ -1,130 +1,56 @@
-import { createHash, randomUUID } from 'node:crypto';
-import {
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  unlink,
-} from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
-import {
-  parseOrder,
-  sortOrders,
-  type QueueOrder,
-} from '../src/lib/orders/order';
-
+import type { QueueOrder } from '../src/lib/orders/order';
+import type { OrderRegistration } from '../src/lib/orders/registration';
 import type {
   OrderChange,
   QueueSnapshot,
   QueueVersion,
 } from '../src/lib/orders/live';
+import { parseCaptureFrom } from './config';
 
 export class OrderNotFound extends Error {}
 
-/** Single service process. Order IDs survive completion; repeat submissions never reopen them. */
+export interface OrderRepository {
+  upsert(ticket: OrderTicket): Promise<{ order: QueueOrder; created: boolean }>;
+  changeStatus(
+    id: string,
+    status: 'open' | 'done',
+    at: string,
+  ): Promise<{ order: QueueOrder; changed: boolean }>;
+  list(status?: 'open' | 'done'): Promise<readonly QueueOrder[]>;
+}
+
+/** Single service process. Committed events precede live snapshots; no-ops never advance versions. */
 export class Orders {
-  private records = new Map<string, QueueOrder>();
-  private loaded = false;
-  private readonly instanceId = randomUUID();
+  private instanceId = randomUUID();
   private revision = 0;
-  private listeners = new Set<(snapshot: QueueSnapshot) => void>();
+  private listeners = new Map<(snapshot: QueueSnapshot) => void, () => void>();
   private tail: Promise<unknown> = Promise.resolve();
   constructor(
-    private directory: string,
+    private repository: OrderRepository,
+    private captureFrom: string,
     private now = () => new Date().toISOString(),
-  ) {}
+  ) {
+    parseCaptureFrom(captureFrom);
+  }
 
-  private filename(id: string) {
-    return `${createHash('sha256').update(id).digest('hex')}.json`;
-  }
   private serialize<T>(work: () => Promise<T>): Promise<T> {
-    const next = this.tail.then(work);
-    this.tail = next.catch(() => undefined);
-    return next;
-  }
-  private async load() {
-    if (this.loaded) return;
-    const records = new Map<string, QueueOrder>();
-    let files: string[];
-    try {
-      files = await readdir(this.directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      files = [];
-    }
-    for (const filename of files.filter((f) => f.endsWith('.json'))) {
-      const record = parseOrder(
-        JSON.parse(await readFile(join(this.directory, filename), 'utf8')),
-      );
-      if (
-        this.filename(record.ticket.id) !== filename ||
-        records.has(record.ticket.id)
-      )
-        throw new Error('Invalid order journal identity.');
-      records.set(record.ticket.id, record);
-    }
-    this.records = records;
-    this.loaded = true;
-  }
-  private async save(record: QueueOrder) {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = join(
-      this.directory,
-      `${this.filename(record.ticket.id)}.${randomUUID()}.tmp`,
-    );
-    try {
-      const file = await open(temporary, 'wx', 0o600);
-      try {
-        await file.writeFile(JSON.stringify(record));
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      await rename(
-        temporary,
-        join(this.directory, this.filename(record.ticket.id)),
-      );
-      if (process.platform === 'linux') {
-        const directory = await open(this.directory, 'r');
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
-      }
-      this.records.set(record.ticket.id, record);
-      this.revision++;
-      const snapshot = this.snapshot();
-      for (const listener of this.listeners) {
-        try {
-          listener(snapshot);
-        } catch {
-          this.listeners.delete(listener);
-        }
-      }
-    } catch (error) {
-      this.loaded = false;
-      throw error;
-    } finally {
-      await unlink(temporary).catch(() => undefined);
-    }
-  }
-  upsert(value: OrderTicket): Promise<{ order: QueueOrder; created: boolean }> {
-    const ticket = parseTicket(value);
-    return this.serialize(async () => {
-      await this.load();
-      const existing = this.records.get(ticket.id);
-      if (existing) return { order: existing, created: false };
-      const order = parseOrder({
-        ticket,
-        submittedAt: ticket.createdAt,
-        status: 'open',
-      });
-      await this.save(order);
-      return { order, created: true };
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const next = this.tail.then(() => {
+      clearTimeout(timer);
+      if (cancelled) throw new Error('Order operation waited too long.');
+      return work();
     });
+    this.tail = next.catch(() => undefined);
+    const waiting = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        cancelled = true;
+        reject(new Error('Order operation waited too long.'));
+      }, 1000);
+    });
+    return Promise.race([next, waiting]);
   }
   private version(): QueueVersion {
     return Object.freeze({
@@ -132,57 +58,95 @@ export class Orders {
       revision: this.revision,
     });
   }
-  private visible(status?: 'open' | 'done'): readonly QueueOrder[] {
-    const records = [...this.records.values()];
-    return Object.freeze(
-      status === 'open'
-        ? sortOrders(records, 'open')
-        : status === 'done'
-          ? sortOrders(records, 'done').slice(0, 8)
-          : [
-              ...sortOrders(records, 'open'),
-              ...sortOrders(records, 'done').slice(0, 8),
-            ],
-    );
+  private async snapshot(): Promise<QueueSnapshot> {
+    return Object.freeze({
+      ...this.version(),
+      orders: await this.repository.list(),
+    });
   }
-  private snapshot(): QueueSnapshot {
-    return Object.freeze({ ...this.version(), orders: this.visible() });
+  private disconnect() {
+    const listeners = [...this.listeners.values()];
+    this.listeners.clear();
+    for (const unavailable of listeners) {
+      try {
+        unavailable();
+      } catch {
+        /* A closed stream needs no further delivery. */
+      }
+    }
   }
-  /** Initial delivery and registration share the mutation lock: no missed update. */
-  subscribe(listener: (snapshot: QueueSnapshot) => void): Promise<() => void> {
+  private uncertain() {
+    // A lost commit reply can hide a durable event; retire versions from before that uncertainty.
+    this.instanceId = randomUUID();
+    this.revision = 0;
+    this.disconnect();
+  }
+  private async committed() {
+    this.revision++;
+    if (!this.listeners.size) return;
+    try {
+      const snapshot = await this.snapshot();
+      for (const [listener, unavailable] of this.listeners) {
+        try {
+          listener(snapshot);
+        } catch {
+          this.listeners.delete(listener);
+          unavailable();
+        }
+      }
+    } catch {
+      // A failed broadcast cannot turn an already committed event into a failed mutation.
+      this.disconnect();
+    }
+  }
+  upsert(value: OrderTicket): Promise<OrderRegistration> {
+    const ticket = parseTicket(value);
+    if (ticket.createdAt < this.captureFrom)
+      return Promise.resolve(
+        Object.freeze({ excluded: true, ticketId: ticket.id }),
+      );
     return this.serialize(async () => {
-      await this.load();
-      listener(this.snapshot());
-      this.listeners.add(listener);
+      let saved;
+      try {
+        saved = await this.repository.upsert(ticket);
+      } catch (error) {
+        this.uncertain();
+        throw error;
+      }
+      if (saved.created) await this.committed();
+      return Object.freeze(saved);
+    });
+  }
+  /** Registration and initial delivery share the mutation lock: no missed update. */
+  subscribe(
+    listener: (snapshot: QueueSnapshot) => void,
+    unavailable = () => {},
+  ): Promise<() => void> {
+    return this.serialize(async () => {
+      listener(await this.snapshot());
+      this.listeners.set(listener, unavailable);
       return () => {
         this.listeners.delete(listener);
       };
     });
   }
   list(status?: 'open' | 'done'): Promise<readonly QueueOrder[]> {
-    return this.serialize(async () => {
-      await this.load();
-      return this.visible(status);
-    });
+    return this.serialize(() => this.repository.list(status));
   }
   async setStatus(id: string, status: 'open' | 'done'): Promise<QueueOrder> {
     return (await this.changeStatus(id, status)).order;
   }
   changeStatus(id: string, status: 'open' | 'done'): Promise<OrderChange> {
     return this.serialize(async () => {
-      await this.load();
-      const existing = this.records.get(id);
-      if (!existing) throw new OrderNotFound('Order not found.');
-      if (existing.status === status)
-        return Object.freeze({ order: existing, ...this.version() });
-      const record = parseOrder({
-        ticket: existing.ticket,
-        submittedAt: existing.submittedAt,
-        status,
-        ...(status === 'done' ? { doneAt: this.now() } : {}),
-      });
-      await this.save(record);
-      return Object.freeze({ order: record, ...this.version() });
+      let saved;
+      try {
+        saved = await this.repository.changeStatus(id, status, this.now());
+      } catch (error) {
+        if (!(error instanceof OrderNotFound)) this.uncertain();
+        throw error;
+      }
+      if (saved.changed) await this.committed();
+      return Object.freeze({ order: saved.order, ...this.version() });
     });
   }
 }

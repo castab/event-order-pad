@@ -60,3 +60,62 @@ describe('Linux browser adapter', () => {
     }
   });
 });
+
+it.each([
+  [400, 'Invalid ticket or attempt metadata. No data sent.', 'invalid-ticket'],
+  [400, 'Invalid JSON request.', 'invalid-ticket'],
+  [403, 'Use the configured same-origin application.', 'permission-denied'],
+  [403, 'Unrecognized host.', 'permission-denied'],
+  [413, 'Request too large.', 'invalid-ticket'],
+])(
+  'recognizes the service’s pre-submit rejection %s without retrying',
+  async (status, error, code) => {
+    const send = vi.fn<typeof fetch>(async () =>
+      Response.json({ error }, { status }),
+    );
+    expect(
+      await new LinuxCupsPrinter(send).print(ticket, options),
+    ).toMatchObject({
+      status: 'failed',
+      simulated: false,
+      code,
+      message: expect.stringContaining('No job was submitted'),
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([
+  [
+    500,
+    { error: 'Service request failed. Inspect CUPS before retrying a print.' },
+  ],
+  [502, { error: 'Invalid ticket or attempt metadata. No data sent.' }],
+  [403, { error: 'Unexpected proxy rejection' }],
+  [400, { error: 'Unexpected error' }],
+  [
+    400,
+    {
+      error: 'Invalid ticket or attempt metadata. No data sent.',
+      attemptId: 'wrong',
+    },
+  ],
+  [
+    500,
+    {
+      attemptId: options.attemptId,
+      result: { status: 'accepted', simulated: false, message: 'Done' },
+    },
+  ],
+])(
+  'keeps ambiguous HTTP %s replies unknown without retrying',
+  async (status, body) => {
+    const send = vi.fn<typeof fetch>(async () =>
+      Response.json(body, { status }),
+    );
+    expect(
+      (await new LinuxCupsPrinter(send).print(ticket, options)).status,
+    ).toBe('outcome-unknown');
+    expect(send).toHaveBeenCalledTimes(1);
+  },
+);

@@ -31,6 +31,8 @@ cd order-pad
 
 ```sh
 npm ci
+# Configure .env and start PostgreSQL 18 as described in README first.
+npm run db:deploy
 npm run build
 npm run build:printer
 tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
@@ -64,17 +66,17 @@ Browser drafts, tickets and attempts belong to one origin (scheme + host + port)
 - Accepted means **CUPS queue submission**, not physical output. Cover/paper/disconnection errors may occur after acceptance; no live hardware sensor claims. A queued job may print later. Pending CUPS jobs block new submissions.
 - Browser IndexedDB saves intent first; the service independently flushes exclusive attempt intent before `lp`. Repeated recorded IDs return existing results; pending intent is unknown and never replayed after restart. Different content with the same ID is rejected. No background print queue or exactly-once guarantee. The order outbox retries only queue metadata updates.
 - Lost/malformed response, interrupted submission or failed outcome persistence is unknown. Reprinting requires an explicit new attempt marked REPRINT with the original ticket ID. Other applications using CUPS are outside the station lock.
-- Build orders persist separately in `.print-data/orders/`; `/queue/` subscribes to live SSE snapshots at `/api/orders/events`. Reprints never add or reopen orders, and completed IDs remain durable after leaving Recently done. Only explicit Undo reopens an order. First submissions can appear before CUPS acceptance, including failed or unknown prints.
+- Order events persist centrally in PostgreSQL 18; `/queue/` subscribes to live SSE snapshots at `/api/orders/events`. Reprints never add or reopen orders, and completed IDs remain durable after leaving Recently done. Only explicit Undo reopens an order. First submissions can appear before CUPS acceptance, including failed or unknown prints.
 - Preserve `.print-data/` on local persistent storage; it contains tickets/attempts and is Git-ignored. Do not delete it to resolve an ambiguous print.
 - Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
 - The ordering interface uses this USB route exclusively. A static-only host can show/recover drafts but cannot print. Cached UI and reachability of Mint are separate requirements. Simulation/PassPRNT adapters remain available for compatibility tests. Phase 1 resets v1 browser records once, as documented in README; the printer-service journal is unchanged.
 - Printed ticket times use the **Mint host’s** local time zone, because the service renders the PDF. Check it with `timedatectl` before an event. Browser previews and the queue use each device’s own time zone.
 
-Required: `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to disable order tracking; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_DATA` (`.print-data`, resolved from the working directory), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
+Required: `DATABASE_URL` (Postgres connection URL), `ORDER_PAD_CAPTURE_FROM` (fixed UTC capture cutoff with milliseconds), and `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to hide the queue while retaining order capture; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_DATA` (`.print-data`, resolved from the working directory), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
 
 Start the service **from the repository root**: it serves `./build` and resolves a relative `ORDER_PAD_DATA` against the current directory, and exits if `build/` is missing.
 
-The initial service is foreground-only. Tailscale `--bg` persists the proxy, not Node. After smoke testing, configure systemd with the actual Node path, `WorkingDirectory` set to the repository root, and these variables. Disable host sleep for event use.
+The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`. Its `WorkingDirectory` is the repository root and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. Tailscale `--bg` persists the proxy, not Node. Disable host sleep for event use.
 
 ## Verified Mint setup — 2026-10-11
 
@@ -91,22 +93,13 @@ The Galaxy S10e was online in Tailscale. The owner opened the Mint HTTPS URL, se
 
 ## Update and test the order builder
 
-Rebuild both outputs with `npm run build` and `npm run build:printer`. When no print attempt or CUPS job is pending, stop the old foreground service and restart it with `./start-printer.local` (or the environment above). Both outputs must be updated: the service supplies printer status and the `/api/orders` endpoints used by the builder and `/queue/`. Preserve the entire `.print-data/` directory, including `orders/`. Historical prints are not backfilled into the build queue. Reopening only the browser cannot replace an already running Node process.
+Follow README’s [Postgres setup and upgrade steps](../README.md#set-up-postgres-and-upgrade-the-station): configure `.env`, start PostgreSQL 18, apply committed migrations with `npm run db:deploy`, then rebuild both outputs. When no print attempt or CUPS job is pending, stop the old service and restart with `npm run start:printer`. A direct launcher such as `./start-printer.local` must load `.env` with Node’s `--env-file=.env` or export `DATABASE_URL` and `ORDER_PAD_CAPTURE_FROM` itself. Reload browser tabs together. Keep the cutoff fixed across restarts.
 
-The queue now requires the SSE endpoint, so deploy both builds and restart the
-service together. No journal migration or new system tooling is required. Keep
-`.print-data/` intact. The old GET order-list endpoints remain compatible.
+Preserve the entire `.print-data/` directory. Legacy `orders/` files remain archives and are not imported. Browser storage remains version 2. Pending pre-cutoff submissions receive an explicit exclusion acknowledgment; newer submissions retry until durably stored. Back up the Postgres volume separately; never remove the volume or journal to resolve an ambiguous print.
 
-To run without order tracking, export `ORDER_PAD_TRACKING_ENABLED=false` before
-starting the service (including when using `./start-printer.local`). Restart and
-reload open browser tabs after changing the setting. Ordinary printing and
-recovery continue working; saved server orders and print attempts remain intact.
-The builder hides the queue link and `/queue/` shows a disabled message. The browser
-discards pending queue publications when it learns tracking is off; orders printed
-while disabled are not backfilled when tracking resumes. Use `true` or unset the
-variable to re-enable tracking. Read the uncached `/api/features` endpoint to verify
-the running setting; `/api/orders` and its SSE endpoint return 404 with
-`ORDER_TRACKING_DISABLED` while disabled.
+With `ORDER_PAD_TRACKING_ENABLED=false`, the builder hides the queue link and `/queue/` shows a disabled message. GET queue/SSE endpoints return 404 with `ORDER_TRACKING_DISABLED`, while all order POSTs remain available. Submissions, completion, and reopening are persisted regardless of visibility. Completion is explicit, never inferred from print acceptance. The browser does not discard pending publications when tracking is off. Printing continues through database outages; Done/Undo reports an error and requires a refresh before another deliberate attempt.
+
+Restart and reload after changing visibility. To re-enable, use `true` or unset the flag. Verify the running flag with uncached `/api/features`.
 
 With tracking enabled, verify streaming through the existing Mint HTTPS origin:
 

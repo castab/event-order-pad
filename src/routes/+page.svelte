@@ -171,7 +171,10 @@
     let cancelled = false;
     mounted = true;
     try {
-      store = new IndexedDbTicketStore(indexedDB, 'order-pad-v1', false);
+      store = new IndexedDbTicketStore(indexedDB, 'order-pad-v1');
+      publisher = new OrderPublisher(store, (notice) => {
+        if (mounted) queueNotice = notice;
+      });
       session = new PrintSession(store, (next) => {
         viewState = next;
         if (
@@ -181,8 +184,7 @@
           void publisher?.flush();
       });
       void session.initialize().then(() => {
-        if (!cancelled && trackingEnabled && viewState.phase === 'ready')
-          publisher?.start();
+        if (!cancelled && viewState.phase === 'ready') publisher?.start();
       });
     } catch {
       viewState = {
@@ -227,33 +229,7 @@
       try {
         const enabled = await fetchTrackingEnabled(featuresController!.signal);
         if (!mounted) return;
-        if (!enabled) {
-          publisher?.stop();
-          publisher = undefined;
-          trackingEnabled = false;
-          queueNotice = '';
-        }
-        await store!.setTrackingEnabled(enabled);
-        if (!mounted) return;
         trackingEnabled = enabled;
-        if (enabled && !publisher) {
-          publisher = new OrderPublisher(
-            store!,
-            (notice) => {
-              if (mounted) queueNotice = notice;
-            },
-            undefined,
-            undefined,
-            () => {
-              if (mounted) {
-                trackingEnabled = false;
-                queueNotice = '';
-                publisher = undefined;
-              }
-            },
-          );
-          if (viewState.phase === 'ready') publisher.start();
-        }
       } catch {
         // Optional tracking configuration must never block ordinary printing.
       } finally {
@@ -821,7 +797,7 @@
             {#if trackingEnabled}<a class="queue-link" href="/queue/"
                 >Now Scooping</a
               >{/if}
-            {#if trackingEnabled && queueNotice}<p
+            {#if queueNotice}<p
                 role="status"
                 aria-label="Queue synchronization"
               >

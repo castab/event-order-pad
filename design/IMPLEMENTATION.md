@@ -3,7 +3,7 @@
 > **Status (2026-10-12): implemented.** All three suggested phases are built. This brief is kept as the original handoff and the source of the ordering rules and layout intent. Where it and the code differ, the code and [README](../README.md) are authoritative. Known differences:
 >
 > - The build queue screen is titled **Now Scooping** (route `/queue/`), not "BUILD QUEUE".
-> - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and order tracking can be switched off with `ORDER_PAD_TRACKING_ENABLED=false`.
+> - The queue uses Server-Sent Events (`GET /api/orders/events`) rather than polling, and queue visibility can be switched off while event capture continues with `ORDER_PAD_TRACKING_ENABLED=false`.
 > - The UI prints only through the Linux CUPS service; the PassPRNT path mentioned below is no longer selectable, so order registration happens both in `POST /api/print` and through the browser outbox.
 > - Order numbers are still allocated per browser; moving allocation to the service remains deferred.
 > - `design/tokens/tokens.css` is imported by the app at runtime; the rest of this folder is reference only.

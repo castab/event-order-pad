@@ -101,6 +101,7 @@ export function createApp({
         return;
       }
       if (
+        req.method === 'GET' &&
         !trackingEnabled &&
         (path === '/api/orders' || path.startsWith('/api/orders/'))
       ) {
@@ -121,13 +122,13 @@ export function createApp({
         const stream = new OrderStream(res, () => streams.delete(stream));
         streams.add(stream);
         try {
-          stream.start(await orders.subscribe(stream.snapshot));
+          stream.start(await orders.subscribe(stream.snapshot, stream.dispose));
         } catch {
           // No streaming headers have been sent if journal loading failed.
           if (!res.destroyed)
             json(503, {
               error:
-                'Order journal unavailable. Preserve the journal and restore service storage.',
+                'Order database unavailable. Check Postgres and the service connection.',
             });
           if (res.destroyed) stream.dispose();
         }
@@ -145,7 +146,7 @@ export function createApp({
         } catch {
           json(503, {
             error:
-              'Order journal unavailable. Preserve the journal and restore service storage.',
+              'Order database unavailable. Check Postgres and the service connection.',
           });
         }
         return;
@@ -160,7 +161,7 @@ export function createApp({
         }
         try {
           const saved = await orders.upsert(ticket);
-          json(saved.created ? 201 : 200, saved);
+          json('excluded' in saved || !saved.created ? 200 : 201, saved);
         } catch {
           json(503, {
             error:
@@ -230,12 +231,12 @@ export function createApp({
           });
           return;
         }
-        if (trackingEnabled && !request.reprint) {
+        if (!request.reprint) {
           try {
             await orders.upsert(request.ticket);
           } catch {
             console.warn(
-              'Order journal update failed; the browser outbox will retry without resending the print.',
+              'Order database update failed; the browser outbox will retry without resending the print.',
             );
           }
         }

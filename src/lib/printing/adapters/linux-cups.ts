@@ -57,6 +57,49 @@ export class LinuxCupsPrinter implements TicketPrinter {
       });
       const data = await response.json();
       if (
+        !response.ok &&
+        data?.attemptId === undefined &&
+        data?.result === undefined
+      ) {
+        if (
+          response.status === 403 &&
+          [
+            'Unrecognized host.',
+            'Use the configured same-origin application.',
+          ].includes(data?.error)
+        )
+          return {
+            status: 'failed',
+            code: 'permission-denied',
+            simulated: false,
+            message:
+              'The service rejected this address. Open the configured HTTPS address. No job was submitted.',
+          };
+        if (
+          response.status === 400 &&
+          [
+            'Invalid ticket or attempt metadata. No data sent.',
+            'Invalid JSON request.',
+          ].includes(data?.error)
+        )
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'The service rejected the ticket. Reload the app to match the service. No job was submitted.',
+          };
+        if (response.status === 413 && data?.error === 'Request too large.')
+          return {
+            status: 'failed',
+            code: 'invalid-ticket',
+            simulated: false,
+            message:
+              'The service rejected the request because it is too large. No job was submitted.',
+          };
+      }
+      if (
+        response.ok &&
         data.attemptId === options.attemptId &&
         data.result?.simulated === false &&
         typeof data.result.message === 'string' &&
