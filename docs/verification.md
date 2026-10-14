@@ -2,6 +2,25 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## PDF development printing — 2026-10-14
+
+Added explicit PDF-only service output, cross-platform startup, atomic receipt files, workspace-protected PDF viewing and browser links restored after reload. CUPS remains the default. No database migration is required.
+
+Verification ran on Windows with Node 26.9.0. Unit/HTTP and browser tests ran outside the sandbox because its temporary-file and loopback restrictions prevented normal execution. Unit and browser suites passed when run separately; running both simultaneously caused the existing exhaustive menu test to exceed its timeout.
+
+| Check                          | Result                                                                                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run test:postgres`        | Unavailable: no `TEST_DATABASE_URL` or disposable PostgreSQL 18 test database configured.                                                                                                                    |
+| `npm run test:postgres:volume` | Unavailable: Docker Desktop Linux engine was not running.                                                                                                                                                    |
+| `npm run check`                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                                                                                                                 |
+| `npm run lint`                 | Passed.                                                                                                                                                                                                      |
+| `npm test`                     | Passed; 216 tests across 19 files, including actual receipt PDFs, page dimensions, distinct reprints, dispatch-before-save, interrupted saving without replay, workspace ownership and PDF response headers. |
+| `npm run build`                | Passed.                                                                                                                                                                                                      |
+| `npm run build:printer`        | Passed.                                                                                                                                                                                                      |
+| `npm run test:e2e`             | Passed; 137 Chromium runs, including PDF mode, viewing, reload recovery of the link and reprinting at all three builder viewport sizes.                                                                      |
+
+No physical print job was sent and no hardware result is claimed. Real PostgreSQL checks remain required in an environment with the test database and Docker available.
+
 ## Independent browser workspaces and database-assigned numbers — 2026-10-13
 
 Each browser profile now receives an anonymous `__Host-order-pad-workspace` cookie and owns its own Postgres draft, revision, latest ticket and recovery state. Editable drafts have no number; the service allocates the next global number atomically with print intent and returns the authoritative ticket. The `20261015000000_browser_workspaces` migration preserves the existing station draft, latest ticket, attempts and dispatches for the first browser after upgrade and seeds the counter above all stored references. Print requests queue FIFO (eight waiting, 30-second slot limit), then wait up to 30 seconds for pending CUPS jobs before submitting once. Revision conflicts now show “Open in another tab” instead of “Database needs attention”.

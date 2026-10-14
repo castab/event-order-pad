@@ -151,3 +151,9 @@ Cancel a specific job in CUPS only after inspecting physical output. Never autom
 ## Official sources
 
 [Mint base](https://linuxmint.com/download_all.php), [Star driver/support](https://starmicronics.com/support/download/cups-driver-for-linux/), [Star manual](https://starmicronics.com/support/Mannualfolder/common_tsp_linux_en.pdf) (USB/model pp. 8–11, variable length p. 29, cutting p. 31, command values p. 51), [CUPS lp](https://www.cups.org/doc/man-lp.html), [media/options](https://www.cups.org/doc/options.html), [lpstat](https://www.cups.org/doc/man-lpstat.html), [error policy](https://www.cups.org/doc/man-lpadmin.html), [PDFKit fonts](https://pdfkit.org/docs/text.html), [page sizing](https://pdfkit.org/docs/getting_started.html), [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve).
+
+## PDF development output
+
+For receipt development without paper, set `ORDER_PAD_PRINT_MODE=pdf`. This runs on Windows, macOS and Linux with local PostgreSQL 18. Use a separate development database, an explicit readable `ORDER_PAD_FONT` TTF path, and optionally `ORDER_PAD_PDF_DIR` (default `.receipt-pdfs`). PDF mode permits loopback HTTP origins such as `http://localhost:4174`; CUPS mode still requires Linux and HTTPS. Follow [the complete development setup](../README.md#pdf-development-printing).
+
+Print order saves one PDF per attempt and reports a simulated accepted result only after saving the file and dispatch outcome. Order tools provides View PDF; reprints create separate PDFs. No CUPS command runs in PDF mode. Files remain until manually removed, and viewing requires the owning workspace. The normal database, numbering, queue and unknown-outcome rules apply. Check physical printing and cutting using the existing hardware acceptance checklist before using layout changes in service.

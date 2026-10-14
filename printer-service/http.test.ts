@@ -19,7 +19,7 @@ const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
 });
-async function app(trackingEnabled = true) {
+async function app(trackingEnabled = true, pdfMode = false) {
   const directory = await mkdtemp(join(tmpdir(), 'order-pad-http-'));
   closers.push(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, 'index.html'), '<h1>Order Pad</h1>');
@@ -40,12 +40,23 @@ async function app(trackingEnabled = true) {
   await mkdir(join(directory, 'queue'));
   await writeFile(join(directory, 'queue/index.html'), '<h1>Build queue</h1>');
   const station = new MemoryStationRepository(repository);
+  const receipt = vi.fn(async () => ({
+    request: JSON.parse(payload) as Request,
+  }));
+  const pdfRead = vi.fn(async () => Buffer.from('%PDF-test'));
+  const pdfCheck = vi.fn(async () => {});
   const server = createApp({
     origin: new URL('https://mint.test'),
     port: 4174,
     root: await realpath(directory),
     cups: { check, queue: 'OrderPad' },
-    printing: { print },
+    printing: { print, receipt },
+    pdfOutput: pdfMode
+      ? {
+          check: pdfCheck,
+          read: pdfRead,
+        }
+      : undefined,
     orders,
     trackingEnabled,
     station,
@@ -64,41 +75,59 @@ async function app(trackingEnabled = true) {
     body?: string,
     headers: Record<string, string> = {},
   ) =>
-    new Promise<{ status: number; body: string; cache: string | undefined }>(
-      (resolve, reject) => {
-        const req = request(
-          {
-            host: '127.0.0.1',
-            port,
-            path,
-            method: body === undefined ? 'GET' : 'POST',
-            headers: {
-              Host: 'mint.test',
-              ...(cookie ? { Cookie: cookie } : {}),
-              ...headers,
-            },
+    new Promise<{
+      status: number;
+      body: string;
+      cache: string | undefined;
+      contentType: string | undefined;
+      disposition: string | undefined;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path,
+          method: body === undefined ? 'GET' : 'POST',
+          headers: {
+            Host: 'mint.test',
+            ...(cookie ? { Cookie: cookie } : {}),
+            ...headers,
           },
-          (res) => {
-            if (res.headers['set-cookie'])
-              cookie = res.headers['set-cookie'][0].split(';')[0];
-            let response = '';
-            res.on('data', (chunk) => {
-              response += chunk.toString();
-            });
-            res.on('end', () =>
-              resolve({
-                status: res.statusCode!,
-                body: response,
-                cache: res.headers['cache-control'],
-              }),
-            );
-          },
-        );
-        req.on('error', reject);
-        req.end(body);
-      },
-    );
-  return { print, check, send, orders, server, port, directory, station };
+        },
+        (res) => {
+          if (res.headers['set-cookie'])
+            cookie = res.headers['set-cookie'][0].split(';')[0];
+          let response = '';
+          res.on('data', (chunk) => {
+            response += chunk.toString();
+          });
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode!,
+              body: response,
+              cache: res.headers['cache-control'],
+              contentType: res.headers['content-type'],
+              disposition: res.headers['content-disposition'],
+            }),
+          );
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+  return {
+    print,
+    check,
+    send,
+    orders,
+    server,
+    port,
+    directory,
+    station,
+    receipt,
+    pdfRead,
+    pdfCheck,
+  };
 }
 const payload = JSON.stringify({
   attemptId: 'attempt-1',
@@ -717,4 +746,48 @@ it('issues a private workspace cookie and rejects missing-cookie writes without 
   });
   expect(foreign.status).toBe(409);
   expect(print).not.toHaveBeenCalled();
+});
+
+it('serves saved PDFs only to the owning workspace, without rendering or printing', async () => {
+  const { send, receipt, pdfRead, print, check } = await app(true, true);
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  const captured = await capture(send);
+  receipt.mockResolvedValue({
+    request: { ticket: captured, attemptId: 'attempt-1', reprint: false },
+  });
+  const response = await send('/api/receipts/attempt-1.pdf');
+  expect(response.status).toBe(200);
+  expect(response.body).toBe('%PDF-test');
+  expect(response.cache).toBe('no-store');
+  expect(response.contentType).toBe('application/pdf');
+  expect(response.disposition).toBe('inline; filename="attempt-1.pdf"');
+  expect((await send('/api/printer')).body).toContain('"mode":"pdf"');
+  expect(
+    (
+      await send('/api/receipts/attempt-1.pdf', undefined, {
+        Cookie: '__Host-order-pad-workspace=' + 'f'.repeat(64),
+      })
+    ).status,
+  ).toBe(404);
+  expect(pdfRead).toHaveBeenCalledTimes(1);
+  expect(print).not.toHaveBeenCalled();
+  expect(check).not.toHaveBeenCalled();
+});
+
+it('does not regenerate missing PDFs, gates viewing on database health, and disables viewing in CUPS mode', async () => {
+  const { send, receipt, pdfRead, station } = await app(true, true);
+  const captured = await capture(send);
+  receipt.mockResolvedValue({
+    request: { ticket: captured, attemptId: 'attempt-1', reprint: false },
+  });
+  pdfRead.mockRejectedValueOnce(
+    Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+  );
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  vi.spyOn(station, 'check').mockRejectedValue(new Error('Database down'));
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(503);
+  expect(pdfRead).toHaveBeenCalledTimes(1);
+  const cups = await app();
+  expect((await cups.send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  expect(cups.pdfRead).not.toHaveBeenCalled();
 });

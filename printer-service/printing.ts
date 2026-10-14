@@ -1,6 +1,6 @@
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
 import type { PrintAttemptResult } from '../src/lib/printing/port';
-import { Cups } from './cups';
+import type { PrintOutput } from './output';
 import { receiptLayout, receiptPdf } from './receipt';
 
 export interface Request {
@@ -62,11 +62,32 @@ export class Printing {
   >();
   private readonly waiting: { run: () => void; expire: () => void }[] = [];
   constructor(
-    private cups: Cups,
+    private output: PrintOutput,
     private journal: PrintJournal,
     private font: string,
     private render = receiptPdf,
   ) {}
+  private unknown(): PrintAttemptResult {
+    return this.output.mode === 'pdf'
+      ? {
+          ...unknown(),
+          simulated: true,
+          message:
+            'PDF saving was interrupted or its outcome could not be saved. Inspect saved PDFs before deliberately reprinting. Nothing was sent to a physical printer.',
+        }
+      : unknown();
+  }
+  private failed(
+    message: string,
+    code: 'transport' | 'invalid-ticket' | 'printer-busy' = 'transport',
+  ): PrintAttemptResult {
+    return this.output.mode === 'pdf'
+      ? { ...failed(message, code), simulated: true }
+      : failed(message, code);
+  }
+  async receipt(attemptId: string): Promise<PrintRecord | undefined> {
+    return this.journal.get(attemptId);
+  }
   print(value: Request): Promise<PrintAttemptResult> {
     const request = parseRequest(value);
     const existing = this.inflight.get(request.attemptId);
@@ -74,7 +95,7 @@ export class Printing {
       return JSON.stringify(existing.request) === JSON.stringify(request)
         ? existing.promise
         : Promise.resolve(
-            failed(
+            this.failed(
               'Attempt ID was already used for different ticket content.',
               'invalid-ticket',
             ),
@@ -95,7 +116,7 @@ export class Printing {
         clearTimeout(timer);
         this.busy = true;
         void this.execute(request)
-          .catch(() => unknown())
+          .catch(() => this.unknown())
           .then((result) => {
             this.inflight.delete(request.attemptId);
             resolve(result);
@@ -134,15 +155,15 @@ export class Printing {
           JSON.stringify(parseRequest(record.request)) !==
           JSON.stringify(request)
         )
-          return failed(
+          return this.failed(
             'Attempt ID was already used for different ticket content.',
             'invalid-ticket',
           );
-        return record.result ?? unknown();
+        return record.result ?? this.unknown();
       }
-      return failed(message, 'printer-busy');
+      return this.failed(message, 'printer-busy');
     } catch {
-      return unknown();
+      return this.unknown();
     }
   }
 
@@ -155,25 +176,27 @@ export class Printing {
           JSON.stringify(parseRequest(existing.request)) !==
           JSON.stringify(request)
         )
-          return failed(
+          return this.failed(
             'Attempt ID was already used for different ticket content.',
             'invalid-ticket',
           );
-        return existing.result ?? unknown();
+        return existing.result ?? this.unknown();
       }
     } catch {
-      return failed(
+      return this.failed(
         'Database unavailable. No new job was submitted. Restore Postgres and reload.',
       );
     }
     if (this.blocked)
-      return failed(
-        'Print history needs recovery. Restart the service and inspect CUPS jobs before printing.',
+      return this.failed(
+        this.output.mode === 'pdf'
+          ? 'Print history needs recovery. Restart the service and inspect saved PDFs before reprinting. Nothing was sent to a physical printer.'
+          : 'Print history needs recovery. Restart the service and inspect CUPS jobs before printing.',
       );
     try {
       await this.journal.begin(request);
     } catch {
-      return failed(
+      return this.failed(
         'Could not save exclusive print intent. No job was submitted; inspect existing attempt history before trying again.',
       );
     }
@@ -181,8 +204,8 @@ export class Printing {
     let media: string;
     let jobOptions: string[];
     try {
-      await this.cups.waitUntilIdle();
-      const paper = await this.cups.prepare(
+      await this.output.waitUntilIdle();
+      const paper = await this.output.prepare(
         receiptLayout(request.ticket, request.reprint).heightMm,
       );
       media = paper.media;
@@ -194,14 +217,14 @@ export class Printing {
         paper.heightMm,
       );
     } catch (error) {
-      const result = failed(
+      const result = this.failed(
         `${(error as Error).message} No job was submitted.`,
       );
       try {
         await this.journal.finish(request, result);
       } catch {
         this.blocked = true;
-        return unknown();
+        return this.unknown();
       }
       return result;
     }
@@ -209,29 +232,37 @@ export class Printing {
       await this.journal.assertPending(request);
     } catch {
       // Recovery may finalize a waiting attempt. It must never reach lp afterward.
-      return unknown();
+      return this.unknown();
     }
     let result: PrintAttemptResult;
     try {
-      const job = await this.cups.submit(
+      const job = await this.output.submit(
         pdf,
         media,
         request.attemptId,
         jobOptions,
       );
-      result = {
-        status: 'accepted',
-        simulated: false,
-        message: `CUPS accepted job ${job}. This confirms queue submission only. Check the physical ticket and cut; a pending job may print later.`,
-      };
+      result =
+        this.output.mode === 'pdf'
+          ? {
+              status: 'accepted',
+              simulated: true,
+              message:
+                'Receipt PDF saved. Nothing was sent to a physical printer.',
+            }
+          : {
+              status: 'accepted',
+              simulated: false,
+              message: `CUPS accepted job ${job}. This confirms queue submission only. Check the physical ticket and cut; a pending job may print later.`,
+            };
     } catch {
-      result = unknown();
+      result = this.unknown();
     }
     try {
       await this.journal.finish(request, result);
     } catch {
       this.blocked = true;
-      return unknown();
+      return this.unknown();
     }
     return result;
   }

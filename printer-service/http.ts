@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import type { Cups } from './cups';
+import type { PdfOutput, PrintOutput } from './output';
 import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
@@ -56,12 +56,13 @@ export function createApp({
   orders,
   trackingEnabled = true,
   station,
+  pdfOutput,
 }: {
   origin: URL;
   port: number;
   root: string;
-  cups: Pick<Cups, 'check' | 'queue'>;
-  printing: Pick<Printing, 'print'>;
+  cups: Pick<PrintOutput, 'check' | 'queue'>;
+  printing: Pick<Printing, 'print'> & Partial<Pick<Printing, 'receipt'>>;
   orders: Pick<
     Orders,
     | 'upsert'
@@ -73,6 +74,7 @@ export function createApp({
   >;
   station: StationRepository;
   trackingEnabled?: boolean;
+  pdfOutput?: Pick<PdfOutput, 'check' | 'read'>;
 }) {
   const streams = new Set<OrderStream>();
   const server = createServer(async (req, res) => {
@@ -296,19 +298,62 @@ export function createApp({
       }
       if (req.method === 'GET' && path === '/api/printer') {
         try {
-          await cups.check();
+          if (pdfOutput) await pdfOutput.check();
+          else await cups.check();
           json(200, {
             ready: true,
-            queue: cups.queue,
-            message: `CUPS queue ${cups.queue} is configured for USB. Physical printer status is unverified.`,
+            mode: pdfOutput ? 'pdf' : 'cups',
+            queue: pdfOutput ? 'PDF files' : cups.queue,
+            message: pdfOutput
+              ? 'PDF development mode — no physical printing. Receipt PDFs are saved on this server.'
+              : `CUPS queue ${cups.queue} is configured for USB. Physical printer status is unverified.`,
           });
         } catch (error) {
           json(200, {
             ready: false,
-            queue: cups.queue,
-            message: `${(error as Error).message} Check CUPS on Mint.`,
+            mode: pdfOutput ? 'pdf' : 'cups',
+            queue: pdfOutput ? 'PDF files' : cups.queue,
+            message: `${(error as Error).message} ${pdfOutput ? 'Check the PDF directory and font.' : 'Check CUPS on Mint.'}`,
           });
         }
+        return;
+      }
+      const receipt = path.match(
+        /^\/api\/receipts\/([A-Za-z0-9_-]{1,100})\.pdf$/,
+      );
+      if (req.method === 'GET' && receipt && pdfOutput) {
+        if (!workspaceId) {
+          json(404, { error: 'Receipt not found.' });
+          return;
+        }
+        const record = await printing.receipt?.(receipt[1]);
+        if (!record) {
+          json(404, { error: 'Receipt not found.' });
+          return;
+        }
+        try {
+          await station.authorizePrint(record.request, workspaceId);
+        } catch (error) {
+          if (!(error instanceof StationConflict)) throw error;
+          json(404, { error: 'Receipt not found.' });
+          return;
+        }
+        let pdf: Buffer;
+        try {
+          pdf = await pdfOutput.read(receipt[1]);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          json(404, { error: 'Receipt not found.' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `inline; filename="${receipt[1]}.pdf"`,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Length': pdf.length,
+        });
+        res.end(pdf);
         return;
       }
       if (req.method === 'POST' && path === '/api/print') {

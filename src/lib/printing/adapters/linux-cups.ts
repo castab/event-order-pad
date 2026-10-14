@@ -1,7 +1,12 @@
 import type { OrderTicket } from '../../tickets/ticket';
-import type { PrintAttemptResult, TicketPrinter } from '../port';
+import {
+  parseAttemptResult,
+  type PrintAttemptResult,
+  type TicketPrinter,
+} from '../port';
 
 export interface LinuxPrinterStatus {
+  readonly mode?: 'cups' | 'pdf';
   readonly ready: boolean;
   readonly message: string;
   readonly queue?: string;
@@ -20,6 +25,7 @@ export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
       typeof data.message === 'string'
     )
       return {
+        mode: data.mode === 'pdf' ? 'pdf' : 'cups',
         ready: data.ready,
         message: data.message,
         queue: typeof data.queue === 'string' ? data.queue : undefined,
@@ -114,27 +120,8 @@ export class LinuxCupsPrinter implements TicketPrinter {
               'The service rejected the request because it is too large. No job was submitted.',
           };
       }
-      if (
-        response.ok &&
-        data.attemptId === options.attemptId &&
-        data.result?.simulated === false &&
-        typeof data.result.message === 'string' &&
-        (data.result.status === 'accepted' ||
-          (['failed', 'outcome-unknown'].includes(data.result.status) &&
-            [
-              'unsupported',
-              'permission-denied',
-              'disconnected',
-              'cover-open',
-              'paper-out',
-              'printer-busy',
-              'printer-error',
-              'transport',
-              'timeout',
-              'invalid-ticket',
-            ].includes(data.result.code)))
-      )
-        return data.result;
+      if (response.ok && data.attemptId === options.attemptId)
+        return parseAttemptResult(data.result);
     } catch {
       /* Lost responses are ambiguous; never resend automatically. */
     }
@@ -143,7 +130,7 @@ export class LinuxCupsPrinter implements TicketPrinter {
       simulated: false,
       code: 'transport',
       message:
-        'The Linux service did not return a matching result. The job may be queued or printed. Inspect the printer and CUPS jobs before deliberately reprinting.',
+        'The service did not return a matching result. Inspect the receipt output (saved PDFs in PDF mode, or the printer and CUPS jobs) before deliberately reprinting.',
     };
   }
 }

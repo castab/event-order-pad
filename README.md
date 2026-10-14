@@ -19,7 +19,7 @@ flowchart TB
     subgraph Svc["printer-service (Node) on 127.0.0.1:4174"]
       H["http.ts<br/>Host / Origin / JSON guards, database gate,<br/>routing, static files from build/"]
       SR["Station repository<br/>workspaces, drafts, numbers,<br/>tickets, attempts"]
-      PR["Printing + Cups<br/>one print at a time,<br/>PDF rendered with PDFKit"]
+      PR["Printing + output (Cups or PdfOutput)<br/>one print at a time,<br/>PDF rendered with PDFKit"]
       OR["Orders + OrderStream<br/>order events, SSE snapshots"]
     end
     DB[("PostgreSQL 18, loopback only<br/>station, workspaces, tickets, print_attempts,<br/>print_dispatches, order_events")]
@@ -35,26 +35,32 @@ flowchart TB
   SR --- DB
   PR -- "dispatch claim and result" --- DB
   OR -- "append and read events" --- DB
-  PR -- "PDF via lp" --> C
+  F["Development PDFs<br/>workspace-protected viewing"]
+  PR -- "PDF mode: save file" --> F
+  PR -- "CUPS mode: PDF via lp" --> C
   C -- USB --> P
 ```
 
-The first print of an order crosses these boundaries in a fixed order. Nothing reaches `lp` until Postgres holds both the browser's intent and the service's own dispatch claim:
+The first print of an order crosses these boundaries in a fixed order. Nothing reaches the selected output until Postgres holds both the browser's intent and the service's own dispatch claim:
 
 ```mermaid
 sequenceDiagram
   participant B as Browser (PrintSession)
   participant S as Service (http.ts)
   participant D as PostgreSQL
-  participant C as CUPS and printer
+  participant C as Output (CUPS or PDF file)
   B->>S: POST /api/station startOrder (revision, attempt)
   S->>D: One transaction: number, immutable ticket, locked draft, pending attempt, submitted order event
   S-->>B: Snapshot with the committed ticket
   Note over B: A failed or uncertain commit stops here. Nothing is printed.
   B->>S: POST /api/print (ticket, attemptId)
   S->>D: Confirm the attempt belongs to this workspace, then insert the exclusive dispatch claim
-  S->>C: Wait for an idle queue, then lp with the PDF
-  C-->>S: Job accepted, or an error
+  alt CUPS mode
+    S->>C: Wait for an idle queue, then lp with the PDF
+  else PDF mode
+    S->>C: Save the receipt PDF atomically
+  end
+  C-->>S: Output accepted, or an error
   S->>D: Record the result on the dispatch
   S-->>B: accepted, failed or outcome-unknown
   B->>S: POST /api/station finishAttempt
@@ -65,7 +71,7 @@ sequenceDiagram
 - **Linux host** runs `printer-service/`. It serves the static app from `build/`, renders each ticket as a PDF, submits it with `lp` to a local CUPS queue, and stores all station state and append-only order history in PostgreSQL 18 on the same host. Tailscale Serve provides private HTTPS on the tailnet. The docs call this machine the "Linux host", or "Mint" for the verified station.
 - **Build station** opens `/queue/` on the same origin and receives live updates over Server-Sent Events (SSE).
 
-The only supported print path from the UI is the Linux service. The repository also contains simulated and Android PassPRNT adapters; they are kept for unit tests and history and cannot be selected in the interface.
+The UI uses the same-origin service for CUPS printing or PDF development output. The repository also contains simulated and Android PassPRNT adapters; they are kept for unit tests and history and cannot be selected in the interface.
 
 ### Terms used throughout
 
@@ -100,28 +106,28 @@ There is no in-app printer simulator, and the dev server has no `/api` routes. E
 - **Now Scooping** is hidden in Order tools, and `/queue/` shows **Queue needs attention**.
 - Draft work requires the real service and database, or the API fixtures in tests.
 
-Full print and queue flows run in the Playwright suite, which mocks the API or starts the real HTTP service with a stubbed CUPS. The real service runs only on Linux and needs a local USB CUPS queue and an HTTPS origin (see [Configuration](#configuration)).
+Full print and queue flows run in the Playwright suite, which mocks the API or starts the real HTTP service with a stubbed CUPS. CUPS output requires Linux, a local USB CUPS queue and an HTTPS origin. PDF development output runs on Windows, macOS and Linux (see [PDF development printing](#pdf-development-printing)).
 
 ## Commands
 
-| Command                             | What it does                                                                                                                                                   |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                       | Vite dev server for the UI (port 5173, all interfaces).                                                                                                        |
-| `npm run db:generate`               | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                             |
-| `npm run db:migrate -- --name NAME` | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                      |
-| `npm run db:deploy`                 | Applies committed migrations to the configured database; run explicitly before deployment.                                                                     |
-| `npm run db:studio`                 | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                |
-| `npm run test:postgres`             | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                 |
-| `npm run test:postgres:volume`      | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                      |
-| `npm run check`                     | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker. |
-| `npm run lint`                      | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                       |
-| `npm test`                          | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                       |
-| `npm run build`                     | Static app and service worker into `build/`.                                                                                                                   |
-| `npm run build:printer`             | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                |
-| `npm run start:printer`             | Runs the bundled service with `.env` loaded when present. Linux only; run it from the repository root (see [Configuration](#configuration)).                   |
-| `npm run preview`                   | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                   |
-| `npx playwright install chromium`   | One-time browser download for the end-to-end tests.                                                                                                            |
-| `npm run test:e2e`                  | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                |
+| Command                             | What it does                                                                                                                                                                              |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                       | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                   |
+| `npm run db:generate`               | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                        |
+| `npm run db:migrate -- --name NAME` | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                 |
+| `npm run db:deploy`                 | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                |
+| `npm run db:studio`                 | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                           |
+| `npm run test:postgres`             | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                            |
+| `npm run test:postgres:volume`      | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                 |
+| `npm run check`                     | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                            |
+| `npm run lint`                      | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                  |
+| `npm test`                          | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                  |
+| `npm run build`                     | Static app and service worker into `build/`.                                                                                                                                              |
+| `npm run build:printer`             | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                           |
+| `npm run start:printer`             | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)). |
+| `npm run preview`                   | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                              |
+| `npx playwright install chromium`   | One-time browser download for the end-to-end tests.                                                                                                                                       |
+| `npm run test:e2e`                  | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                           |
 
 To run everything CI runs, in CI's order:
 
@@ -272,6 +278,34 @@ These rules hold across the browser and the service:
 
 There is no background print queue or exactly-once print guarantee. Postgres centralizes order history; backups remain the operator’s responsibility. Other applications that print through CUPS bypass the service's lock.
 
+## PDF development printing
+
+Set these values in a development `.env`, using a separate local PostgreSQL 18 database such as `order_pad_dev`:
+
+```dotenv
+DATABASE_URL=postgresql://order_pad:YOUR_PASSWORD@127.0.0.1:5432/order_pad_dev
+ORDER_PAD_PRINT_MODE=pdf
+ORDER_PAD_ORIGIN=http://localhost:4174
+ORDER_PAD_PDF_DIR=.receipt-pdfs
+ORDER_PAD_FONT=C:/Windows/Fonts/consola.ttf
+ORDER_PAD_CAPTURE_FROM=2026-10-13T00:00:00.000Z
+```
+
+Create that database first with your local PostgreSQL administrator. Retain the cutoff across restarts and ensure it is not in the future. Choose a readable TTF: Windows can use the path above; macOS and Linux can use an installed or copied TTF via its absolute path. For matching typography, copy the station's DejaVuSansMono.ttf to the development machine and point `ORDER_PAD_FONT` to it. Different fonts change text widths. The same PDF renderer and 72 mm receipt geometry are used, with a minimum height of 30 mm; the real driver may select longer stock.
+
+```sh
+npm ci
+npm run db:generate
+npm run db:deploy
+npm run build
+npm run build:printer
+npm run start:printer
+```
+
+Open [the local service](http://localhost:4174). Chromium supports the Secure workspace cookie on localhost; keep using the same hostname for the workspace. The app shows **PDF development mode — no physical printing**. **Print order** creates a normal numbered order and queue event in the development database, then saves a PDF instead of sending paper. Open Order tools → Last submitted order → **View PDF** to view or download it. Reprints create separate files with REPRINT marking. Saved files are named by attempt ID, excluded from Git in the default directory, and survive service restarts. Choose an output directory outside `build/` so static serving cannot expose it.
+
+The dispatch journal still records intent and outcomes. Lost replies or interrupted saves require acknowledgment and are never retried automatically. Viewing reads an existing file; it does not regenerate missing receipts. PDF mode still requires the service and local Postgres; `npm run dev` alone has no APIs. PDF inspection does not verify physical output or cutting.
+
 ## Configuration
 
 The service reads environment variables once at startup. `npm run start:printer` loads `.env` when it exists (`node --env-file-if-exists=.env`); variables already exported in the shell take precedence over `.env`. Copy [.env.example](.env.example) to start. Every variable is validated, and an invalid or missing required value stops startup:
@@ -280,10 +314,12 @@ The service reads environment variables once at startup. `npm run start:printer`
 | ---------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DATABASE_URL`               | _required_                                            | Postgres URL using `127.0.0.1`, `localhost` or `[::1]`. Remote hosts and connection-host overrides are rejected. Never supplied to the browser.                               |
 | `ORDER_PAD_CAPTURE_FROM`     | _required_                                            | Fixed ISO UTC timestamp with milliseconds, e.g. `2026-10-13T00:00:00.000Z`. Set it once to the rollout time and keep it across restarts. See below.                           |
-| `ORDER_PAD_ORIGIN`           | _required_                                            | Root HTTPS origin the browsers use, such as `https://host.tailnet.ts.net`. It must be `https:` with no path, query or credentials.                                            |
+| `ORDER_PAD_ORIGIN`           | _required_                                            | Root HTTPS origin the browsers use, such as `https://host.tailnet.ts.net`. Use `https:` with no path, query or credentials; PDF mode also accepts loopback HTTP origins.      |
 | `ORDER_PAD_QUEUE`            | `OrderPad`                                            | Name of the local USB CUPS queue: letters, digits, `_` and `-`, up to 80 characters. The default is not a real queue name; set this. The verified station uses `Star_TSP143`. |
 | `ORDER_PAD_PORT`             | `4174`                                                | Loopback port (1024–65535). The service binds to `127.0.0.1` only.                                                                                                            |
-| `ORDER_PAD_FONT`             | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | Font embedded in receipt PDFs (`apt install fonts-dejavu-core`).                                                                                                              |
+| `ORDER_PAD_PRINT_MODE`       | `cups`                                                | Exactly `cups` or `pdf`; PDF mode saves receipt files and never calls CUPS.                                                                                                   |
+| `ORDER_PAD_PDF_DIR`          | `.receipt-pdfs`                                       | PDF output directory, resolved from the working directory; only used in PDF mode. Files remain until manually removed.                                                        |
+| `ORDER_PAD_FONT`             | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` | Font embedded in receipt PDFs (`apt install fonts-dejavu-core`). Required explicit readable TTF path in PDF mode.                                                             |
 | `ORDER_PAD_TRACKING_ENABLED` | `true`                                                | Exactly `true` or `false`. See [Optional order tracking](#optional-order-tracking).                                                                                           |
 
 **Capture cutoff.** `ORDER_PAD_CAPTURE_FROM` separates old history from the live station. A ticket created before it is never added to the queue (`POST /api/orders` answers `{ excluded: true }`), and the service rejects `startOrder` when its own clock is earlier than the cutoff, so a cutoff in the future blocks all new orders until that time. The service uses its own clock for ticket timestamps, so keep the host clock accurate. Do not change the value after rollout, and never lower it to backfill history; events already stored are not removed or re-evaluated.
@@ -304,19 +340,20 @@ Requests must use the configured origin. The `Host` header must match `ORDER_PAD
 
 All `/api` responses are JSON with `Cache-Control: no-store`, except the SSE stream. Shared types live in [src/lib/printing/port.ts](src/lib/printing/port.ts), [src/lib/tickets/ticket.ts](src/lib/tickets/ticket.ts) and [src/lib/orders/](src/lib/orders/).
 
-| Endpoint                      | Request                                                                      | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ----------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/database`           | none                                                                         | 200 `{ ready: true }` after checking the required schema; 503 when unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `GET /api/station`            | none                                                                         | `{ revision, draft, saved?: { ticket, attempts } }`, the browser workspace’s state; issues/renews the anonymous workspace cookie.                                                                                                                                                                                                                                                                                                                                                                                      |
-| `POST /api/station`           | `{ revision, operation, draft?, ticket?, attempt? }`                         | Updated workspace snapshot. A valid workspace cookie is required. `startOrder` accepts only `{ revision, operation: "startOrder", attempt }`; the service prepares the saved draft, allocates the number and timestamp, and returns the committed ticket before printing. Operations: `saveDraft`, `saveTicket`, `startOrder`, `startAttempt`, `finishAttempt`. 400 invalid input, 409 stale revision or invalid state transition, 503 unavailable/uncertain write.                                                    |
-| `GET /api/printer`            | none                                                                         | 200 `{ ready, queue, message }` when the database is available. Checks that the queue exists, is enabled, uses `usb://` and offers the Star variable-length and cut options.                                                                                                                                                                                                                                                                                                                                           |
-| `POST /api/print`             | `{ ticket, attemptId, reprint }`; `attemptId` matches `[A-Za-z0-9_-]{1,100}` | 200 `{ attemptId, result }`, where `result` is a `PrintAttemptResult`. Print failures are 200 with `result.status` of `failed` or `outcome-unknown`; 400 means invalid input; 503 with `code: "database-unavailable"` means the database gate rejected the request before printing. A matching saved pending intent owned by the browser workspace is required. 409 rejects missing workspaces or foreign intents without submission. The browser waits up to 240 seconds for the result; lost replies remain unknown. |
-| `GET /api/features`           | none                                                                         | `{ trackingEnabled }`, the setting the service is running with. Requires the database.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `POST /api/orders`            | schema 2 ticket                                                              | `{ order, created }`: 201 when first created, 200 when the ID already exists (unchanged), or 200 `{ excluded: true, ticketId }` for a pre-cutoff ticket.                                                                                                                                                                                                                                                                                                                                                               |
-| `GET /api/orders`             | optional `?status=open` or `?status=done`                                    | `{ orders }`: open orders oldest first, then the eight most recently done. `status` filters to one of the two lists.                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `GET /api/orders/events`      | none (`EventSource`)                                                         | SSE. `orders` events carry `{ orders, instanceId, revision }`; `ping` events every 15 s.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `POST /api/orders/:id/done`   | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `POST /api/orders/:id/reopen` | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent; keeps the original submission time.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Endpoint                           | Request                                                                      | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/database`                | none                                                                         | 200 `{ ready: true }` after checking the required schema; 503 when unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `GET /api/station`                 | none                                                                         | `{ revision, draft, saved?: { ticket, attempts } }`, the browser workspace’s state; issues/renews the anonymous workspace cookie.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `POST /api/station`                | `{ revision, operation, draft?, ticket?, attempt? }`                         | Updated workspace snapshot. A valid workspace cookie is required. `startOrder` accepts only `{ revision, operation: "startOrder", attempt }`; the service prepares the saved draft, allocates the number and timestamp, and returns the committed ticket before printing. Operations: `saveDraft`, `saveTicket`, `startOrder`, `startAttempt`, `finishAttempt`. 400 invalid input, 409 stale revision or invalid state transition, 503 unavailable/uncertain write.                                                    |
+| `GET /api/printer`                 | none                                                                         | 200 `{ ready, queue, message }` when the database is available. Includes `mode: "cups"                                                                                                                                                                                                                                                                                                                                                                                                                                 | "pdf"`. PDF mode checks its output directory and font; CUPS mode checks that the queue exists, is enabled, uses `usb://` and offers the Star variable-length and cut options. |
+| `GET /api/receipts/:attemptId.pdf` | Workspace cookie                                                             | PDF mode only: existing receipt PDF with inline disposition and no-store. Requires ownership of the recorded dispatch; missing or foreign receipts return 404. Database unavailability returns 503. Viewing never regenerates a PDF.                                                                                                                                                                                                                                                                                   |
+| `POST /api/print`                  | `{ ticket, attemptId, reprint }`; `attemptId` matches `[A-Za-z0-9_-]{1,100}` | 200 `{ attemptId, result }`, where `result` is a `PrintAttemptResult`. Print failures are 200 with `result.status` of `failed` or `outcome-unknown`; 400 means invalid input; 503 with `code: "database-unavailable"` means the database gate rejected the request before printing. A matching saved pending intent owned by the browser workspace is required. 409 rejects missing workspaces or foreign intents without submission. The browser waits up to 240 seconds for the result; lost replies remain unknown. |
+| `GET /api/features`                | none                                                                         | `{ trackingEnabled }`, the setting the service is running with. Requires the database.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `POST /api/orders`                 | schema 2 ticket                                                              | `{ order, created }`: 201 when first created, 200 when the ID already exists (unchanged), or 200 `{ excluded: true, ticketId }` for a pre-cutoff ticket.                                                                                                                                                                                                                                                                                                                                                               |
+| `GET /api/orders`                  | optional `?status=open` or `?status=done`                                    | `{ orders }`: open orders oldest first, then the eight most recently done. `status` filters to one of the two lists.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `GET /api/orders/events`           | none (`EventSource`)                                                         | SSE. `orders` events carry `{ orders, instanceId, revision }`; `ping` events every 15 s.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `POST /api/orders/:id/done`        | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `POST /api/orders/:id/reopen`      | `{}`                                                                         | `{ order, instanceId, revision }`. Idempotent; keeps the original submission time.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `submittedAt` is the ticket's own `createdAt`, so a delayed publication does not reset its wait time.
 

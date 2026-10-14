@@ -36,7 +36,19 @@ describe('Linux browser adapter', () => {
       ).print(ticket, options),
     ).toEqual(result);
   });
-  it('treats timeouts, malformed replies, wrong attempt IDs and simulated replies as unknown without retry', async () => {
+  it('accepts a validated PDF outcome from the same-origin service', async () => {
+    const result = {
+      status: 'accepted',
+      simulated: true,
+      message: 'Receipt PDF saved.',
+    };
+    expect(
+      await new LinuxCupsPrinter(async () =>
+        Response.json({ attemptId: options.attemptId, result }),
+      ).print(ticket, options),
+    ).toEqual(result);
+  });
+  it('treats timeouts, malformed replies and wrong attempt IDs as unknown without retry', async () => {
     for (const value of [
       undefined,
       {},
@@ -46,7 +58,7 @@ describe('Linux browser adapter', () => {
       },
       {
         attemptId: options.attemptId,
-        result: { status: 'accepted', simulated: true, message: 'Mock' },
+        result: { status: 'accepted', simulated: 'true', message: 'Mock' },
       },
     ]) {
       const send = vi.fn<typeof fetch>(async () => {
