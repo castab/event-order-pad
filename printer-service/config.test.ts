@@ -1,5 +1,44 @@
 import { expect, it } from 'vitest';
-import { parseTrackingEnabled } from './config';
+import {
+  parseTrackingEnabled,
+  parsePrintMode,
+  parseServiceOrigin,
+  assertPrintPlatform,
+} from './config';
+
+it('requires an explicit PDF mode and keeps CUPS Linux-only', () => {
+  expect(parsePrintMode(undefined)).toBe('cups');
+  expect(parsePrintMode('cups')).toBe('cups');
+  expect(parsePrintMode('pdf')).toBe('pdf');
+  for (const value of ['', 'PDF', 'false', ' pdf '])
+    expect(() => parsePrintMode(value)).toThrow();
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    expect(() => assertPrintPlatform('pdf', platform)).not.toThrow();
+    if (platform !== 'linux')
+      expect(() => assertPrintPlatform('cups', platform)).toThrow();
+  }
+});
+
+it('allows only loopback HTTP origins in PDF mode', () => {
+  for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+    expect(parseServiceOrigin(`http://${host}:4174`, 'pdf').protocol).toBe(
+      'http:',
+    );
+    expect(() => parseServiceOrigin(`http://${host}:4174`, 'cups')).toThrow();
+  }
+  expect(parseServiceOrigin('https://mint.test', 'cups').origin).toBe(
+    'https://mint.test',
+  );
+  for (const origin of [
+    undefined,
+    'http://remote.test',
+    'http://localhost.evil.test',
+    'https://mint.test/path',
+    'https://user@mint.test',
+    'https://mint.test/?q=1',
+  ])
+    expect(() => parseServiceOrigin(origin, 'pdf')).toThrow();
+});
 
 it.each([
   [undefined, true],

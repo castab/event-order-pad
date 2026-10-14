@@ -45,7 +45,7 @@ async function readDraft(page: Page): Promise<OrderDraft> {
   );
 }
 
-async function mockUsb(page: Page | BrowserContext) {
+async function mockUsb(page: Page | BrowserContext, pdfMode = false) {
   const { station, fail } = await mockStationApi(page);
   await page.route('**/api/features', (route) =>
     route.fulfill({ json: { trackingEnabled: true } }),
@@ -65,9 +65,11 @@ async function mockUsb(page: Page | BrowserContext) {
     route.fulfill({
       json: {
         ready: true,
-        queue: 'Star_TSP143',
-        message:
-          'CUPS queue Star_TSP143 is configured for USB. Physical printer status is unverified.',
+        queue: pdfMode ? 'PDF files' : 'Star_TSP143',
+        mode: pdfMode ? 'pdf' : 'cups',
+        message: pdfMode
+          ? 'PDF development mode — no physical printing.'
+          : 'CUPS queue Star_TSP143 is configured for USB. Physical printer status is unverified.',
       },
     }),
   );
@@ -92,8 +94,10 @@ async function mockUsb(page: Page | BrowserContext) {
         attemptId: body.attemptId,
         result: {
           status: 'accepted',
-          simulated: false,
-          message: 'CUPS accepted test job. Queue submission only.',
+          simulated: pdfMode,
+          message: pdfMode
+            ? 'Receipt PDF saved. Nothing was sent to a physical printer.'
+            : 'CUPS accepted test job. Queue submission only.',
         },
       },
     });
@@ -1571,4 +1575,58 @@ test('tabs share a database draft and stale edits cannot overwrite newer station
     'Newer saved draft',
   );
   expect(submitted).toHaveLength(0);
+});
+
+test('PDF mode saves an order, restores viewing after reload, and creates a separate reprint link', async ({
+  page,
+  context,
+}) => {
+  const { submitted } = await mockUsb(page, true);
+  await context.route('**/api/receipts/*.pdf', (route) =>
+    route.fulfill({ contentType: 'application/pdf', body: '%PDF-test' }),
+  );
+  await page.goto('/');
+  await expect(
+    page.getByText('PDF development mode — no physical printing', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await chooseServing(page);
+  await printButton(page).click();
+  await expect(
+    page
+      .getByText('Receipt PDF saved. Nothing was sent to a physical printer.', {
+        exact: true,
+      })
+      .first(),
+  ).toBeVisible();
+  await expect(printButton(page)).toBeDisabled();
+  await openTools(page);
+  const link = page.getByRole('link', { name: 'View PDF', exact: true });
+  await expect(link).toHaveAttribute(
+    'href',
+    '/api/receipts/' + submitted[0].attemptId + '.pdf',
+  );
+  await expect(link).toHaveAttribute('target', '_blank');
+  const contentType = await page.evaluate(
+    async (url) => (await fetch(url)).headers.get('content-type'),
+    (await link.getAttribute('href')) as string,
+  );
+  expect(contentType).toContain('application/pdf');
+  await page.reload();
+  await openTools(page);
+  await expect(link).toHaveAttribute(
+    'href',
+    '/api/receipts/' + submitted[0].attemptId + '.pdf',
+  );
+  await page
+    .getByRole('button', { name: 'Reprint last order', exact: true })
+    .click();
+  await expect.poll(() => submitted.length).toBe(2);
+  await expect(link).toHaveAttribute(
+    'href',
+    '/api/receipts/' + submitted[1].attemptId + '.pdf',
+  );
+  expect(submitted[1].reprint).toBe(true);
+  expect(submitted[1].ticket).toEqual(submitted[0].ticket);
 });
