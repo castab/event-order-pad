@@ -1266,9 +1266,9 @@ section.auth-panel.auth-stack {
   align-items: center;
   gap: 10px;
 }
-/* The phone builder header has no room for the name; keep it as the accessible name. */
+/* Phone builder and queue headers have no room for the name; keep it as the accessible name. */
 @media (max-width: 520px) {
-  .builder-header .user-name {
+  :is(.builder-header, .queue-header) .user-name {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1276,10 +1276,10 @@ section.auth-panel.auth-stack {
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
   }
-  .builder-header .user-menu-trigger {
+  :is(.builder-header, .queue-header) .user-menu-trigger {
     padding-right: 5px;
   }
-  .builder-header .user-menu-trigger > svg {
+  :is(.builder-header, .queue-header) .user-menu-trigger > svg {
     display: none;
   }
 }

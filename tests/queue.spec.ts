@@ -940,3 +940,30 @@ test('unavailable tracking settings show an error without opening a stream; refr
     ),
   ).toBe(0);
 });
+for (const width of [320, 360, 390])
+  test(`the username menu never covers the title on a ${width} px phone`, async ({
+    page,
+    context,
+  }) => {
+    await backend(context);
+    await page.route('**/api/auth/session', (route) =>
+      route.fulfill({
+        json: {
+          user: { id: 'long', username: 'bcastaneda' },
+          expiresAt: new Date(Date.now() + 3600000).toISOString(),
+          authenticatedAt: new Date().toISOString(),
+        },
+      }),
+    );
+    await page.setViewportSize({ width, height: 760 });
+    await page.goto('/queue/');
+    const menu = page.getByRole('button', { name: 'bcastaneda', exact: true });
+    await expect(menu).toBeVisible();
+    const title = (await page
+      .getByRole('heading', { name: 'Now Scooping', level: 1 })
+      .boundingBox())!;
+    const button = (await menu.boundingBox())!;
+    expect(title.x + title.width).toBeLessThanOrEqual(button.x);
+    expect(button.x + button.width).toBeLessThanOrEqual(width);
+    expect(button.width).toBeGreaterThanOrEqual(44);
+  });
