@@ -5,6 +5,7 @@ import {
   pixelsPerMm,
 } from '../src/lib/tickets/format';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
+import { formatAccessCode } from '../src/lib/auth/model';
 
 const mm = 72 / 25.4;
 const px = mm / pixelsPerMm;
@@ -83,6 +84,50 @@ export async function receiptPdf(
     }
     doc.restore();
   }
+  doc.end();
+  return finished;
+}
+
+export const accessSlipHeightMm = 60;
+export const accessExpiry = (expiresAt: Date) =>
+  expiresAt.toLocaleString('en-US', {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+/** A short slip staff can post at the counter; it is not an order ticket. */
+export async function accessCodePdf(
+  code: string,
+  expiresAt: Date,
+  font: string,
+  heightMm = accessSlipHeightMm,
+): Promise<Buffer> {
+  const width = 72 * mm;
+  const doc = new PDFDocument({
+    size: [width, heightMm * mm],
+    margin: 0,
+    font,
+    compress: true,
+    info: { Title: 'Access code' },
+  });
+  const chunks: Buffer[] = [];
+  const finished = new Promise<Buffer>((resolve, reject) => {
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+  const line = (text: string, y: number, size: number) => {
+    doc.fontSize(size);
+    if (doc.widthOfString(text) > width - 8 * mm)
+      doc.fontSize((size * (width - 8 * mm)) / doc.widthOfString(text));
+    doc.text(text, (width - doc.widthOfString(text)) / 2, y * mm, {
+      lineBreak: false,
+    });
+  };
+  line('ORDER PAD ACCESS CODE', 6, 11);
+  line(formatAccessCode(code), 18, 30);
+  line(`Valid until ${accessExpiry(expiresAt)}`, 36, 11);
+  line('Minting a new code ends this one.', 46, 9);
   doc.end();
   return finished;
 }

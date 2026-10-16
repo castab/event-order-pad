@@ -15,9 +15,7 @@
   let lost = $state(false);
   let unavailable = $state('');
   const publicPage = $derived(
-    ['/login', '/enroll', '/recover'].includes(
-      page.url.pathname.replace(/\/$/, ''),
-    ),
+    page.url.pathname.replace(/\/$/, '') === '/login',
   );
   onMount(() => {
     const stopUpdates = startAppUpdates();
@@ -99,7 +97,8 @@
     {@render children()}
   </div>
   {#if lost}<div class="auth-overlay" role="status">
-      Sign-in expired. Waiting for current work to finish safely…
+      Access code expired or replaced. Waiting for current work to finish
+      safely…
     </div>{/if}
 {:else}
   <main class="auth-card">

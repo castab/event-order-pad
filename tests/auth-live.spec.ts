@@ -9,7 +9,7 @@ import {
 } from './helpers/order-repository';
 import { MemoryStationRepository } from './helpers/station';
 
-test('the production service serves built authentication pages and protects account HTML', async ({
+test('the production service serves the built sign-in page and no account pages', async ({
   request,
 }) => {
   const auth = testAuth({ session: async () => undefined });
@@ -35,27 +35,24 @@ test('the production service serves built authentication pages and protects acco
     const redirect = await request.get(origin.origin, { maxRedirects: 0 });
     expect(redirect.status()).toBe(303);
     expect(redirect.headers().location).toBe('/login/');
-    for (const [path, heading] of [
-      ['login', 'Sign in'],
-      ['enroll', 'Set up your account'],
-      ['recover', 'Recover your account'],
-    ]) {
-      for (const suffix of ['', '/']) {
-        const response = await request.get(`${origin.origin}/${path}${suffix}`);
-        expect(response.status()).toBe(200);
-        expect(response.headers()['content-type']).toContain('text/html');
-        expect(response.headers()['cache-control']).toBe('no-store');
-        expect(await response.text()).toContain(heading);
-      }
+    for (const suffix of ['', '/']) {
+      const response = await request.get(`${origin.origin}/login${suffix}`);
+      expect(response.status()).toBe(200);
+      expect(response.headers()['content-type']).toContain('text/html');
+      expect(response.headers()['cache-control']).toBe('no-store');
+      expect(await response.text()).toContain('Access code');
     }
-    const account = await request.get(`${origin.origin}/account/`, {
-      maxRedirects: 0,
-    });
-    expect(account.status()).toBe(303);
+    for (const path of ['enroll', 'recover', 'account']) {
+      const hidden = await request.get(`${origin.origin}/${path}/`, {
+        maxRedirects: 0,
+      });
+      expect(hidden.status()).toBe(303);
+    }
     auth.session = testAuth().session;
-    const signedIn = await request.get(`${origin.origin}/account/`);
-    expect(signedIn.status()).toBe(200);
-    expect(signedIn.headers()['content-type']).toContain('text/html');
+    for (const path of ['enroll', 'recover', 'account'])
+      expect((await request.get(`${origin.origin}/${path}/`)).status()).toBe(
+        404,
+      );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

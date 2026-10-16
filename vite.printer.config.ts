@@ -9,7 +9,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         server: 'printer-service/server.ts',
-        'auth-cli': 'printer-service/auth-cli.ts',
+        'access-cli': 'printer-service/access-cli.ts',
       },
       output: { entryFileNames: '[name].mjs' },
     },
