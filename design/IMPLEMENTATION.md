@@ -22,6 +22,7 @@ them done. It replaces handwritten notepad orders with a fixed, repeatable forma
 | `screens/order-builder.dc.html` | Order-taking screen. Responsive: phone (S10e, 390×844), tablet (820 wide) and laptop (1280 wide) layouts in one file; breakpoints in its `<style>` block. |
 | `screens/prep-ticket.dc.html` | The printed ticket, 80 mm roll, designed at 576 px wide (72 mm printable at 203 dpi). |
 | `screens/build-queue.dc.html` | Build-station queue, landscape tablet (designed at 1180×820). |
+| `screens/sign-in.dc.html`, `screens/enroll-recover.dc.html`, `screens/account.dc.html` | Sign-in and account screens. Their brief is [AUTH.md](AUTH.md). |
 | `tokens/tokens.json`, `tokens/tokens.css`, `tokens/bundle.css` | Fiona's Ice Cream design system values: colors, type, spacing, radii, shadows. |
 
 **The `.dc.html` files are reference designs, not code to ship.** They were made in a design
