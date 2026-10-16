@@ -36,8 +36,8 @@ test('the production service serves built authentication pages and protects acco
     expect(redirect.status()).toBe(303);
     expect(redirect.headers().location).toBe('/login/');
     for (const [path, heading] of [
-      ['login', 'Sign in to Order Pad'],
-      ['enroll', 'Create your account'],
+      ['login', 'Sign in'],
+      ['enroll', 'Set up your account'],
       ['recover', 'Recover your account'],
     ]) {
       for (const suffix of ['', '/']) {

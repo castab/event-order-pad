@@ -1,6 +1,6 @@
 # Sign-in and account screens — implementation brief
 
-Status: design handoff, not yet implemented. It redesigns the browser side of the authentication
+Status: implemented, without the optional username preview. It redesigns the browser side of the authentication
 added on this branch: `/login/`, `/enroll/`, `/recover/` and `/account/`. Server behaviour, security
 rules and the terminal-only account administration stay as they are unless a section below says
 otherwise. Where this brief and `AGENTS.md` disagree, `AGENTS.md` wins.

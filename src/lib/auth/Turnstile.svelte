@@ -6,15 +6,62 @@
     reset(id: string): void;
     remove(id: string): void;
   }
+  interface Waiter {
+    resolve(token: string): void;
+    reject(error: Error): void;
+  }
   let {
     action,
     token = $bindable(''),
     generation = 0,
-  }: { action: string; token?: string; generation?: number } = $props();
+    onerror,
+  }: {
+    action: string;
+    token?: string;
+    generation?: number;
+    onerror?: (message: string) => void;
+  } = $props();
   let container: HTMLDivElement;
-  let error = $state('');
+  let failure = '';
   let api: TurnstileApi | undefined;
   let widget: string | undefined;
+  const waiters = new Set<Waiter>();
+  function fail(message: string) {
+    failure = message;
+    token = '';
+    for (const waiter of waiters) waiter.reject(new Error(message));
+    onerror?.(message);
+  }
+  /** Resolve with a verification token, waiting for Cloudflare if none is ready yet. */
+  export function waitForToken(timeout = 15000): Promise<string> {
+    if (token) return Promise.resolve(token);
+    if (failure) return Promise.reject(new Error(failure));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        waiters.delete(waiter);
+        token = '';
+        if (widget && api) api.reset(widget);
+        reject(
+          new Error(
+            'Couldn’t verify this browser. Check your connection and try again.',
+          ),
+        );
+      }, timeout);
+      const waiter: Waiter = {
+        resolve: (value) => {
+          clearTimeout(timer);
+          waiters.delete(waiter);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          waiters.delete(waiter);
+          reject(error);
+        },
+      };
+      waiters.add(waiter);
+    });
+  }
   $effect(() => {
     void generation;
     // Refresh only after submission, without tracking widget callbacks or bindings.
@@ -65,20 +112,21 @@
           sitekey: config.sitekey,
           action,
           theme: 'light',
+          // Cloudflare shows the widget only when it needs the person to interact.
+          appearance: 'interaction-only',
           callback: (value: string) => {
             token = value;
-            error = '';
+            failure = '';
+            for (const waiter of waiters) waiter.resolve(value);
           },
           'expired-callback': () => {
             token = '';
           },
-          'error-callback': () => {
-            token = '';
-            error = 'Verification failed. Reload and try again.';
-          },
+          'error-callback': () =>
+            fail('Verification failed. Reload and try again.'),
         });
-      } catch (failure) {
-        if (!stopped) error = (failure as Error).message;
+      } catch (error) {
+        if (!stopped) fail((error as Error).message);
       }
     };
     void start();
@@ -91,5 +139,8 @@
   });
 </script>
 
-<div bind:this={container} aria-label="Human verification"></div>
-{#if error}<p role="alert">{error}</p>{/if}
+<div
+  class="turnstile-slot"
+  bind:this={container}
+  aria-label="Human verification"
+></div>

@@ -8,28 +8,36 @@ import {
 } from '@simplewebauthn/server';
 import { mockStationApi } from './helpers/station-api';
 
-async function widget(page: Page) {
+async function widget(page: Page, automatic = true) {
   await page.route(
     'https://challenges.cloudflare.com/turnstile/v0/api.js*',
     (route) =>
       route.fulfill({
         contentType: 'application/javascript',
         body: `
-    (() => { let callback; window.turnstileResets = 0; window.turnstile = {
-      render: (_element, options) => { callback = options.callback; setTimeout(() => callback('test-token'), 1); return 'widget'; },
-      reset: () => { window.turnstileResets++; setTimeout(() => callback && callback('test-token'), 1); }, remove: () => {}
+    (() => { let callback; window.turnstileResets = 0; window.turnstileOptions = [];
+      const issue = () => setTimeout(() => callback && callback('test-token'), 1);
+      window.issueTurnstileToken = issue;
+      window.turnstile = {
+      render: (_element, options) => { callback = options.callback; window.turnstileOptions.push(options); if (${automatic}) issue(); return 'widget'; },
+      reset: () => { window.turnstileResets++; if (${automatic}) issue(); }, remove: () => {}
     }; })();`,
       }),
   );
 }
-async function setup(page: Page, initial = false) {
+async function setup(
+  page: Page,
+  initial = false,
+  { automaticTurnstile = true } = {},
+) {
   const station = await mockStationApi(page);
   let signedIn = initial;
   let failPassword = false;
   const passkeys: { name: string; credential: WebAuthnCredential }[] = [];
   let challenge = '';
   let validToken = 'a'.repeat(64);
-  await widget(page);
+  let authenticatedAt = Date.now();
+  await widget(page, automaticTurnstile);
   await page.route('**/api/auth/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body =
@@ -42,7 +50,7 @@ async function setup(page: Page, initial = false) {
         ? reply({
             user: { id: 'staff', username: 'staff' },
             expiresAt: new Date(Date.now() + 57600000).toISOString(),
-            authenticatedAt: new Date().toISOString(),
+            authenticatedAt: new Date(authenticatedAt).toISOString(),
           })
         : reply(
             { error: 'Sign in to continue.', code: 'authentication-required' },
@@ -60,6 +68,24 @@ async function setup(page: Page, initial = false) {
         );
       validToken = '';
       signedIn = true;
+      authenticatedAt = Date.now();
+      return reply({ ok: true });
+    }
+    if (path.endsWith('/reauthenticate')) {
+      if (body.password !== 'a long enough password' || !body.turnstile)
+        return reply({ error: 'Sign-in failed.' }, 401);
+      authenticatedAt = Date.now();
+      return reply({ ok: true });
+    }
+    if (path.endsWith('/password')) {
+      if (Date.now() - authenticatedAt > 300000)
+        return reply(
+          {
+            error:
+              'Confirm your password or passkey before changing credentials.',
+          },
+          403,
+        );
       return reply({ ok: true });
     }
     if (path.endsWith('/login')) {
@@ -158,16 +184,41 @@ async function setup(page: Page, initial = false) {
     limitPassword: () => {
       failPassword = true;
     },
+    authenticatedMinutesAgo: (minutes: number) => {
+      authenticatedAt = Date.now() - minutes * 60000;
+    },
     passkeys,
   };
 }
-async function openAccount(page: Page) {
-  const link = page.getByRole('link', { name: 'Account', exact: true });
-  if (!(await link.isVisible()))
-    await page
-      .getByRole('button', { name: 'Order tools', exact: true })
-      .click();
-  await link.click();
+async function openAccount(page: Page, username = 'staff') {
+  await page.getByRole('button', { name: username, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Your account' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Your account', level: 1 }),
+  ).toBeVisible();
+}
+async function virtualAuthenticator(page: Page) {
+  const client = await page.context().newCDPSession(page);
+  await client.send('WebAuthn.enable');
+  const { authenticatorId } = await client.send(
+    'WebAuthn.addVirtualAuthenticator',
+    {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    },
+  );
+  return {
+    client,
+    authenticatorId,
+    remove: () =>
+      client.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId }),
+  };
 }
 async function passwordLogin(page: Page) {
   await page.getByLabel('Username', { exact: true }).fill('staff');
@@ -208,10 +259,33 @@ test('password login, rate-limit feedback, logout and back navigation protect th
   const auth = await setup(page);
   await page.goto('/');
   await expect(page).toHaveURL(/\/login\/?$/);
+  const loginRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/auth/login'))
+      loginRequests.push(request.url());
+  });
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText(
+    'Enter your username and password.',
+  );
+  await expect(page.getByLabel('Username', { exact: true })).toHaveAttribute(
+    'aria-invalid',
+    'true',
+  );
+  expect(loginRequests).toHaveLength(0);
   await passwordLogin(page);
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
-  await openAccount(page);
-  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  const menu = page.getByRole('button', { name: 'staff', exact: true });
+  await menu.click();
+  await expect(menu).toHaveAttribute('aria-expanded', 'true');
+  await expect(
+    page.getByRole('menuitem', { name: 'Your account' }),
+  ).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(menu).toBeFocused();
+  await menu.click();
+  await page.getByRole('menuitem', { name: 'Sign out', exact: true }).click();
   await expect(page).toHaveURL(/\/login\/?$/);
   await page.goBack();
   await expect(page.getByLabel('Customer name (optional)')).not.toBeVisible();
@@ -220,54 +294,194 @@ test('password login, rate-limit feedback, logout and back navigation protect th
   await passwordLogin(page);
   await expect(page.getByRole('alert')).toContainText('Too many attempts');
 });
-test('enrollment removes its fragment and validates password confirmation', async ({
+test('enrollment removes its fragment, shows the linked code and checks both passwords', async ({
   page,
 }) => {
   await setup(page);
   await page.goto('/enroll/#' + 'a'.repeat(64));
   await expect(page).toHaveURL(/\/enroll\/?$/);
-  await expect(page.getByLabel('Enrollment code')).toHaveValue('a'.repeat(64));
+  await expect(
+    page.getByText('Invite code added from your link'),
+  ).toBeVisible();
+  await expect(page.getByLabel('Invite code')).toHaveCount(0);
+  const create = page.getByRole('button', { name: 'Create account' });
+  await expect(create).toBeDisabled();
+  const password = page.getByLabel('New password', { exact: true });
+  await password.fill('mint chip');
+  await expect(
+    page.getByText('9 of 15 characters. 6 more to go.'),
+  ).toBeVisible();
+  await password.fill('a long enough password');
+  await expect(page.getByText('✓ Long enough.')).toBeVisible();
+  await page
+    .getByLabel('Type it again', { exact: true })
+    .fill('another long password');
+  await expect(
+    page.getByText('The two passwords don’t match yet.'),
+  ).toBeVisible();
+  await expect(create).toBeDisabled();
+  await page
+    .getByLabel('Type it again', { exact: true })
+    .fill('a long enough password');
+  await create.click();
+  await expect(
+    page.getByRole('heading', { name: 'Your account is ready' }),
+  ).toBeVisible();
+  await expect(page.getByLabel('Name this device')).toHaveValue(
+    'This computer',
+  );
+  await page.getByRole('button', { name: 'Skip for now' }).click();
+  await expect(page.getByRole('heading', { name: 'All set' })).toBeVisible();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+});
+test('the code field appears only without a link code or when asked for', async ({
+  page,
+}) => {
+  await setup(page);
+  await page.goto('/enroll/');
+  await expect(page.getByText('Invite code added from your link')).toHaveCount(
+    0,
+  );
+  await expect(page.getByLabel('Invite code')).toBeVisible();
+  await expect(
+    page.getByText('Paste the code from the link you were sent.'),
+  ).toBeVisible();
+  await page.goto('/recover/#' + 'b'.repeat(64));
+  await expect(page).toHaveURL(/\/recover\/?$/);
+  await expect(
+    page.getByRole('heading', { name: 'Recover your account' }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Recovery code added from your link'),
+  ).toBeVisible();
+  await expect(page.getByLabel('Recovery code')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Enter a code instead' }).click();
+  await expect(page.getByLabel('Recovery code')).toBeFocused();
+  await expect(page.getByLabel('Recovery code')).toHaveValue('');
+});
+test('an expired or used code explains how to get a new one', async ({
+  page,
+}) => {
+  await setup(page);
+  await page.goto('/recover/#' + 'c'.repeat(64));
   await page
     .getByLabel('New password', { exact: true })
     .fill('a long enough password');
   await page
-    .getByLabel('Confirm password', { exact: true })
-    .fill('another long password');
-  await page.getByRole('button', { name: 'Create account' }).click();
-  await expect(page.getByRole('alert')).toContainText('do not match');
-  await page
-    .getByLabel('Confirm password', { exact: true })
+    .getByLabel('Type it again', { exact: true })
     .fill('a long enough password');
-  await page.getByRole('button', { name: 'Create account' }).click();
-  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
-});
-test('a virtual authenticator enrolls a discoverable passkey and signs in without a password', async ({
-  page,
-  context,
-}) => {
-  const auth = await setup(page, true);
-  const client = await context.newCDPSession(page);
-  await client.send('WebAuthn.enable');
-  const { authenticatorId } = await client.send(
-    'WebAuthn.addVirtualAuthenticator',
-    {
-      options: {
-        protocol: 'ctap2',
-        transport: 'internal',
-        hasResidentKey: true,
-        hasUserVerification: true,
-        isUserVerified: true,
-        automaticPresenceSimulation: true,
-      },
-    },
+  await page.getByRole('button', { name: 'Set new password' }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Ask whoever runs the station for a new one. Recovery codes last 30 minutes.',
   );
+});
+test('enrollment offers a passkey and adds one before opening the builder', async ({
+  page,
+}) => {
+  const auth = await setup(page);
+  const authenticator = await virtualAuthenticator(page);
   try {
-    await page.goto('/account/');
-    await page.getByLabel('Passkey name').fill('Test phone');
+    await page.goto('/enroll/#' + 'a'.repeat(64));
+    await page
+      .getByLabel('New password', { exact: true })
+      .fill('a long enough password');
+    await page
+      .getByLabel('Type it again', { exact: true })
+      .fill('a long enough password');
+    await page.getByRole('button', { name: 'Create account' }).click();
+    await page.getByLabel('Name this device').fill('Trailer tablet');
     await page
       .getByRole('button', { name: 'Add a passkey', exact: true })
       .click();
-    await expect(page.getByRole('status')).toContainText('Passkey added');
+    await expect(
+      page.getByRole('heading', { name: 'Passkey added' }),
+    ).toBeVisible();
+    expect(auth.passkeys.map((key) => key.name)).toEqual(['Trailer tablet']);
+    await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+  } finally {
+    await authenticator.remove();
+  }
+});
+test('pressing Sign in before Turnstile has a token waits for it instead of failing', async ({
+  page,
+}) => {
+  await setup(page, false, { automaticTurnstile: false });
+  await page.goto('/login/');
+  const button = page.getByRole('button', { name: 'Sign in', exact: true });
+  await expect(button).toBeEnabled();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              turnstileOptions?: { appearance: string; theme: string }[];
+            }
+          ).turnstileOptions?.[0],
+      ),
+    )
+    .toMatchObject({ appearance: 'interaction-only', theme: 'light' });
+  let requested = false;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/auth/login')) requested = true;
+  });
+  await passwordLogin(page);
+  await expect(
+    page.getByRole('button', { name: 'Checking…', exact: true }),
+  ).toBeDisabled();
+  expect(requested).toBe(false);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  const submitted = page.waitForRequest('**/api/auth/login');
+  await page.evaluate(() =>
+    (
+      window as unknown as { issueTurnstileToken(): void }
+    ).issueTurnstileToken(),
+  );
+  expect((await submitted).postDataJSON().turnstile).toBe('test-token');
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
+});
+test('a Turnstile token that never arrives stops waiting after 15 seconds', async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setup(page, false, { automaticTurnstile: false });
+  await page.goto('/login/');
+  await passwordLogin(page);
+  await expect(
+    page.getByRole('button', { name: 'Checking…', exact: true }),
+  ).toBeVisible();
+  await page.clock.runFor(15000);
+  await expect(page.getByRole('alert')).toHaveText(
+    'Couldn’t verify this browser. Check your connection and try again.',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Sign in', exact: true }),
+  ).toBeEnabled();
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { turnstileResets: number }).turnstileResets,
+    ),
+  ).toBe(1);
+});
+test('a virtual authenticator enrolls a discoverable passkey and signs in without a password', async ({
+  page,
+}) => {
+  const auth = await setup(page, true);
+  const { client, authenticatorId, remove } = await virtualAuthenticator(page);
+  try {
+    await page.goto('/account/');
+    await expect(
+      page.getByText('No passkeys yet. You sign in with your password.'),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Add a passkey', exact: true })
+      .click();
+    // A fresh sign-in needs no confirmation.
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await page.getByLabel('Name this device').fill('Test phone');
+    await page.getByRole('button', { name: 'Continue', exact: true }).click();
+    await expect(page.getByText('Passkey added.')).toBeVisible();
+    await expect(page.getByText('Test phone')).toBeVisible();
     expect(auth.passkeys).toHaveLength(1);
     const credentials = await client.send('WebAuthn.getCredentials', {
       authenticatorId,
@@ -278,9 +492,7 @@ test('a virtual authenticator enrolls a discoverable passkey and signs in withou
     await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
     expect(auth.passkeys[0].credential.counter).toBeGreaterThan(0);
   } finally {
-    await client.send('WebAuthn.removeVirtualAuthenticator', {
-      authenticatorId,
-    });
+    await remove();
   }
 });
 test('session loss waits for the active print and recovers its durable result without replay', async ({
@@ -444,10 +656,117 @@ test('switching accounts in one browser hides and restores each user’s saved d
   await expect
     .poll(async () => (await stations.second.load()).draft.name)
     .toBe('Second user’s draft');
-  await openAccount(page);
+  await openAccount(page, 'second');
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await passwordLogin(page);
   await expect(page.getByLabel('Customer name (optional)')).toHaveValue(
     'First user’s draft',
   );
 });
+
+test('an older sign-in asks “Confirm it’s you” and then continues into the pressed action', async ({
+  page,
+}) => {
+  const auth = await setup(page, true);
+  auth.authenticatedMinutesAgo(10);
+  await page.goto('/account/');
+  await expect(page.getByText(/Changes unlocked/)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Change password' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Confirm it’s you' });
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByText(
+      'To change your password, confirm your identity. Changes stay unlocked for 5 minutes.',
+    ),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole('button', { name: 'Confirm with a passkey' }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(page.getByLabel('New password', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Change password' }).click();
+  await dialog
+    .getByLabel('Password for staff', { exact: true })
+    .fill('a long enough password');
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByText('Changes unlocked · 5 min left', { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel('New password', { exact: true })
+    .fill('a brand new long password');
+  await page
+    .getByLabel('Type it again', { exact: true })
+    .fill('a brand new long password');
+  await page.getByRole('button', { name: 'Save new password' }).click();
+  await expect(
+    page.getByText(
+      'Password changed. You’ve been signed out on your other devices.',
+    ),
+  ).toBeVisible();
+  // Locking only hides the unlock here, so the next change asks again.
+  await page.getByRole('button', { name: 'Lock now' }).click();
+  await expect(page.getByText(/Changes unlocked/)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Change password' }).click();
+  await expect(dialog).toBeVisible();
+});
+test('sign out everywhere also ends this session and says so', async ({
+  page,
+}) => {
+  await setup(page, true);
+  await page.goto('/account/');
+  await page.getByRole('button', { name: 'Sign out everywhere' }).click();
+  await expect(page).toHaveURL(/\/login\/?$/);
+  await expect(page.getByRole('status')).toHaveText(
+    'Signed out everywhere, including this device.',
+  );
+});
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 1280, height: 800 },
+])
+  test(`the account page lays out at ${viewport.width}×${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await setup(page, true);
+    await page.goto('/');
+    await openAccount(page);
+    const box = async (name: string) =>
+      (await page.getByRole('region', { name, exact: true }).boundingBox())!;
+    const who = await box('Signed-in user');
+    const keys = await box('Passkeys');
+    const password = await box('Password');
+    const sessions = await box('Signed in');
+    const admin = await box('Adding staff or locked out?');
+    const nav = page.getByRole('navigation', { name: 'Main' });
+    if (viewport.width < 860) {
+      await expect(nav).toBeHidden();
+      // One column in reading order.
+      expect(who.y).toBeLessThan(keys.y);
+      expect(keys.y).toBeLessThan(password.y);
+      expect(password.y).toBeLessThan(sessions.y);
+      expect(sessions.y).toBeLessThan(admin.y);
+      expect(Math.abs(keys.x - sessions.x)).toBeLessThan(2);
+    } else {
+      await expect(nav).toBeVisible();
+      await expect(
+        nav.getByRole('link', { name: 'Now Scooping' }),
+      ).toBeVisible();
+      expect(keys.x).toBeGreaterThan(who.x + who.width);
+      expect(Math.abs(password.x - keys.x)).toBeLessThan(2);
+      expect(Math.abs(sessions.x - who.x)).toBeLessThan(40);
+      expect(sessions.y).toBeGreaterThan(who.y);
+      expect(admin.y).toBeGreaterThan(sessions.y);
+    }
+    const overflow = await page.evaluate(() => {
+      const root = document.querySelector('.account-app')!;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(overflow).toBeLessThanOrEqual(0);
+    for (const button of await page.getByRole('button').all())
+      if (await button.isVisible())
+        expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  });

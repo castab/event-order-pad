@@ -7,9 +7,11 @@
   import { currentSession } from '#lib/auth/client.js';
   import { hasActivity } from '#lib/auth/activity.js';
   import type { AuthSession } from '#lib/auth/model.js';
+  import { provideSession } from '#lib/auth/session-context.js';
   const tokenCss = designTokens.replace(/@font-face\s*\{[^}]*\}/g, '');
   let { children } = $props();
   let session = $state<AuthSession>();
+  provideSession(() => session);
   let lost = $state(false);
   let unavailable = $state('');
   const publicPage = $derived(

@@ -15,11 +15,19 @@ export function parseUsername(value: unknown): string {
     );
   return value.toLowerCase();
 }
+export const PASSWORD_MIN = 15;
+export const PASSWORD_MAX = 128;
+/** Count characters the way the server does, so emoji and accents count once. */
+export const passwordLength = (value: string) => Array.from(value).length;
+export const passwordReady = (password: string, confirm: string) =>
+  passwordLength(password) >= PASSWORD_MIN &&
+  passwordLength(password) <= PASSWORD_MAX &&
+  password === confirm;
 export function parsePassword(value: unknown): string {
   if (
     typeof value !== 'string' ||
-    Array.from(value).length < 15 ||
-    Array.from(value).length > 128
+    passwordLength(value) < PASSWORD_MIN ||
+    passwordLength(value) > PASSWORD_MAX
   )
     throw new Error('Use a password of 15–128 characters. Spaces are welcome.');
   return value;

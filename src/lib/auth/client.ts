@@ -46,6 +46,15 @@ export const authFetch: typeof fetch = async (input, init) => {
     release();
   }
 };
+/** A rejected authentication request, keeping its status for callers that react to it. */
+export class AuthRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 export async function authRequest(
   path: string,
   body?: Record<string, unknown>,
@@ -66,10 +75,11 @@ export async function authRequest(
     throw new Error('Invalid authentication response.');
   const data = result as Record<string, unknown>;
   if (!response.ok)
-    throw new Error(
+    throw new AuthRequestError(
       typeof data.error === 'string'
         ? data.error
         : 'Authentication unavailable. Try again.',
+      response.status,
     );
   return data;
 }
