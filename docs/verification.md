@@ -2,6 +2,25 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Authentication and PDF development integration — 2026-10-15
+
+Merged the PDF development printing changes from main into the authentication branch, retaining both verification histories and features. Saved receipt downloads now resolve the authenticated user/browser workspace before checking dispatch ownership; unauthenticated requests are rejected before receipt lookup or file reads. The bundled account CLI shares the service’s origin validator so PDF development supports localhost HTTP. Development instructions retain mandatory authentication and specify direct proxy mode and localhost Turnstile keys.
+
+Checks ran on Linux with Node 24.21.0 in the required sequence. PostgreSQL integration used a fresh disposable PostgreSQL 18 container and a separate `_test` database; no station data was changed. The bundled account CLI was smoke-tested with `list` using PDF mode and a localhost HTTP origin.
+
+| Check                        | Result                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres        | Passed; 30 tests across 4 files.                                                                              |
+| npm run test:postgres:volume | Passed; disposable volume survived container recreation.                                                      |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                  |
+| npm run lint                 | Passed.                                                                                                       |
+| npm test                     | Passed; 232 tests across 20 files, including PDF ownership, authentication gates and output persistence.      |
+| npm run build                | Passed.                                                                                                       |
+| npm run build:printer        | Passed; service and account CLI bundled.                                                                      |
+| npm run test:e2e             | Passed; 143 Chromium runs, including PDF printing/viewing/reload/reprint and authentication/session recovery. |
+
+No physical printer was used. Public Cloudflare, real Turnstile, physical-device passkeys and physical-print acceptance remain deployment/owner checks.
+
 ## Application authentication and Cloudflare Tunnel readiness — 2026-10-15
 
 Added mandatory application sessions, username/password and optional discoverable passkeys, server-verified Turnstile, persistent login rate limits, credential management and a bundled terminal-only account command. All enabled accounts have the same ordering/printing/queue access. Local bootstrap creates the first account; single-use enrollment and recovery codes need no messaging provider. Each user/browser pair gets an isolated workspace, and browser requests bind to the initially loaded user so an old tab cannot write into another account after a cookie change. Existing anonymous workspaces and order history remain untouched.
@@ -22,6 +41,25 @@ Checks ran on Linux with Node 24.21.0, in the AGENTS.md sequence. PostgreSQL che
 | npm run test:e2e             | Passed; 140 Chromium runs, including virtual-authenticator passkeys, enrollment, logout/history/offline protection, account switching, session loss during printing without replay and existing responsive ordering/queue scenarios.                     |
 
 Automated Turnstile checks use injected verification responses and browser widgets; passkey browser checks use a virtual authenticator. Live Cloudflare Tunnel/DNS/HTTPS configuration, real Turnstile on the final hostname, physical-device passkeys, SSE through the public tunnel and the physical-printer acceptance checklist remain deployment/owner checks. No physical print was sent and no hardware result is claimed. Configure the final origin and Turnstile keys, explicitly deploy the new migration, bootstrap an account and configure the tunnel before public use; see [Linux deployment](linux-printing.md).
+
+## PDF development printing — 2026-10-14
+
+Added explicit PDF-only service output, cross-platform startup, atomic receipt files, workspace-protected PDF viewing and browser links restored after reload. CUPS remains the default. No database migration is required.
+
+Verification ran on Windows with Node 26.9.0. Unit/HTTP and browser tests ran outside the sandbox because its temporary-file and loopback restrictions prevented normal execution. Unit and browser suites passed when run separately; running both simultaneously caused the existing exhaustive menu test to exceed its timeout.
+
+| Check                          | Result                                                                                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run test:postgres`        | Unavailable: no `TEST_DATABASE_URL` or disposable PostgreSQL 18 test database configured.                                                                                                                    |
+| `npm run test:postgres:volume` | Unavailable: Docker Desktop Linux engine was not running.                                                                                                                                                    |
+| `npm run check`                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                                                                                                                 |
+| `npm run lint`                 | Passed.                                                                                                                                                                                                      |
+| `npm test`                     | Passed; 216 tests across 19 files, including actual receipt PDFs, page dimensions, distinct reprints, dispatch-before-save, interrupted saving without replay, workspace ownership and PDF response headers. |
+| `npm run build`                | Passed.                                                                                                                                                                                                      |
+| `npm run build:printer`        | Passed.                                                                                                                                                                                                      |
+| `npm run test:e2e`             | Passed; 137 Chromium runs, including PDF mode, viewing, reload recovery of the link and reprinting at all three builder viewport sizes.                                                                      |
+
+No physical print job was sent and no hardware result is claimed. Real PostgreSQL checks remain required in an environment with the test database and Docker available.
 
 ## Independent browser workspaces and database-assigned numbers — 2026-10-13
 

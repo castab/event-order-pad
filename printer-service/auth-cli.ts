@@ -1,5 +1,5 @@
 import { createOrderDatabase } from './order-database';
-import { parseDatabaseUrl } from './config';
+import { parseDatabaseUrl, parsePrintMode, parseServiceOrigin } from './config';
 import { manageAccount } from './auth-admin';
 
 async function hiddenPassword(): Promise<string> {
@@ -42,16 +42,10 @@ try {
     throw new Error(
       'Usage: npm run auth -- <bootstrap|invite|recover|disable|enable|list|revoke> [username]',
     );
-  const origin = new URL(process.env.ORDER_PAD_ORIGIN ?? '');
-  if (
-    origin.protocol !== 'https:' ||
-    origin.pathname !== '/' ||
-    origin.username ||
-    origin.password ||
-    origin.search ||
-    origin.hash
-  )
-    throw new Error('Set ORDER_PAD_ORIGIN to the root HTTPS origin.');
+  const origin = parseServiceOrigin(
+    process.env.ORDER_PAD_ORIGIN,
+    parsePrintMode(process.env.ORDER_PAD_PRINT_MODE),
+  );
   database = createOrderDatabase(parseDatabaseUrl(process.env.DATABASE_URL));
   const password = command === 'bootstrap' ? await hiddenPassword() : undefined;
   const result = await manageAccount(database, command, username, password);

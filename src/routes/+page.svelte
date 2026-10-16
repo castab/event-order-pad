@@ -61,6 +61,16 @@
   const printer = new LinuxCupsPrinter();
   const draft = $derived(viewState.draft);
   const last = $derived(viewState.attempts.at(-1));
+  const lastPdf = $derived(
+    [...viewState.attempts]
+      .reverse()
+      .find(
+        (attempt) =>
+          attempt.mode === 'linux-cups' &&
+          attempt.result?.status === 'accepted' &&
+          attempt.result.simulated,
+      ),
+  );
   const working = $derived(
     sending || ['saving', 'printing', 'handoff'].includes(viewState.phase),
   );
@@ -405,15 +415,19 @@
             resetScroll();
           }
           showToast(
-            reprint
-              ? `Reprint of #${ticket.reference} sent`
-              : `Order #${ticket.reference} sent to the printer`,
-            reprint
-              ? 'Marked REPRINT on the ticket'
-              : `${ticket.displayName} · ${plural(ticket.servings.length, 'serving')} · ${plural(
-                  ticket.servings.reduce((n, s) => n + totalScoops(s), 0),
-                  'scoop',
-                )}`,
+            completed.result.simulated
+              ? `${reprint ? 'Reprint' : 'Order'} #${ticket.reference} saved as PDF`
+              : reprint
+                ? `Reprint of #${ticket.reference} sent`
+                : `Order #${ticket.reference} sent to the printer`,
+            completed.result.simulated
+              ? completed.result.message
+              : reprint
+                ? 'Marked REPRINT on the ticket'
+                : `${ticket.displayName} · ${plural(ticket.servings.length, 'serving')} · ${plural(
+                    ticket.servings.reduce((n, s) => n + totalScoops(s), 0),
+                    'scoop',
+                  )}`,
             false,
             !reprint,
           );
@@ -560,6 +574,9 @@
 
   <main class="builder-content">
     <div class="order-panel">
+      {#if printerStatus.mode === 'pdf'}
+        <p role="status">PDF development mode — no physical printing</p>
+      {/if}
       {#if !checkingPrinter && !printerStatus.ready}
         <section class="notice error" role="alert">
           <strong>Printer unavailable</strong>
@@ -600,14 +617,17 @@
           {#if last?.result && last.result.status !== 'accepted'}
             <strong
               >{last.result.status === 'outcome-unknown'
-                ? 'Outcome unknown · check the printer before continuing'
+                ? printerStatus.mode === 'pdf'
+                  ? 'Outcome unknown · check saved PDFs before continuing'
+                  : 'Outcome unknown · check the printer before continuing'
                 : 'Order submission failed'}</strong
             >
             <p>{last.result.message}</p>
             {#if needsConfirmation}
               <p>
-                The ticket may have printed or be queued. Check the output and
-                pending CUPS jobs. Nothing will be resent automatically.
+                {printerStatus.mode === 'pdf'
+                  ? 'A receipt PDF may have been saved. Check the saved PDFs. Nothing will be resent automatically.'
+                  : 'The ticket may have printed or be queued. Check the output and pending CUPS jobs. Nothing will be resent automatically.'}
               </p>
               <label class="output-check"
                 ><input
@@ -861,14 +881,26 @@
                 {checkingPrinter
                   ? 'Checking USB printer…'
                   : printerStatus.ready
-                    ? 'USB printing ready'
+                    ? printerStatus.mode === 'pdf'
+                      ? 'PDF saving ready'
+                      : 'USB printing ready'
                     : 'Printer needs attention'}
               </p>
-              <p>Orders print to the USB printer attached to this server.</p>
+              <p>
+                {printerStatus.mode === 'pdf'
+                  ? 'Orders are saved as receipt PDFs on this server.'
+                  : 'Orders print to the USB printer attached to this server.'}
+              </p>
               <dl>
                 <dt>Printer</dt>
-                <dd>Star TSP143IIIU</dd>
-                <dt>CUPS queue</dt>
+                <dd>
+                  {printerStatus.mode === 'pdf'
+                    ? 'PDF files'
+                    : 'Star TSP143IIIU'}
+                </dd>
+                <dt>
+                  {printerStatus.mode === 'pdf' ? 'Output' : 'CUPS queue'}
+                </dt>
                 <dd>
                   {printerStatus.queue ??
                     'Unavailable until the service responds'}
@@ -883,29 +915,29 @@
                   ? 'Checking printer…'
                   : 'Check printer'}</button
               >
-              <details>
-                <summary>Server setup</summary>
-                <ol>
-                  <li>
-                    Connect the Star printer’s USB-B port to this server and
-                    power the printer on.
-                  </li>
-                  <li>
-                    Configure a local USB CUPS queue with the Star TSP100 Cutter
-                    driver. Set <code>ORDER_PAD_QUEUE</code> to that queue when starting
-                    the Order Pad service.
-                  </li>
-                  <li>
-                    Verify a CUPS test print, then open this server’s Order Pad
-                    address on your ordering device.
-                  </li>
-                </ol>
-                <p>
-                  Queue readiness and accepted submissions do not verify
-                  physical output. Check paper, power, USB, and pending CUPS
-                  jobs before reprinting.
-                </p>
-              </details>
+              {#if printerStatus.mode !== 'pdf'}<details>
+                  <summary>Server setup</summary>
+                  <ol>
+                    <li>
+                      Connect the Star printer’s USB-B port to this server and
+                      power the printer on.
+                    </li>
+                    <li>
+                      Configure a local USB CUPS queue with the Star TSP100
+                      Cutter driver. Set <code>ORDER_PAD_QUEUE</code> to that queue
+                      when starting the Order Pad service.
+                    </li>
+                    <li>
+                      Verify a CUPS test print, then open this server’s Order
+                      Pad address on your ordering device.
+                    </li>
+                  </ol>
+                  <p>
+                    Queue readiness and accepted submissions do not verify
+                    physical output. Check paper, power, USB, and pending CUPS
+                    jobs before reprinting.
+                  </p>
+                </details>{/if}
               <details>
                 <summary>Connection and database</summary>
                 <p>
@@ -942,6 +974,14 @@
                     {@render receipt(lastPreview)}
                   </div>
                 </details>
+                {#if printerStatus.mode === 'pdf' && lastPdf}
+                  <a
+                    class="queue-link"
+                    href={`/api/receipts/${lastPdf.id}.pdf`}
+                    target="_blank"
+                    rel="noopener">View PDF</a
+                  >
+                {/if}
                 <details>
                   <summary>Print attempts ({viewState.attempts.length})</summary
                   >
@@ -951,7 +991,9 @@
                         <strong
                           >{attempt.reprint ? 'REPRINT' : 'ORDER'} · {attempt.mode ===
                           'linux-cups'
-                            ? 'Server USB'
+                            ? attempt.result?.simulated
+                              ? 'Server PDF'
+                              : 'Server USB'
                             : `Previous ${attempt.mode} attempt`}</strong
                         >
                         <p>

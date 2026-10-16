@@ -44,3 +44,46 @@ export function parseCaptureFrom(value: string | undefined): string {
     );
   return value;
 }
+export function parsePrintMode(value: string | undefined): 'cups' | 'pdf' {
+  if (value === undefined || value === 'cups') return 'cups';
+  if (value === 'pdf') return 'pdf';
+  throw new Error('ORDER_PAD_PRINT_MODE must be cups or pdf.');
+}
+
+export function parseServiceOrigin(
+  value: string | undefined,
+  mode: 'cups' | 'pdf',
+): URL {
+  try {
+    const origin = new URL(value ?? '');
+    if (
+      !(
+        origin.protocol === 'https:' ||
+        (mode === 'pdf' &&
+          origin.protocol === 'http:' &&
+          ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))
+      ) ||
+      origin.pathname !== '/' ||
+      origin.username ||
+      origin.password ||
+      origin.search ||
+      origin.hash
+    )
+      throw new Error();
+    return origin;
+  } catch {
+    throw new Error(
+      'ORDER_PAD_ORIGIN must be a root HTTPS origin, or a loopback HTTP origin in PDF mode.',
+    );
+  }
+}
+
+export function assertPrintPlatform(
+  mode: 'cups' | 'pdf',
+  platform = process.platform,
+): void {
+  if (mode === 'cups' && platform !== 'linux')
+    throw new Error(
+      'The CUPS service requires Linux. Set ORDER_PAD_PRINT_MODE=pdf for development on other systems.',
+    );
+}

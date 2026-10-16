@@ -25,6 +25,7 @@ async function app(
   trackingEnabled = true,
   authentication: Authentication = testAuth(),
   proxy: 'direct' | 'cloudflare' = 'direct',
+  pdfMode = false,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'order-pad-http-'));
   closers.push(() => rm(directory, { recursive: true, force: true }));
@@ -46,6 +47,11 @@ async function app(
   await mkdir(join(directory, 'queue'));
   await writeFile(join(directory, 'queue/index.html'), '<h1>Build queue</h1>');
   const station = new MemoryStationRepository(repository);
+  const receipt = vi.fn(async () => ({
+    request: JSON.parse(payload) as Request,
+  }));
+  const pdfRead = vi.fn(async () => Buffer.from('%PDF-test'));
+  const pdfCheck = vi.fn(async () => {});
   const server = createApp({
     auth: authentication,
     proxy,
@@ -53,7 +59,13 @@ async function app(
     port: 4174,
     root: await realpath(directory),
     cups: { check, queue: 'OrderPad' },
-    printing: { print },
+    printing: { print, receipt },
+    pdfOutput: pdfMode
+      ? {
+          check: pdfCheck,
+          read: pdfRead,
+        }
+      : undefined,
     orders,
     trackingEnabled,
     station,
@@ -78,6 +90,8 @@ async function app(
       body: string;
       cache: string | undefined;
       headers: import('node:http').IncomingHttpHeaders;
+      contentType: string | undefined;
+      disposition: string | undefined;
     }>((resolve, reject) => {
       const req = request(
         {
@@ -104,6 +118,8 @@ async function app(
               body: response,
               cache: res.headers['cache-control'],
               headers: res.headers,
+              contentType: res.headers['content-type'],
+              disposition: res.headers['content-disposition'],
             }),
           );
         },
@@ -111,7 +127,19 @@ async function app(
       req.on('error', reject);
       req.end(body);
     });
-  return { print, check, send, orders, server, port, directory, station };
+  return {
+    print,
+    check,
+    send,
+    orders,
+    server,
+    port,
+    directory,
+    station,
+    receipt,
+    pdfRead,
+    pdfCheck,
+  };
 }
 const payload = JSON.stringify({
   attemptId: 'attempt-1',
@@ -903,4 +931,68 @@ it('rejects an old tab’s expected user before resolving or mutating the new ac
   ).toBe(401);
   expect(workspace).not.toHaveBeenCalled();
   expect(print).not.toHaveBeenCalled();
+});
+
+it('serves saved PDFs only to the owning workspace, without rendering or printing', async () => {
+  const { send, receipt, pdfRead, print, check } = await app(
+    true,
+    testAuth(),
+    'direct',
+    true,
+  );
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  const captured = await capture(send);
+  receipt.mockResolvedValue({
+    request: { ticket: captured, attemptId: 'attempt-1', reprint: false },
+  });
+  const response = await send('/api/receipts/attempt-1.pdf');
+  expect(response.status).toBe(200);
+  expect(response.body).toBe('%PDF-test');
+  expect(response.cache).toBe('no-store');
+  expect(response.contentType).toBe('application/pdf');
+  expect(response.disposition).toBe('inline; filename="attempt-1.pdf"');
+  expect((await send('/api/printer')).body).toContain('"mode":"pdf"');
+  expect(
+    (
+      await send('/api/receipts/attempt-1.pdf', undefined, {
+        Cookie: '__Host-order-pad-browser=' + 'f'.repeat(64),
+      })
+    ).status,
+  ).toBe(404);
+  expect(pdfRead).toHaveBeenCalledTimes(1);
+  expect(print).not.toHaveBeenCalled();
+  expect(check).not.toHaveBeenCalled();
+});
+
+it('does not regenerate missing PDFs, gates viewing on database health, and disables viewing in CUPS mode', async () => {
+  const { send, receipt, pdfRead, station } = await app(
+    true,
+    testAuth(),
+    'direct',
+    true,
+  );
+  const captured = await capture(send);
+  receipt.mockResolvedValue({
+    request: { ticket: captured, attemptId: 'attempt-1', reprint: false },
+  });
+  pdfRead.mockRejectedValueOnce(
+    Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+  );
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  vi.spyOn(station, 'check').mockRejectedValue(new Error('Database down'));
+  expect((await send('/api/receipts/attempt-1.pdf')).status).toBe(503);
+  expect(pdfRead).toHaveBeenCalledTimes(1);
+  const cups = await app();
+  expect((await cups.send('/api/receipts/attempt-1.pdf')).status).toBe(404);
+  expect(cups.pdfRead).not.toHaveBeenCalled();
+});
+
+it('requires authentication before looking up or reading a saved receipt PDF', async () => {
+  const auth = testAuth({ session: async () => undefined });
+  const { send, receipt, pdfRead } = await app(true, auth, 'direct', true);
+  const reply = await send('/api/receipts/attempt-1.pdf');
+  expect(reply.status).toBe(401);
+  expect(JSON.parse(reply.body).code).toBe('authentication-required');
+  expect(receipt).not.toHaveBeenCalled();
+  expect(pdfRead).not.toHaveBeenCalled();
 });
