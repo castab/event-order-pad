@@ -2,6 +2,14 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Authentication page deployment fix — 2026-10-15
+
+The public tunnel reached the service, but `/login/` returned 404 because authentication pages were built as `login.html` while the service serves page directories with `index.html`. The root layout now builds all pages with trailing slashes, and missing static files report “Not found” instead of suggesting a CUPS failure. A regression check runs the actual Node HTTP server against the production build, covering login, enrollment, recovery and the authenticated account page.
+
+Verification used a disposable PostgreSQL 18 container and test database. All required checks passed in order: 30 PostgreSQL integration tests, volume persistence, type checks (zero errors/warnings), lint, 233 unit/HTTP tests, both production builds and 144 Chromium runs. The temporary database container was removed afterward.
+
+Live HTTPS checks through the configured Cloudflare Tunnel returned 200 HTML with `no-store` for login, enrollment and recovery, 200 for the login page’s linked scripts/styles, and a login redirect for an unauthenticated account request. CUPS had no pending jobs and the station database had no unfinished print attempts or dispatches. The rebuilt pages are active; restarting the Node service to load the revised error messages requires the owner’s sudo password. No print was submitted. Interactive Turnstile, real-device passkeys and physical printing remain owner checks.
+
 ## Authentication and PDF development integration — 2026-10-15
 
 Merged the PDF development printing changes from main into the authentication branch, retaining both verification histories and features. Saved receipt downloads now resolve the authenticated user/browser workspace before checking dispatch ownership; unauthenticated requests are rejected before receipt lookup or file reads. The bundled account CLI shares the service’s origin validator so PDF development supports localhost HTTP. Development instructions retain mandatory authentication and specify direct proxy mode and localhost Turnstile keys.

@@ -7,7 +7,7 @@ const cacheName = `order-pad-auth-${version}`;
 // Manifest paths are base-relative; the cache and fetch handler match
 // root-absolute pathnames. `immutable` is typed as plain strings, which
 // `resolve` would reject without the cast.
-const pathname = (path: string) => resolve(path as '');
+const pathname = (path: string) => resolve(path as '/');
 const precache = [
   ...new Set([
     ...immutable.map((entry) => pathname(entry.path)),

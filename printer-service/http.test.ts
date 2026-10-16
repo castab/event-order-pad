@@ -795,6 +795,12 @@ it('requires authentication for every operational route and protected page, incl
   expect(print).not.toHaveBeenCalled();
   expect(check).not.toHaveBeenCalled();
 });
+it('reports a missing static file without suggesting a printer failure', async () => {
+  const { send } = await app();
+  const reply = await send('/missing-page/');
+  expect(reply.status).toBe(404);
+  expect(JSON.parse(reply.body)).toEqual({ error: 'Not found.' });
+});
 it('guards every authentication POST and provides no HTTP account-administration route', async () => {
   const handle = vi.fn(testAuth().handle);
   const { send } = await app(true, testAuth({ handle }));

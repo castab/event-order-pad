@@ -599,12 +599,14 @@ export function createApp({
         json(error.status, { error: error.message });
         return;
       }
-      if (!res.headersSent)
-        json((error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 503, {
-          error:
-            'Service request failed. Inspect CUPS before retrying a print.',
+      if (!res.headersSent) {
+        const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        json(missing ? 404 : 503, {
+          error: missing
+            ? 'Not found.'
+            : 'Service request failed. Check the service on this machine before continuing.',
         });
-      else res.end();
+      } else res.end();
     }
   });
   const close = server.close;
