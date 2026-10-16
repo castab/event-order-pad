@@ -7,6 +7,7 @@ import { PostgresStationRepository } from './station-database';
 import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
+import { PostgresAuth, parseAuthConfig } from './auth';
 import {
   parseTrackingEnabled,
   parseDatabaseUrl,
@@ -53,6 +54,14 @@ const database = createOrderDatabase(
   parseDatabaseUrl(process.env.DATABASE_URL),
 );
 const captureFrom = parseCaptureFrom(process.env.ORDER_PAD_CAPTURE_FROM);
+const authConfig = parseAuthConfig(process.env);
+const auth = await new PostgresAuth(database, origin, authConfig).initialize();
+const cleanup = setInterval(() => {
+  void auth
+    .cleanup()
+    .catch(() => console.error('Authentication cleanup unavailable.'));
+}, 60000);
+cleanup.unref();
 const station = new PostgresStationRepository(database, captureFrom);
 await station.check();
 const printing = new Printing(output, station, font);
@@ -66,6 +75,9 @@ const server = createApp({
   orders,
   trackingEnabled,
   station,
+  auth,
+  proxy: authConfig.proxy,
+
   pdfOutput,
 }).listen(port, '127.0.0.1', () =>
   console.log(
@@ -75,6 +87,7 @@ const server = createApp({
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
+    clearInterval(cleanup);
     server.close(() => {
       void database.$disconnect();
     });

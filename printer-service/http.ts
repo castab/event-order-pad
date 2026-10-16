@@ -1,4 +1,17 @@
 import { randomBytes } from 'node:crypto';
+import {
+  AuthError,
+  authPosts,
+  publicAuthPosts,
+  sessionCookie,
+  browserCookie,
+  challengeCookie,
+  sessionSeconds,
+  opaque,
+  secret,
+  clientIp,
+  type Authentication,
+} from './auth';
 import { createServer, type IncomingMessage } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
@@ -56,6 +69,9 @@ export function createApp({
   orders,
   trackingEnabled = true,
   station,
+  auth,
+  proxy = 'direct',
+
   pdfOutput,
 }: {
   origin: URL;
@@ -73,11 +89,21 @@ export function createApp({
     | 'stationUncertain'
   >;
   station: StationRepository;
+  auth: Authentication;
+  proxy?: 'direct' | 'cloudflare';
   trackingEnabled?: boolean;
   pdfOutput?: Pick<PdfOutput, 'check' | 'read'>;
 }) {
   const streams = new Set<OrderStream>();
   const server = createServer(async (req, res) => {
+    const nonce = randomBytes(18).toString('base64');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    res.setHeader(
+      'Content-Security-Policy',
+      `default-src 'self'; script-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
+    );
     const json = (status: number, body: unknown) => {
       res.writeHead(status, {
         'Content-Type': 'application/json',
@@ -97,18 +123,33 @@ export function createApp({
     try {
       const url = new URL(req.url ?? '/', origin);
       const path = url.pathname;
-      const workspaceCookie = req.headers.cookie
-        ?.split(';')
-        .map((value) => value.trim())
-        .find((value) => value.startsWith('__Host-order-pad-workspace='))
-        ?.split('=')[1];
-      const workspaceId =
-        workspaceCookie && /^[a-f0-9]{64}$/.test(workspaceCookie)
-          ? workspaceCookie
-          : undefined;
+      if (
+        !path.startsWith('/api/') &&
+        (/%2f|%5c/i.test(path) || path.includes('\\'))
+      )
+        throw new BadRequest(400, 'Invalid path.');
+      const cookie = (name: string) =>
+        req.headers.cookie
+          ?.split(';')
+          .map((v) => v.trim())
+          .find((v) => v.startsWith(name + '='))
+          ?.slice(name.length + 1);
+      const cookies: string[] = [];
+      const setCookie = (name: string, value: string, age: number) => {
+        cookies.push(
+          `${name}=${value}; Max-Age=${age}; Path=/; Secure; HttpOnly; SameSite=Strict`,
+        );
+        res.setHeader('Set-Cookie', cookies);
+      };
+      const token = cookie(sessionCookie);
+      let browser = cookie(browserCookie);
+      const existingBrowser = opaque(browser);
+      if (!existingBrowser) browser = secret();
+      let workspaceId: string | undefined;
       if (
         req.method === 'POST' &&
-        (path === '/api/station' ||
+        (authPosts.has(path) ||
+          path === '/api/station' ||
           path === '/api/print' ||
           path === '/api/orders' ||
           path.startsWith('/api/orders/'))
@@ -120,6 +161,91 @@ export function createApp({
           json(403, { error: 'Use the configured same-origin application.' });
           return;
         }
+      }
+      const authPage = ['/login/', '/enroll/', '/recover/'].includes(
+        path.endsWith('/') ? path : path + '/',
+      );
+      const publicAsset =
+        !path.startsWith('/api/') &&
+        (path.startsWith('/_app/') ||
+          path === '/service-worker.js' ||
+          path === '/manifest.webmanifest' ||
+          /\.(?:svg|png|ico|woff2|ttf)$/.test(path));
+      const publicAuth =
+        (req.method === 'GET' && path === '/api/auth/config') ||
+        (req.method === 'POST' && publicAuthPosts.has(path));
+      const ip =
+        authPage || path.startsWith('/api/auth/')
+          ? clientIp(
+              req.socket.remoteAddress,
+              req.headers['cf-connecting-ip'],
+              proxy,
+            )
+          : '';
+      if (authPage) await auth.ratePage(ip);
+      // DB failures grant neither protected files nor API access.
+      const identity = await auth.session(token);
+      if (!identity && !authPage && !publicAsset && !publicAuth) {
+        if (path.startsWith('/api/'))
+          json(401, {
+            error: 'Sign in to continue. No new job was submitted.',
+            code: 'authentication-required',
+          });
+        else {
+          res.writeHead(303, {
+            Location: '/login/',
+            'Cache-Control': 'no-store',
+          });
+          res.end();
+        }
+        return;
+      }
+      if (
+        identity &&
+        req.headers['x-order-pad-user'] &&
+        req.headers['x-order-pad-user'] !== identity.user.id
+      ) {
+        json(401, {
+          error:
+            'The signed-in account changed. Reload after signing in. No new job was submitted.',
+          code: 'authentication-required',
+        });
+        return;
+      }
+      if (path.startsWith('/api/auth/')) {
+        if (
+          !(req.method === 'POST' && authPosts.has(path)) &&
+          !(
+            req.method === 'GET' &&
+            [
+              '/api/auth/config',
+              '/api/auth/session',
+              '/api/auth/passkeys',
+            ].includes(path)
+          )
+        ) {
+          json(404, { error: 'Not found.' });
+          return;
+        }
+        const reply = await auth.handle(
+          path,
+          req.method ?? 'GET',
+          req.method === 'POST' ? await readJson(req) : undefined,
+          {
+            ip,
+            browser: browser!,
+            token,
+            challenge: cookie(challengeCookie),
+            identity,
+          },
+        );
+        if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);
+        if (reply.token) setCookie(sessionCookie, reply.token, sessionSeconds);
+        if (reply.clearSession) setCookie(sessionCookie, '', 0);
+        if (reply.challenge) setCookie(challengeCookie, reply.challenge, 300);
+        if (path.endsWith('/verify')) setCookie(challengeCookie, '', 0);
+        json(200, reply.body);
+        return;
       }
       if (path.startsWith('/api/')) {
         try {
@@ -134,18 +260,35 @@ export function createApp({
           return;
         }
       }
+      const receipt = path.match(
+        /^\/api\/receipts\/([A-Za-z0-9_-]{1,100})\.pdf$/,
+      );
+      if (
+        path === '/api/station' ||
+        path === '/api/print' ||
+        (req.method === 'GET' && receipt && pdfOutput)
+      ) {
+        if (receipt && !existingBrowser) {
+          json(404, { error: 'Receipt not found.' });
+          return;
+        }
+        if (req.method === 'POST' && !existingBrowser) {
+          json(409, {
+            error:
+              'Workspace not initialized. No job was submitted. Reload before continuing.',
+          });
+          return;
+        }
+        workspaceId = await auth.workspace(identity!, browser!);
+        if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);
+      }
       if (req.method === 'GET' && path === '/api/database') {
         json(200, { ready: true });
         return;
       }
       if (req.method === 'GET' && path === '/api/station') {
         try {
-          const id = workspaceId ?? randomBytes(32).toString('hex');
-          const snapshot = await station.load(id);
-          res.setHeader(
-            'Set-Cookie',
-            `__Host-order-pad-workspace=${id}; Max-Age=31536000; Path=/; Secure; HttpOnly; SameSite=Strict`,
-          );
+          const snapshot = await station.load(workspaceId!);
           json(200, snapshot);
         } catch {
           json(503, {
@@ -212,7 +355,12 @@ export function createApp({
           json(403, { error: 'Use the configured same-origin application.' });
           return;
         }
-        const stream = new OrderStream(res, () => streams.delete(stream));
+        const stream = new OrderStream(
+          res,
+          () => streams.delete(stream),
+          async () => !!(await auth.session(token)),
+          Math.max(0, Date.parse(identity!.expiresAt) - Date.now()),
+        );
         streams.add(stream);
         try {
           stream.start(await orders.subscribe(stream.snapshot, stream.dispose));
@@ -318,9 +466,6 @@ export function createApp({
         }
         return;
       }
-      const receipt = path.match(
-        /^\/api\/receipts\/([A-Za-z0-9_-]{1,100})\.pdf$/,
-      );
       if (req.method === 'GET' && receipt && pdfOutput) {
         if (!workspaceId) {
           json(404, { error: 'Receipt not found.' });
@@ -418,27 +563,50 @@ export function createApp({
         json(404, { error: 'Not found.' });
         return;
       }
-      const bytes = await readFile(file);
+      const original = await readFile(file);
+      // Static SvelteKit pages contain an inline hydration script. Authorize only
+      // this response's script tags, without allowing arbitrary inline scripts.
+      const bytes =
+        extname(file) === '.html'
+          ? Buffer.from(
+              original
+                .toString('utf8')
+                .replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`),
+            )
+          : original;
       res.writeHead(200, {
         'Content-Type': mime[extname(file)] ?? 'application/octet-stream',
         'Content-Length': bytes.length,
         'Cache-Control': path.startsWith('/_app/immutable/')
           ? 'public, max-age=31536000, immutable'
-          : 'no-cache',
+          : 'no-store',
         'X-Content-Type-Options': 'nosniff',
       });
       res.end(req.method === 'HEAD' ? undefined : bytes);
     } catch (error) {
+      if (error instanceof AuthError) {
+        if (error.retryAfter)
+          res.setHeader('Retry-After', String(error.retryAfter));
+        json(error.status, {
+          error: error.message,
+          ...(error.status === 401 && error.message === 'Sign in to continue.'
+            ? { code: 'authentication-required' }
+            : {}),
+        });
+        return;
+      }
       if (error instanceof BadRequest) {
         json(error.status, { error: error.message });
         return;
       }
-      if (!res.headersSent)
-        json((error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 500, {
-          error:
-            'Service request failed. Inspect CUPS before retrying a print.',
+      if (!res.headersSent) {
+        const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        json(missing ? 404 : 503, {
+          error: missing
+            ? 'Not found.'
+            : 'Service request failed. Check the service on this machine before continuing.',
         });
-      else res.end();
+      } else res.end();
     }
   });
   const close = server.close;

@@ -150,3 +150,15 @@ it('recognizes the database gate as a failed submission but treats other 503 rep
     expect(send).toHaveBeenCalledTimes(1);
   }
 });
+
+it('recognizes only structured authentication rejections as definitely unsent and never retries', async () => {
+  for (const code of ['authentication-required', undefined]) {
+    const send = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: 'Sign in to continue.', code }, { status: 401 }),
+    );
+    const result = await new LinuxCupsPrinter(send).print(ticket, options);
+    expect(result.status).toBe(code ? 'failed' : 'outcome-unknown');
+    if (code) expect(result.message).toContain('No job was submitted');
+    expect(send).toHaveBeenCalledOnce();
+  }
+});

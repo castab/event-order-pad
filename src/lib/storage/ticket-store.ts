@@ -1,3 +1,4 @@
+import { authFetch } from '../auth/client';
 import { parseTicket, type OrderTicket } from '../tickets/ticket';
 import { parseDraft, type OrderDraft } from '../tickets/order';
 import { parseAttempt, type PrintAttempt } from '../printing/port';
@@ -119,7 +120,7 @@ export class StationConflict extends Error {}
 export class DatabaseTicketStore implements TicketStore {
   private snapshot?: StationSnapshot;
   constructor(
-    private send: typeof fetch = (input, init) => fetch(input, init),
+    private send: typeof fetch = (input, init) => authFetch(input, init),
   ) {}
   private async request(command?: StationCommand): Promise<StationSnapshot> {
     const response = await this.send('/api/station', {

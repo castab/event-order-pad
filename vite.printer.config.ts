@@ -3,9 +3,15 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   tsconfig: './tsconfig.printer.json',
   build: {
-    ssr: 'printer-service/server.ts',
+    ssr: true,
     target: 'node22',
     outDir: 'build-printer',
-    rollupOptions: { output: { entryFileNames: 'server.mjs' } },
+    rollupOptions: {
+      input: {
+        server: 'printer-service/server.ts',
+        'auth-cli': 'printer-service/auth-cli.ts',
+      },
+      output: { entryFileNames: '[name].mjs' },
+    },
   },
 });

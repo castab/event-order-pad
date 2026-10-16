@@ -1,3 +1,4 @@
+import { testAuth } from '../tests/helpers/auth';
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
 import { createOrderDatabase, PostgresOrderRepository } from './order-database';
 import { Orders, OrderNotFound } from './orders';
@@ -213,6 +214,7 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
   const prints: string[] = [];
   async function serve(orders: Orders, stationDatabase = database) {
     const server = createApp({
+      auth: testAuth(),
       origin: new URL('https://mint.test'),
       port: 4174,
       root: directory,

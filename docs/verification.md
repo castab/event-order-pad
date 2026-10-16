@@ -2,6 +2,60 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Turnstile widget lifecycle — 2026-10-15
+
+Removed the reset immediately after widget creation. A successful token now stays ready for submission; subsequent attempts explicitly refresh the widget, with third-party callbacks and bound token updates excluded from reactive dependency tracking. A browser regression checks zero initial resets, token submission and exactly one refresh after rejection. PostgreSQL coverage explicitly checks the Siteverify endpoint, submitted token and visitor IP.
+
+The new browser check failed on the previous build because the widget reset before submission, then passed with the fix. All required checks passed in order: 30 PostgreSQL integration tests against a disposable PostgreSQL 18 database, volume persistence, type checks (zero errors/warnings), lint, 233 unit/HTTP tests, both builds and 145 Chromium runs. The temporary database container was removed. A deliberately invalid token sent through the public login API was rejected, and a direct Siteverify connectivity check returned HTTP 200 with `invalid-input-response`. No real account credentials were used, no sessions were created and no print was submitted. A successful widget challenge still requires the owner’s interactive browser; password recovery remains available through the local account CLI.
+
+## Authentication page deployment fix — 2026-10-15
+
+The public tunnel reached the service, but `/login/` returned 404 because authentication pages were built as `login.html` while the service serves page directories with `index.html`. The root layout now builds all pages with trailing slashes, and missing static files report “Not found” instead of suggesting a CUPS failure. A regression check runs the actual Node HTTP server against the production build, covering login, enrollment, recovery and the authenticated account page.
+
+Verification used a disposable PostgreSQL 18 container and test database. All required checks passed in order: 30 PostgreSQL integration tests, volume persistence, type checks (zero errors/warnings), lint, 233 unit/HTTP tests, both production builds and 144 Chromium runs. The temporary database container was removed afterward.
+
+Live HTTPS checks through the configured Cloudflare Tunnel returned 200 HTML with `no-store` for login, enrollment and recovery, 200 for the login page’s linked scripts/styles, and a login redirect for an unauthenticated account request. CUPS had no pending jobs and the station database had no unfinished print attempts or dispatches. The rebuilt pages are active; restarting the Node service to load the revised error messages requires the owner’s sudo password. No print was submitted. Interactive Turnstile, real-device passkeys and physical printing remain owner checks.
+
+## Authentication and PDF development integration — 2026-10-15
+
+Merged the PDF development printing changes from main into the authentication branch, retaining both verification histories and features. Saved receipt downloads now resolve the authenticated user/browser workspace before checking dispatch ownership; unauthenticated requests are rejected before receipt lookup or file reads. The bundled account CLI shares the service’s origin validator so PDF development supports localhost HTTP. Development instructions retain mandatory authentication and specify direct proxy mode and localhost Turnstile keys.
+
+Checks ran on Linux with Node 24.21.0 in the required sequence. PostgreSQL integration used a fresh disposable PostgreSQL 18 container and a separate `_test` database; no station data was changed. The bundled account CLI was smoke-tested with `list` using PDF mode and a localhost HTTP origin.
+
+| Check                        | Result                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres        | Passed; 30 tests across 4 files.                                                                              |
+| npm run test:postgres:volume | Passed; disposable volume survived container recreation.                                                      |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                  |
+| npm run lint                 | Passed.                                                                                                       |
+| npm test                     | Passed; 232 tests across 20 files, including PDF ownership, authentication gates and output persistence.      |
+| npm run build                | Passed.                                                                                                       |
+| npm run build:printer        | Passed; service and account CLI bundled.                                                                      |
+| npm run test:e2e             | Passed; 143 Chromium runs, including PDF printing/viewing/reload/reprint and authentication/session recovery. |
+
+No physical printer was used. Public Cloudflare, real Turnstile, physical-device passkeys and physical-print acceptance remain deployment/owner checks.
+
+## Application authentication and Cloudflare Tunnel readiness — 2026-10-15
+
+Added mandatory application sessions, username/password and optional discoverable passkeys, server-verified Turnstile, persistent login rate limits, credential management and a bundled terminal-only account command. All enabled accounts have the same ordering/printing/queue access. Local bootstrap creates the first account; single-use enrollment and recovery codes need no messaging provider. Each user/browser pair gets an isolated workspace, and browser requests bind to the initially loaded user so an old tab cannot write into another account after a cookie change. Existing anonymous workspaces and order history remain untouched.
+
+Protected HTML and operational APIs require authentication. HTML uses per-response CSP nonces and is never served from the service-worker cache. SSE rechecks authorization before snapshots and on heartbeats and closes at expiry. Session loss waits for active saves/prints to settle before returning to login; durable outcomes recover without another print call. Account navigation uses Order tools and the queue header to preserve the fixed-height ordering layout.
+
+Checks ran on Linux with Node 24.21.0, in the AGENTS.md sequence. PostgreSQL checks used a dedicated temporary PostgreSQL 18 container on loopback port 55438 and a disposable `_test` database, removed afterward. No station database was migrated or changed. The bundled account CLI was also smoke-tested with `list` against that test database.
+
+| Check                        | Result                                                                                                                                                                                                                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| npm run test:postgres        | Passed; 30 tests across 4 files, including atomic bootstrap/enrollment, expiry/revocation/recovery, persistent rate limits, user/browser isolation, signed WebAuthn registration/authentication, origin/UV/replay/counter rejection and bounded cleanup. |
+| npm run test:postgres:volume | Passed; disposable PostgreSQL 18 volume survived container recreation.                                                                                                                                                                                   |
+| npm run check                | Passed; svelte-check 0 errors / 0 warnings and both TypeScript checks clean.                                                                                                                                                                             |
+| npm run lint                 | Passed.                                                                                                                                                                                                                                                  |
+| npm test                     | Passed; 222 tests across 19 files, including protected routes, authentication POST guards, trusted proxy IP handling, secure cookies, CSP nonces, old-tab user binding, SSE revocation and structured pre-dispatch print rejection.                      |
+| npm run build                | Passed.                                                                                                                                                                                                                                                  |
+| npm run build:printer        | Passed; emits both server.mjs and auth-cli.mjs.                                                                                                                                                                                                          |
+| npm run test:e2e             | Passed; 140 Chromium runs, including virtual-authenticator passkeys, enrollment, logout/history/offline protection, account switching, session loss during printing without replay and existing responsive ordering/queue scenarios.                     |
+
+Automated Turnstile checks use injected verification responses and browser widgets; passkey browser checks use a virtual authenticator. Live Cloudflare Tunnel/DNS/HTTPS configuration, real Turnstile on the final hostname, physical-device passkeys, SSE through the public tunnel and the physical-printer acceptance checklist remain deployment/owner checks. No physical print was sent and no hardware result is claimed. Configure the final origin and Turnstile keys, explicitly deploy the new migration, bootstrap an account and configure the tunnel before public use; see [Linux deployment](linux-printing.md).
+
 ## PDF development printing — 2026-10-14
 
 Added explicit PDF-only service output, cross-platform startup, atomic receipt files, workspace-protected PDF viewing and browser links restored after reload. CUPS remains the default. No database migration is required.

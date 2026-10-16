@@ -6,7 +6,7 @@ The service hosts the static app and accepts same-origin print requests. The pho
 
 ## Start on Mint
 
-Prerequisites: a working local USB CUPS queue with **Star TSP100 Cutter (en)**, Node **22.17+ or 24**, Git, PostgreSQL 18 running on this same machine, Tailscale connected to the phone's tailnet. Check `node --version`; distribution Node packages may be older. Use the [official Node installation guide](https://nodejs.org/en/download) if needed. Run the app as your normal user. Use the existing queue's exact name; creating or renaming a queue is unnecessary.
+Prerequisites: a working local USB CUPS queue with **Star TSP100 Cutter (en)**, Node **22.17+ or 24**, Git, PostgreSQL 18 running on this same machine, a Cloudflare-managed domain, a named Cloudflare Tunnel, and Turnstile keys for the final hostname. Check `node --version`; distribution Node packages may be older. Use the [official Node installation guide](https://nodejs.org/en/download) if needed. Run the app as your normal user. Use the existing queue's exact name; creating or renaming a queue is unnecessary.
 
 Confirm the queue and options:
 
@@ -35,28 +35,50 @@ npm ci
 npm run db:deploy
 npm run build
 npm run build:printer
-tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
+npm run auth -- bootstrap fiona
 ```
 
-Put the printed Mint hostname in `.env` as `ORDER_PAD_ORIGIN`, together with `ORDER_PAD_QUEUE`, `DATABASE_URL` and `ORDER_PAD_CAPTURE_FROM` (see [.env.example](../.env.example)). `npm run start:printer` loads `.env`; variables exported in the shell override it. For a one-off run you can export them instead, replacing the example:
+Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https://orders.example.com`, the real CUPS queue, local database URL, fixed capture cutoff, `ORDER_PAD_PROXY=cloudflare` and both Turnstile keys. Keep the secret key out of Git and browser builds. The widget must allow the exact final hostname. `npm run start:printer` loads `.env`; exported shell variables override it. Start the app from the repository root.
 
-```sh
-export ORDER_PAD_ORIGIN='https://YOUR-MINT-HOST.YOUR-TAILNET.ts.net'
-export ORDER_PAD_QUEUE='Star_TSP143'
-npm run start:printer
-```
+### Cloudflare Tunnel and HTTPS
 
-Keep this terminal running. In another terminal, inspect `tailscale serve status` before changing existing configuration. If the Mint host's HTTPS root is available for Order Pad:
+1. Install `cloudflared` on the same Linux host using [Cloudflare’s installation instructions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/).
+2. Authenticate the connector and create a named tunnel. Use the final subdomain consistently; passkeys are bound to it.
 
-```sh
-sudo tailscale serve --bg --https=443 http://127.0.0.1:4174
-```
+   ```sh
+   cloudflared tunnel login
+   cloudflared tunnel create order-pad
+   cloudflared tunnel route dns order-pad orders.example.com
+   ```
 
-Follow Tailscale's authorization link if HTTPS needs enabling. Serve is private to the tailnet; do not enable Funnel or expose CUPS port 631. Phone HTTPS uses 443 with no explicit port. The backend binds only to loopback port 4174.
+3. Copy [deploy/cloudflared.example.yml](../deploy/cloudflared.example.yml) to the connector’s configuration location, fill in the tunnel UUID, hostname and credentials-file path, and restrict access to the credentials file. Route only that hostname to `http://127.0.0.1:4174`, preserve its Host header, and retain the final `http_status:404` ingress rule. The app and connector share a machine; local HTTP stays on loopback, while the tunnel and browser connections are encrypted.
+4. In Cloudflare, enable HTTPS redirects for this hostname and add a **Bypass cache** rule covering the entire application hostname, including HTML and `/api/*`. Do not add “Cache Everything” rules or edge challenges to authenticated API/SSE routes. Application login performs its own Turnstile validation.
+5. Check the configuration, then run the tunnel:
 
-On the S10e, open the **Mint machine’s** HTTPS URL. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
+   ```sh
+   cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
+   cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://orders.example.com
+   cloudflared tunnel --config /etc/cloudflared/config.yml run order-pad
+   ```
 
-Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each browser profile automatically receives an anonymous persistent workspace cookie and restores its own draft, latest receipt and recovery state after reload or restart. Separate profiles/devices edit independently; stale tabs within the same profile are blocked by revision checks. The header displays “New order” until the service allocates a number while committing print intent. Clearing cookies starts a new workspace without deleting old records.
+6. Once validated, install the connector as a system service using Cloudflare’s [Linux service instructions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/as-a-service/linux/). Use the explicit configuration path; the credentials/configuration must be readable by the service identity. Keep the Node service managed separately by systemd.
+7. Test the public URL from a device with Tailscale disabled. Unauthenticated `/` and `/queue/` redirect to login; `/api/printer`, `/api/station`, `/api/orders/events` and all operational POSTs require a session. Sign in with Turnstile, add a passkey under **Account**, verify passkey login, and keep the queue open through several heartbeat intervals.
+
+`ORDER_PAD_PROXY=cloudflare` trusts a valid `CF-Connecting-IP` only from the loopback connector. Arbitrary `X-Forwarded-For` values are ignored. Missing or malformed Cloudflare client-IP headers reject public authentication requests. Local processes and connector configuration are trusted host administration; do not bind the app to a public interface. No inbound router port forwarding is required. Never expose Postgres 5432 or CUPS 631 through a tunnel.
+
+For an alternative trusted local HTTPS proxy, including Tailscale Serve, use `ORDER_PAD_PROXY=direct` and configure Turnstile for that exact hostname too. Login remains mandatory. Direct mode rate-limits the proxy’s socket address, so Cloudflare mode is preferred for this deployment.
+
+### Enrollment, recovery and upgrading
+
+Create the first account with `npm run auth -- bootstrap <username>` after building the service and migrating PostgreSQL. The command prompts without echo and refuses once accounts exist. To enroll someone else, run `npm run auth -- invite <username>` and hand them its 24-hour single-use code or URL in person. URLs use fragments; no messaging provider is needed. All users can order, print and manage the queue; none can issue enrollment codes through the website.
+
+`npm run auth -- recover <username>` immediately removes existing credentials/passkeys and sessions and issues a 30-minute reset code. `disable`, `enable`, `list` and `revoke` are terminal-only operations; see [README accounts](../README.md#accounts-and-sign-in).
+
+Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, bootstrap the first user, and restart the managed service. Preserve the capture cutoff. The authentication migration leaves old order history and anonymous workspaces intact without automatically assigning them to a user. The new domain receives new browser cookies and empty user/browser workspaces. Existing-domain cookies never transfer automatically. Re-enroll passkeys after a hostname change.
+
+On the S10e, open the configured public HTTPS URL and sign in. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
+
+Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each signed-in user/browser pair has its own workspace, resolved by a persistent opaque browser cookie. Login restores that user’s draft, latest receipt and recovery state; switching users hides the previous user’s state. Separate profiles/devices edit independently; stale tabs within the same profile are blocked by revision checks. The header displays “New order” until the service allocates a number while committing print intent. Clearing cookies starts a new workspace without deleting old records.
 
 ## Behavior and limits
 
@@ -68,15 +90,15 @@ Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each b
 - Lost/malformed response, interrupted submission or failed outcome persistence is unknown. Reprinting requires an explicit new attempt marked REPRINT with the original ticket ID. Other applications using CUPS are outside the station lock.
 - Order events persist centrally in PostgreSQL 18; `/queue/` subscribes to live SSE snapshots at `/api/orders/events`. Reprints never add or reopen orders, and completed IDs remain durable after leaving Recently done. Only explicit Undo reopens an order. First submissions can appear before CUPS acceptance, including failed or unknown prints.
 - Back up the whole Postgres database. Keep legacy `.print-data/` and browser history as archives; the current app never reads, writes or automatically imports them. Never reset database history to resolve an ambiguous print.
-- Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Tailnet rules control access; no account system is added.
+- Host/POST Origin checks, JSON-only bounded requests and no CORS permission restrict printing to the configured same-origin app. Secure database-backed sessions control access, with Turnstile and persistent login rate limits. A structured `401 authentication-required` before dispatch means no job was submitted. Lost replies remain unknown and are never retried.
 - The ordering interface uses this USB route exclusively. A static-only host or cached shell cannot edit/recover drafts or print. Both the app service and local Postgres are required. Simulation/PassPRNT adapters remain available for compatibility tests. Legacy v1/v2 browser records are left untouched.
 - Printed ticket times use the **Mint host’s** local time zone, because the service renders the PDF. Check it with `timedatectl` before an event. Browser previews and the queue use each device’s own time zone.
 
-Required: `DATABASE_URL` (loopback Postgres connection URL; remote hosts/host overrides are rejected), `ORDER_PAD_CAPTURE_FROM` (fixed UTC capture cutoff with milliseconds, set once at rollout; a cutoff later than the host clock makes every new order fail until that time, so check `date -u` first), and `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to hide the queue while retaining order capture; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
+Required: `DATABASE_URL` (loopback Postgres connection URL; remote hosts/host overrides are rejected), `ORDER_PAD_CAPTURE_FROM` (fixed UTC capture cutoff with milliseconds, set once at rollout; a cutoff later than the host clock makes every new order fail until that time, so check `date -u` first), the two Turnstile keys, and `ORDER_PAD_ORIGIN`, the root HTTPS origin (no path). Set `ORDER_PAD_PROXY=cloudflare` for the local connector; `direct` is the default for other local proxies. Effectively required: `ORDER_PAD_QUEUE`; it defaults to `OrderPad`, which is not the verified queue name. Optional: `ORDER_PAD_TRACKING_ENABLED` (`true`; set exactly `false` to hide the queue while retaining order capture; any other value stops startup), `ORDER_PAD_PORT` (4174; 1024–65535, loopback only), `ORDER_PAD_FONT` (`/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`). See the [configuration table in README](../README.md#configuration). Keep paths/environment stable across restarts.
 
 Start the service **from the repository root**: it serves `./build`, checks the migrated database before listening, and exits if either is unavailable.
 
-The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`. Its `WorkingDirectory` is the repository root and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. Tailscale `--bg` persists the proxy, not Node. Disable host sleep for event use.
+The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`. Its `WorkingDirectory` is the repository root and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. The cloudflared system service persists the tunnel, not Node. Disable host sleep for event use.
 
 ## Verified Mint setup — 2026-10-11
 
@@ -134,6 +156,16 @@ For physical acceptance of the simplified workflow:
 10. During a controlled pending CUPS job, verify a second request waits and submits once after the queue clears. Keep a job pending beyond 30 seconds and verify the second attempt reports that no job was submitted. Restart during a wait and verify no waiting request replays; inspect output before acknowledging any unknown outcome.
 
 These are physical acceptance steps, not claims that this interaction update has already been tested on hardware.
+
+## Public-access acceptance checks
+
+These remain deployment/device checks; automated fixtures do not establish them.
+
+1. With Tailscale disabled, verify public HTTPS, HTTP-to-HTTPS redirect, correct Host forwarding and working Turnstile for password/passkey login, enrollment and recovery.
+2. Before login and after logout, check protected pages, printer/backend APIs and SSE deny access. Confirm no protected HTML/API data is returned from browser or Cloudflare caches, including offline navigation and browser Back.
+3. Enroll a phone passkey, sign out and sign back in with device verification. Check username/password fallback. Confirm different users in one browser and one user on two devices have independent drafts/recovery.
+4. Check 16-hour expiry and local disable/recovery revocation, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
+5. Exercise local bootstrap refusal after first user, invite/recovery expiration and replay rejection, and account password/passkey management. Verify login rate-limit feedback and temporary recovery after cooldown. Keep station data backed up.
 
 ## Still to test
 

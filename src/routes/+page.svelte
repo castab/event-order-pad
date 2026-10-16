@@ -22,6 +22,8 @@
     type ServingEditor,
   } from '#lib/tickets/order.js';
   import { holdUpdates } from '#lib/app-update.js';
+  import UserMenu from '#lib/auth/UserMenu.svelte';
+  import { sessionUsername } from '#lib/auth/session-context.js';
   import { PrintSession, type SessionState } from '#lib/printing/session.js';
   import { DatabaseTicketStore } from '#lib/storage/ticket-store.js';
   import {
@@ -30,6 +32,7 @@
     type LinuxPrinterStatus,
   } from '#lib/printing/adapters/linux-cups.js';
 
+  const username = sessionUsername();
   let trackingEnabled = $state(false);
   let mounted = false;
   let store: DatabaseTicketStore | undefined;
@@ -528,17 +531,21 @@
       width="83"
       height="44"
     />
-    <div class="header-order">
-      <span>{draft?.reference ? `Order #${draft.reference}` : 'New order'}</span
-      >
-      <button
-        class="icon-button"
-        aria-label="Reprint last order"
-        title="Reprint last order"
-        onclick={() => print(true)}
-        disabled={!canSend || !viewState.ticket || !viewState.attempts.length}
-        >{@render icon('print')}</button
-      >
+    <div class="header-end">
+      <div class="header-order">
+        <span
+          >{draft?.reference ? `Order #${draft.reference}` : 'New order'}</span
+        >
+        <button
+          class="icon-button"
+          aria-label="Reprint last order"
+          title="Reprint last order"
+          onclick={() => print(true)}
+          disabled={!canSend || !viewState.ticket || !viewState.attempts.length}
+          >{@render icon('print')}</button
+        >
+      </div>
+      {#if username()}<UserMenu username={username()} />{/if}
     </div>
   </header>
 

@@ -1,0 +1,10 @@
+# Keep the credentials file outside the repository and readable only by cloudflared.
+tunnel: REPLACE-WITH-TUNNEL-UUID
+credentials-file: /etc/cloudflared/REPLACE-WITH-TUNNEL-UUID.json
+
+ingress:
+  - hostname: orders.example.com
+    service: http://127.0.0.1:4174
+    originRequest:
+      httpHostHeader: orders.example.com
+  - service: http_status:404

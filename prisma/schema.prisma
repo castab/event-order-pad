@@ -66,3 +66,87 @@ model PrintDispatch {
 
   @@map("print_dispatches")
 }
+
+model AuthUser {
+  id String @id
+  username String @unique
+  passwordHash String? @map("password_hash")
+  enabled Boolean @default(true)
+  version Int @default(0)
+  createdAt DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+  sessions AuthSession[]
+  passkeys AuthPasskey[]
+  workspaces AuthWorkspace[]
+  @@map("auth_users")
+}
+model AuthSession {
+  tokenHash String @id @map("token_hash")
+  userId String @map("user_id")
+  version Int
+  authenticatedAt DateTime @db.Timestamptz(3) @map("authenticated_at")
+  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  user AuthUser @relation(fields: [userId], references: [id])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+model AuthPasskey {
+  id String @id
+  userId String @map("user_id")
+  publicKey Bytes @map("public_key")
+  counter BigInt
+  transports String[]
+  deviceType String @map("device_type")
+  backedUp Boolean @map("backed_up")
+  name String
+  createdAt DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+  user AuthUser @relation(fields: [userId], references: [id])
+  @@index([userId])
+  @@map("auth_passkeys")
+}
+model AuthChallenge {
+  tokenHash String @id @map("token_hash")
+  browserHash String @map("browser_hash")
+  sessionHash String? @map("session_hash")
+  userId String? @map("user_id")
+  version Int?
+  kind String
+  challenge String
+  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  @@index([expiresAt])
+  @@map("auth_challenges")
+}
+model AuthToken {
+  tokenHash String @id @map("token_hash")
+  username String
+  kind String
+  userId String? @map("user_id")
+  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  @@unique([kind, username])
+  @@index([expiresAt])
+  @@map("auth_tokens")
+}
+model AuthRate {
+  key String @id
+  count Int
+  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  @@index([expiresAt])
+  @@map("auth_rates")
+}
+model AuthEvent {
+  id BigInt @id @default(autoincrement())
+  kind String
+  userId String? @map("user_id")
+  ipHash String? @map("ip_hash")
+  createdAt DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+  @@index([createdAt])
+  @@map("auth_events")
+}
+model AuthWorkspace {
+  userId String @map("user_id")
+  browserHash String @map("browser_hash")
+  workspaceKey String @unique @map("workspace_key")
+  user AuthUser @relation(fields: [userId], references: [id])
+  @@id([userId, browserHash])
+  @@map("auth_workspaces")
+}

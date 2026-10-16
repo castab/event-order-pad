@@ -12,7 +12,10 @@
   import { fetchTrackingEnabled } from '#lib/orders/features.js';
   import { QueueFeed } from '#lib/orders/stream.js';
   import { totalScoops } from '#lib/tickets/ticket.js';
+  import UserMenu from '#lib/auth/UserMenu.svelte';
+  import { sessionUsername } from '#lib/auth/session-context.js';
 
+  const username = sessionUsername();
   let orders = $state<readonly QueueOrder[]>([]);
   let now = $state(Date.now());
   let loaded = $state(false);
@@ -288,6 +291,9 @@
       ><span class="header-rule" aria-hidden="true"></span>
       <h1>Now Scooping</h1>
     </div>
+    {#if username()}<div class="queue-user">
+        <UserMenu username={username()} />
+      </div>{/if}
     {#if trackingEnabled !== false}<dl
         class="queue-metrics"
         aria-label="Queue totals"
@@ -398,14 +404,16 @@
     min-height: 72px;
     flex-shrink: 0;
     padding: 0 28px;
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'brand metrics user';
     align-items: center;
-    justify-content: space-between;
     gap: 24px;
     background: var(--surface-inverse);
     color: var(--text-on-inverse);
   }
   .queue-brand {
+    grid-area: brand;
     display: flex;
     align-items: center;
     gap: 20px;
@@ -431,10 +439,15 @@
     text-transform: uppercase;
   }
   .queue-metrics {
+    grid-area: metrics;
+    justify-self: end;
     display: flex;
     align-items: center;
     gap: 28px;
     margin: 0;
+  }
+  .queue-user {
+    grid-area: user;
   }
   .queue-metrics > div {
     display: flex;
@@ -762,11 +775,15 @@
   }
   @media (max-width: 1050px) {
     .queue-header {
-      flex-wrap: wrap;
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        'brand user'
+        'metrics metrics';
       padding: 14px 20px;
       gap: 16px;
     }
     .queue-metrics {
+      justify-self: start;
       flex-wrap: wrap;
       gap: 20px;
     }

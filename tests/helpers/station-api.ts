@@ -9,6 +9,15 @@ export async function mockStationApi(
   onOrder?: (ticket: OrderTicket) => void,
   beforeOrder?: () => void,
 ) {
+  await surface.route('**/api/auth/session', (route) =>
+    route.fulfill({
+      json: {
+        user: { id: 'staff', username: 'staff' },
+        expiresAt: '2099-01-01T00:00:00.000Z',
+        authenticatedAt: '2026-10-16T00:00:00.000Z',
+      },
+    }),
+  );
   const station = new MemoryStationRepository();
   let unavailable = false;
   await surface.route('**/api/database', (route) =>
