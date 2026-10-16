@@ -1,36 +1,51 @@
 import { describe, expect, it } from 'vitest';
-import { clientIp, parseAuthConfig, passwordHash } from './auth';
+import { clientIp, codeHash, parseAuthConfig } from './auth';
+import { resolve } from 'node:path';
 import { verify } from '@node-rs/argon2';
+import { newAccessCode, printAccessSlip } from './access-admin';
+import { Cups, type Command } from './cups';
 import {
-  parsePassword,
-  parseUsername,
+  ACCESS_CODE_ALPHABET,
+  formatAccessCode,
+  parseAccessCode,
   parseAuthSession,
 } from '../src/lib/auth/model';
 
 describe('authentication input and trust boundaries', () => {
-  it('canonicalizes usernames and preserves passwords exactly, including spaces and Unicode', () => {
-    expect(parseUsername('FiOnA._-')).toBe('fiona._-');
+  it('canonicalizes typed access codes and rejects anything else', () => {
+    expect(parseAccessCode('k7qm4-xtd9a')).toBe('K7QM4XTD9A');
+    expect(parseAccessCode(' K7QM4 XTD9A ')).toBe('K7QM4XTD9A');
+    expect(formatAccessCode('K7QM4XTD9A')).toBe('K7QM4-XTD9A');
     for (const bad of [
-      'ab',
-      ' staff',
-      'staff@site',
-      'staff\n',
-      'a'.repeat(33),
+      'K7QM4XTD9',
+      'K7QM4XTD9AB',
+      'K7QM4XTD0A',
+      'K7QM4XTDIA',
+      'K7QM4XTDLA',
+      'K7QM4_XTD9A',
+      'K'.repeat(41),
       null,
+      42,
     ])
-      expect(() => parseUsername(bad)).toThrow();
-    const passphrase = '  a long passphrase  ';
-    expect(parsePassword(passphrase)).toBe(passphrase);
-    expect(parsePassword('🍦'.repeat(15))).toHaveLength(30);
-    for (const bad of ['a'.repeat(14), 'a'.repeat(129), null])
-      expect(() => parsePassword(bad)).toThrow();
+      expect(() => parseAccessCode(bad)).toThrow();
     const session = parseAuthSession({
-      user: { id: '1', username: 'staff' },
+      expiresAt: '2026-10-17T00:00:00.000Z',
+      authenticatedAt: '2026-10-16T00:00:00.000Z',
+      codeId: 'never-sent',
+    });
+    expect(session).toEqual({
       expiresAt: '2026-10-17T00:00:00.000Z',
       authenticatedAt: '2026-10-16T00:00:00.000Z',
     });
     expect(Object.isFrozen(session)).toBe(true);
-    expect(Object.isFrozen(session.user)).toBe(true);
+  });
+  it('mints codes uniformly from the unambiguous alphabet', () => {
+    let next = 0;
+    expect(newAccessCode(() => next++ % ACCESS_CODE_ALPHABET.length)).toBe(
+      '23456789AB',
+    );
+    for (let i = 0; i < 50; i++)
+      expect(parseAccessCode(newAccessCode())).toHaveLength(10);
   });
   it('trusts Cloudflare client IPs only on the configured loopback hop', () => {
     expect(clientIp('127.0.0.1', '192.0.2.1', 'direct')).toBe('127.0.0.1');
@@ -57,13 +72,43 @@ describe('authentication input and trust boundaries', () => {
       }).proxy,
     ).toBe('direct');
   });
-  it('uses salted Argon2id with the configured memory and work factor', async () => {
-    const value = '  this is a passphrase  ';
-    const first = await passwordHash(value);
-    const second = await passwordHash(value);
+  it('stores codes with salted Argon2id at the configured cost', async () => {
+    const first = await codeHash('K7QM4XTD9A');
+    const second = await codeHash('K7QM4XTD9A');
     expect(first).toMatch(/^\$argon2id\$v=19\$m=19456,t=2,p=1\$/);
     expect(first).not.toBe(second);
-    expect(await verify(first, value)).toBe(true);
-    expect(await verify(first, value.trim())).toBe(false);
+    expect(await verify(first, 'K7QM4XTD9A')).toBe(true);
+    expect(await verify(first, 'K7QM4XTD9B')).toBe(false);
+  });
+  it('prints the access slip as one CUPS job without touching a printer', async () => {
+    const calls: { program: string; args: readonly string[] }[] = [];
+    const run: Command = async (program, args) => {
+      calls.push({ program, args });
+      if (program === 'lpstat' && args.includes('-o')) return '';
+      if (program === 'lpstat')
+        return 'printer OrderPad is idle.\ndevice for OrderPad: usb://Star/TSP143';
+      if (program === 'lpoptions')
+        return [
+          'PageType/Page Type: *0Variable',
+          'DocCutType/Doc Cut: *1PartialCutDoc',
+          'PageCutType/Page Cut: *0NoCutPage',
+          'PageSize/Media Size: *Custom',
+        ].join('\n');
+      return 'request id is OrderPad-7 (1 file(s))';
+    };
+    const font = resolve('static/fonts/poppins-400.ttf');
+    const job = await printAccessSlip(
+      new Cups('OrderPad', run),
+      'K7QM4XTD9A',
+      new Date('2026-10-16T20:00:00.000Z'),
+      font,
+    );
+    expect(job).toBe('OrderPad-7');
+    const lp = calls.filter((call) => call.program === 'lp');
+    expect(lp).toHaveLength(1);
+    expect(lp[0].args).toContain('media=Custom.72x60mm');
+    expect(
+      lp[0].args.find((arg) => arg.startsWith('OrderPad-access-')),
+    ).toBeTruthy();
   });
 });

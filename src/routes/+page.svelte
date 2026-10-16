@@ -22,8 +22,8 @@
     type ServingEditor,
   } from '#lib/tickets/order.js';
   import { holdUpdates } from '#lib/app-update.js';
-  import UserMenu from '#lib/auth/UserMenu.svelte';
-  import { sessionUsername } from '#lib/auth/session-context.js';
+  import AccessMenu from '#lib/auth/AccessMenu.svelte';
+  import { sessionExpiry } from '#lib/auth/session-context.js';
   import { PrintSession, type SessionState } from '#lib/printing/session.js';
   import { DatabaseTicketStore } from '#lib/storage/ticket-store.js';
   import {
@@ -32,7 +32,7 @@
     type LinuxPrinterStatus,
   } from '#lib/printing/adapters/linux-cups.js';
 
-  const username = sessionUsername();
+  const expiresAt = sessionExpiry();
   let trackingEnabled = $state(false);
   let mounted = false;
   let store: DatabaseTicketStore | undefined;
@@ -545,7 +545,7 @@
           >{@render icon('print')}</button
         >
       </div>
-      {#if username()}<UserMenu username={username()} />{/if}
+      {#if expiresAt()}<AccessMenu expiresAt={expiresAt()!} />{/if}
     </div>
   </header>
 

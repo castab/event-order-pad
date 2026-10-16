@@ -18,7 +18,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "auth": "node --env-file-if-exists=.env build-printer/auth-cli.mjs",
+    "access": "node --env-file-if-exists=.env build-printer/access-cli.mjs",
     "db:studio": "prisma studio",
     "precheck": "npm run db:generate",
     "prebuild:printer": "npm run db:generate",
@@ -46,8 +46,6 @@
     "@node-rs/argon2": "2.2.2",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
-    "@simplewebauthn/browser": "14.0.0",
-    "@simplewebauthn/server": "14.0.3",
     "pdfkit": "0.20.2",
     "pg": "8.22.0"
   },

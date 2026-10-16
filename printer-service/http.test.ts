@@ -764,7 +764,7 @@ it('requires authentication for every operational route and protected page, incl
   const auth = testAuth({ session: async () => undefined });
   const { send, print, station, check } = await app(true, auth);
   const load = vi.spyOn(station, 'load');
-  for (const path of ['/', '/queue/', '/account/']) {
+  for (const path of ['/', '/queue/', '/enroll/', '/recover/']) {
     const reply = await send(path);
     expect(reply.status).toBe(303);
     expect(reply.headers.location).toBe('/login/');
@@ -801,7 +801,7 @@ it('reports a missing static file without suggesting a printer failure', async (
   expect(reply.status).toBe(404);
   expect(JSON.parse(reply.body)).toEqual({ error: 'Not found.' });
 });
-it('guards every authentication POST and provides no HTTP account-administration route', async () => {
+it('guards every authentication POST and provides no HTTP access-code administration', async () => {
   const handle = vi.fn(testAuth().handle);
   const { send } = await app(true, testAuth({ handle }));
   for (const path of authPosts) {
@@ -812,14 +812,24 @@ it('guards every authentication POST and provides no HTTP account-administration
     ).toBe(403);
   }
   expect(handle).not.toHaveBeenCalled();
-  expect((await send('/api/auth/bootstrap', '{}', headers)).status).toBe(404);
+  expect([...authPosts]).toEqual(['/api/auth/login', '/api/auth/logout']);
+  for (const path of [
+    '/api/auth/bootstrap',
+    '/api/auth/mint',
+    '/api/auth/enroll',
+    '/api/auth/recover',
+    '/api/auth/password',
+    '/api/auth/logout-all',
+    '/api/auth/passkey/login/options',
+  ])
+    expect((await send(path, '{}', headers)).status).toBe(404);
+  expect((await send('/api/auth/passkeys')).status).toBe(404);
 });
 it('sets secure authentication cookies and returns rate-limit Retry-After headers', async () => {
   const auth = testAuth({
     handle: async () => ({
       body: { ok: true },
       token: 'a'.repeat(64),
-      challenge: 'b'.repeat(64),
     }),
   });
   const { send } = await app(true, auth);
@@ -829,7 +839,7 @@ it('sets secure authentication cookies and returns rate-limit Retry-After header
     cookies.some(
       (c) =>
         c.startsWith('__Host-order-pad-session=') &&
-        c.includes('Max-Age=57600'),
+        c.includes('Max-Age=28800'),
     ),
   ).toBe(true);
   for (const cookie of cookies)
@@ -915,28 +925,6 @@ it('revokes an open SSE subscription before sending the next order snapshot', as
   );
   await closed;
   expect(client.events).toHaveLength(1);
-});
-
-it('rejects an old tab’s expected user before resolving or mutating the new account’s workspace', async () => {
-  const { send, station, print } = await app();
-  const workspace = vi.spyOn(station, 'load');
-  expect(
-    (
-      await send('/api/station', undefined, {
-        'X-Order-Pad-User': 'different-user',
-      })
-    ).status,
-  ).toBe(401);
-  expect(
-    (
-      await send('/api/print', payload, {
-        ...headers,
-        'X-Order-Pad-User': 'different-user',
-      })
-    ).status,
-  ).toBe(401);
-  expect(workspace).not.toHaveBeenCalled();
-  expect(print).not.toHaveBeenCalled();
 });
 
 it('serves saved PDFs only to the owning workspace, without rendering or printing', async () => {

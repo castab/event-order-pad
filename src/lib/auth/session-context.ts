@@ -6,7 +6,7 @@ const key = Symbol('auth-session');
 export function provideSession(get: () => AuthSession | undefined) {
   setContext(key, get);
 }
-export function sessionUsername(): () => string {
+export function sessionExpiry(): () => string | undefined {
   const get = getContext<(() => AuthSession | undefined) | undefined>(key);
-  return () => get?.()?.user.username ?? '';
+  return () => get?.()?.expiresAt;
 }

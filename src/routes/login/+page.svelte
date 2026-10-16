@@ -1,15 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import LoginForm from '#lib/auth/LoginForm.svelte';
-  import AuthBanner from '#lib/auth/AuthBanner.svelte';
-  let signedOutEverywhere = $state(false);
-  onMount(() => {
-    const url = new URL(window.location.href);
-    if (url.searchParams.get('signed-out') === 'everywhere') {
-      signedOutEverywhere = true;
-      history.replaceState(null, '', url.pathname);
-    }
-  });
 </script>
 
 <svelte:head><title>Sign in · Order Pad</title></svelte:head>
@@ -25,17 +15,13 @@
     <div class="auth-column auth-stack">
       <div class="auth-heading">
         <h1>Sign in</h1>
-        <p>For Fiona’s staff. Use the account set up for you on the station.</p>
+        <p>For Fiona’s staff. Enter this shift’s access code.</p>
       </div>
-      {#if signedOutEverywhere}<AuthBanner kind="success"
-          >Signed out everywhere, including this device.</AuthBanner
-        >{/if}
       <LoginForm />
       <div class="signin-footer">
-        <p>First time here? <a href="/enroll/">Set up your account</a></p>
-        <p>Locked out? <a href="/recover/">Use a recovery code</a></p>
         <p class="auth-note muted">
-          Codes come from whoever runs the station computer.
+          No code, or it stopped working? Whoever runs the station computer can
+          mint a new one.
         </p>
       </div>
     </div>

@@ -1,13 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { createOrderDatabase } from './order-database';
-import {
-  AuthError,
-  PostgresAuth,
-  digest,
-  secret,
-  type AuthContext,
-} from './auth';
-import { manageAccount } from './auth-admin';
+import { PostgresAuth, digest, secret, type AuthContext } from './auth';
+import { manageAccess } from './access-admin';
 import { PostgresStationRepository } from './station-database';
 
 const url = process.env.TEST_DATABASE_URL!;
@@ -16,33 +11,22 @@ if (!url || !new URL(url).pathname.endsWith('_test'))
 const database = createOrderDatabase(url);
 const origin = new URL('https://orders.example.test');
 let now = new Date('2026-10-16T12:00:00.000Z');
-const send = vi.fn<typeof fetch>(
-  async () =>
-    new Response(
-      JSON.stringify({
-        success: true,
-        hostname: origin.hostname,
-        action: 'login',
-      }),
-    ),
-);
+const verified = async () =>
+  new Response(
+    JSON.stringify({
+      success: true,
+      hostname: origin.hostname,
+      action: 'login',
+    }),
+  );
+const send = vi.fn<typeof fetch>(verified);
 let auth: PostgresAuth;
 let context: AuthContext;
-const password = 'a long enough password';
 beforeEach(async () => {
-  await database.$executeRaw`TRUNCATE auth_workspaces, auth_events, auth_rates, auth_tokens, auth_challenges, auth_passkeys, auth_sessions, auth_users, workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
+  await database.$executeRaw`TRUNCATE access_workspaces, auth_events, auth_rates, auth_sessions, access_codes, workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
   now = new Date('2026-10-16T12:00:00.000Z');
   send.mockReset();
-  send.mockImplementation(
-    async () =>
-      new Response(
-        JSON.stringify({
-          success: true,
-          hostname: origin.hostname,
-          action: 'login',
-        }),
-      ),
-  );
+  send.mockImplementation(verified);
   auth = await new PostgresAuth(
     database,
     origin,
@@ -53,62 +37,110 @@ beforeEach(async () => {
   context = { ip: '192.0.2.1', browser: secret() };
 });
 afterAll(() => database.$disconnect());
-async function bootstrap(name = 'staff') {
-  await manageAccount(database, 'bootstrap', name, password, now);
+async function mint() {
+  const result = await manageAccess(database, 'mint', now);
+  if (result.kind !== 'minted') throw new Error('Expected a minted code.');
+  return result;
 }
-async function login(name = 'staff', value = password, ctx = context) {
+function login(code: string, ctx = context) {
   return auth.handle(
     '/api/auth/login',
     'POST',
-    { username: name, password: value, turnstile: 'verified-token' },
+    { code, turnstile: 'verified-token' },
     ctx,
   );
 }
-async function signedIn() {
-  await bootstrap();
-  const reply = await login();
+async function signedIn(code: string, ctx = context) {
+  const reply = await login(code, ctx);
   const identity = (await auth.session(reply.token))!;
-  return { ...context, token: reply.token, identity };
+  return { ...ctx, token: reply.token, identity };
 }
-function verifyAction(action: string) {
-  send.mockImplementation(
-    async () =>
-      new Response(
-        JSON.stringify({ success: true, hostname: origin.hostname, action }),
-      ),
+
+it('stores only hashes and ends every session when the code’s 8 hours run out', async () => {
+  const { code, expiresAt } = await mint();
+  expect(expiresAt.getTime() - now.getTime()).toBe(8 * 3600000);
+  const stored = await database.accessCode.findFirstOrThrow();
+  expect(stored.codeHash).toMatch(/^\$argon2id\$/);
+  expect(stored.codeHash).not.toContain(code);
+  // Lowercase with a hyphen, as staff might type it.
+  const early = await login(
+    `${code.slice(0, 5)}-${code.slice(5)}`.toLowerCase(),
   );
-}
-it('bootstraps once, including concurrent first-account attempts', async () => {
-  const results = await Promise.allSettled([
-    bootstrap('first'),
-    bootstrap('second'),
-  ]);
-  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-  expect(await database.authUser.count()).toBe(1);
-  expect((await database.authUser.findFirst())?.passwordHash).toMatch(
-    /^\$argon2id\$/,
-  );
-});
-it('persists only token hashes and expires sessions after exactly 16 hours', async () => {
-  await bootstrap();
-  const reply = await login('STAFF');
   const row = await database.authSession.findFirstOrThrow();
-  expect(row.tokenHash).toBe(digest(reply.token!));
-  expect(row.tokenHash).not.toBe(reply.token);
-  expect(row.expiresAt.getTime() - now.getTime()).toBe(16 * 3600000);
-  const other = await new PostgresAuth(
-    database,
-    origin,
-    auth.config,
-    () => now,
-    send,
-  ).initialize();
-  expect((await other.session(reply.token))?.user.username).toBe('staff');
-  now = new Date(row.expiresAt);
-  expect(await auth.session(reply.token)).toBeUndefined();
+  expect(row.tokenHash).toBe(digest(early.token!));
+  now = new Date(now.getTime() + 7 * 3600000);
+  const late = await login(code, { ...context, browser: secret() });
+  for (const token of [early.token, late.token])
+    expect((await auth.session(token))?.expiresAt).toBe(
+      expiresAt.toISOString(),
+    );
+  now = new Date(expiresAt);
+  expect(await auth.session(early.token)).toBeUndefined();
+  expect(await auth.session(late.token)).toBeUndefined();
+  await expect(login(code)).rejects.toMatchObject({ status: 401 });
 });
-it('requires correct Turnstile hostname/action and rejects outages and invalid tokens', async () => {
-  await bootstrap();
+
+it('minting voids the previous code and signs out every device that used it', async () => {
+  const first = await mint();
+  const a = await signedIn(first.code);
+  const b = await signedIn(first.code, { ...context, browser: secret() });
+  const second = await mint();
+  expect(second.code).not.toBe(first.code);
+  expect(await auth.session(a.token)).toBeUndefined();
+  expect(await auth.session(b.token)).toBeUndefined();
+  expect(await database.authSession.count()).toBe(0);
+  await expect(login(first.code)).rejects.toMatchObject({
+    status: 401,
+    message: 'That access code isn’t valid. Ask for the current code.',
+  });
+  expect((await login(second.code)).token).toBeTruthy();
+  expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
+    1,
+  );
+});
+
+it('keeps at most one active code under concurrent minting', async () => {
+  // The service allows two Argon2 hashes at once; the CLI is one process.
+  const results = await Promise.all([mint(), mint()]);
+  expect(await database.accessCode.count()).toBe(2);
+  expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
+    1,
+  );
+  const accepted = await Promise.allSettled(
+    results.map((result) => login(result.code)),
+  );
+  expect(accepted.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+  await expect(
+    database.$executeRaw`INSERT INTO access_codes (id, code_hash, created_at, expires_at) VALUES ('extra', 'x', ${now}, ${new Date(now.getTime() + 1000)})`,
+  ).rejects.toThrow();
+});
+
+it('revoke ends access without minting and status never reveals the code', async () => {
+  expect(await manageAccess(database, 'status', now)).toEqual({
+    kind: 'status',
+    expiresAt: undefined,
+    sessions: 0,
+  });
+  const { code, expiresAt } = await mint();
+  const ctx = await signedIn(code);
+  const status = await manageAccess(database, 'status', now);
+  expect(status).toEqual({ kind: 'status', expiresAt, sessions: 1 });
+  expect(JSON.stringify(status)).not.toContain(code);
+  expect(await manageAccess(database, 'revoke', now)).toEqual({
+    kind: 'revoked',
+    revoked: true,
+  });
+  expect(await auth.session(ctx.token)).toBeUndefined();
+  await expect(login(code)).rejects.toMatchObject({ status: 401 });
+  expect(await manageAccess(database, 'revoke', now)).toEqual({
+    kind: 'revoked',
+    revoked: false,
+  });
+  await expect(manageAccess(database, 'invite', now)).rejects.toThrow();
+});
+
+it('requires correct Turnstile hostname/action and rejects outages and malformed codes', async () => {
+  const { code } = await mint();
   for (const result of [
     { success: false },
     { success: true, hostname: 'attacker.test', action: 'login' },
@@ -117,22 +149,17 @@ it('requires correct Turnstile hostname/action and rejects outages and invalid t
     send.mockImplementationOnce(
       async () => new Response(JSON.stringify(result)),
     );
-    await expect(login()).rejects.toMatchObject({ status: 403 });
+    await expect(login(code)).rejects.toMatchObject({ status: 403 });
   }
   send.mockRejectedValueOnce(new Error('offline'));
-  await expect(login()).rejects.toMatchObject({ status: 403 });
+  await expect(login(code)).rejects.toMatchObject({ status: 403 });
   await expect(
-    auth.handle(
-      '/api/auth/login',
-      'POST',
-      { username: 'staff', password },
-      context,
-    ),
+    auth.handle('/api/auth/login', 'POST', { code }, context),
   ).rejects.toMatchObject({ status: 400 });
+  await expect(login('not a code')).rejects.toMatchObject({ status: 400 });
   expect(send).toHaveBeenCalledTimes(4);
   const [url, request] = send.mock.calls[0];
   expect(url).toBe('https://challenges.cloudflare.com/turnstile/v0/siteverify');
-  expect(request?.method).toBe('POST');
   expect(JSON.parse(request!.body as string)).toEqual({
     secret: 'secret',
     response: 'verified-token',
@@ -140,101 +167,48 @@ it('requires correct Turnstile hostname/action and rejects outages and invalid t
   });
   expect(await database.authSession.count()).toBe(0);
 });
-it('enrolls a reserved username exactly once under concurrent redemption and survives lost replies', async () => {
-  const invite = await manageAccount(
+
+it('limits wrong codes per address and across all addresses, persistently', async () => {
+  const { code } = await mint();
+  const wrong = code.startsWith('2')
+    ? '3' + code.slice(1)
+    : '2' + code.slice(1);
+  for (let n = 0; n < 5; n++)
+    await expect(login(wrong)).rejects.toMatchObject({ status: 401 });
+  const other = await new PostgresAuth(
     database,
-    'invite',
-    'new-staff',
-    undefined,
-    now,
-  );
-  if (!('token' in invite)) throw new Error('Missing token');
-  verifyAction('enroll');
-  const redeem = () =>
-    auth.handle(
-      '/api/auth/enroll',
-      'POST',
-      { token: invite.token, password, turnstile: 'token' },
-      context,
-    );
-  const results = await Promise.allSettled([redeem(), redeem()]);
-  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-  expect(await database.authUser.count()).toBe(1);
-  expect(await database.authToken.count()).toBe(0);
-  expect(await database.authSession.count()).toBe(1);
-  verifyAction('login');
-  expect((await login('new-staff')).token).toBeTruthy();
-});
-it('rejects expired and revoked enrollment tokens', async () => {
-  const invitation = await manageAccount(
-    database,
-    'invite',
-    'staff',
-    undefined,
-    now,
-  );
-  if (!('token' in invitation)) throw new Error('Missing token');
-  verifyAction('enroll');
-  now = new Date(now.getTime() + 86400000);
+    origin,
+    auth.config,
+    () => now,
+    send,
+  ).initialize();
+  // The right code is still refused while this address is cooling down.
   await expect(
-    auth.handle(
-      '/api/auth/enroll',
-      'POST',
-      { token: invitation.token, password, turnstile: 't' },
-      context,
-    ),
-  ).rejects.toMatchObject({ status: 400 });
-  await manageAccount(database, 'revoke', 'staff', undefined, now);
-  expect(await database.authToken.count()).toBe(0);
+    other.handle('/api/auth/login', 'POST', { code, turnstile: 't' }, context),
+  ).rejects.toMatchObject({ status: 429, retryAfter: 900 });
+  for (let n = 5; n < 100; n++)
+    await expect(
+      login(wrong, {
+        ...context,
+        ip: `198.51.${Math.floor(n / 4)}.${n % 4}`,
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+  await expect(
+    login(code, { ...context, ip: '203.0.113.9' }),
+  ).rejects.toMatchObject({ status: 429 });
+  now = new Date(now.getTime() + 900001);
+  // Successful sign-ins return their reservations.
+  for (let n = 0; n < 8; n++)
+    expect(
+      (await login(code, { ...context, ip: '203.0.113.10' })).token,
+    ).toBeTruthy();
+  const pages = await Promise.allSettled(
+    Array.from({ length: 125 }, () => auth.ratePage('198.51.100.1')),
+  );
+  expect(pages.filter((r) => r.status === 'fulfilled')).toHaveLength(120);
 });
-it('recovers locally, immediately revokes credentials and sessions, and preserves workspace state', async () => {
-  const ctx = await signedIn();
-  const key = await auth.workspace(ctx.identity, ctx.browser);
-  const station = new PostgresStationRepository(
-    database,
-    '2026-10-01T00:00:00.000Z',
-  );
-  const state = await station.load(key);
-  await station.mutate(
-    {
-      operation: 'saveDraft',
-      revision: state.revision,
-      draft: { ...state.draft, name: 'Saved draft' },
-    },
-    key,
-  );
-  const recovery = await manageAccount(
-    database,
-    'recover',
-    'staff',
-    undefined,
-    now,
-  );
-  expect(await auth.session(ctx.token)).toBeUndefined();
-  await expect(login()).rejects.toMatchObject({ status: 401 });
-  expect(await database.authPasskey.count()).toBe(0);
-  expect(await database.authUser.findFirst()).toMatchObject({
-    passwordHash: null,
-    enabled: false,
-  });
-  if (!('token' in recovery)) throw new Error('Missing token');
-  verifyAction('recover');
-  const reply = await auth.handle(
-    '/api/auth/recover',
-    'POST',
-    {
-      token: recovery.token,
-      password: 'a different long password',
-      turnstile: 'token',
-    },
-    context,
-  );
-  const identity = (await auth.session(reply.token))!;
-  expect(await auth.workspace(identity, ctx.browser)).toBe(key);
-  expect((await station.load(key)).draft.name).toBe('Saved draft');
-});
-it('isolates users in one browser and the same user across browsers; never adopts anonymous data', async () => {
-  const ctx = await signedIn();
+
+it('keeps each browser’s workspace across code rotations and never adopts anonymous data', async () => {
   const station = new PostgresStationRepository(
     database,
     '2026-10-01T00:00:00.000Z',
@@ -248,166 +222,44 @@ it('isolates users in one browser and the same user across browsers; never adopt
     },
     'old-anonymous',
   );
-  const first = await auth.workspace(ctx.identity, ctx.browser);
-  const [same1, same2] = await Promise.all([
-    auth.workspace(ctx.identity, ctx.browser),
-    auth.workspace(ctx.identity, ctx.browser),
+  const first = await signedIn((await mint()).code);
+  const [key, again] = await Promise.all([
+    auth.workspace(first.identity, first.browser),
+    auth.workspace(first.identity, first.browser),
   ]);
-  expect(same1).toBe(first);
-  expect(same2).toBe(first);
-  expect(await auth.workspace(ctx.identity, secret())).not.toBe(first);
-  const invitation = await manageAccount(
-    database,
-    'invite',
-    'second',
-    undefined,
-    now,
-  );
-  verifyAction('enroll');
-  const reply = await auth.handle(
-    '/api/auth/enroll',
-    'POST',
+  expect(again).toBe(key);
+  const state = await station.load(key);
+  expect(state.draft.name).toBe('');
+  await station.mutate(
     {
-      token: 'token' in invitation ? invitation.token : '',
-      password,
-      turnstile: 't',
+      operation: 'saveDraft',
+      revision: state.revision,
+      draft: { ...state.draft, name: 'Saved draft' },
     },
-    context,
+    key,
   );
-  const second = await auth.workspace(
-    (await auth.session(reply.token))!,
-    ctx.browser,
-  );
-  expect(second).not.toBe(first);
-  expect((await station.load(first)).draft.name).toBe('');
+  const second = await mint();
+  await expect(
+    auth.workspace(first.identity, first.browser),
+  ).rejects.toMatchObject({ status: 401 });
+  const other = await signedIn(second.code, { ...context, browser: secret() });
+  expect(await auth.workspace(other.identity, other.browser)).not.toBe(key);
+  const rotated = await signedIn(second.code, first);
+  expect(await auth.workspace(rotated.identity, first.browser)).toBe(key);
+  expect((await station.load(key)).draft.name).toBe('Saved draft');
   expect((await station.load('old-anonymous')).draft.name).toBe('Anonymous');
 });
-it('applies atomic persistent limits to unknown users, per-user failures and page requests', async () => {
-  for (let n = 0; n < 5; n++)
-    await expect(login('unknown')).rejects.toMatchObject({ status: 401 });
-  const other = await new PostgresAuth(
-    database,
-    origin,
-    auth.config,
-    () => now,
-    send,
-  ).initialize();
-  await expect(
-    other.handle(
-      '/api/auth/login',
-      'POST',
-      { username: 'unknown', password, turnstile: 't' },
-      context,
-    ),
-  ).rejects.toMatchObject({ status: 429, retryAfter: 900 });
-  for (let n = 5; n < 20; n++)
-    await expect(
-      login('unknown', password, { ...context, ip: '192.0.2.' + (n + 2) }),
-    ).rejects.toMatchObject({ status: 401 });
-  await expect(
-    login('unknown', password, { ...context, ip: '192.0.2.99' }),
-  ).rejects.toMatchObject({ status: 429 });
-  const pages = await Promise.allSettled(
-    Array.from({ length: 125 }, () => auth.ratePage('198.51.100.1')),
-  );
-  expect(pages.filter((r) => r.status === 'fulfilled')).toHaveLength(120);
-  now = new Date(now.getTime() + 900001);
-  await expect(login('unknown')).rejects.toMatchObject({ status: 401 });
-});
-it('requires recent authentication for changes and revokes all sessions on password change or disabling', async () => {
-  const ctx = await signedIn();
-  const other = await login();
-  now = new Date(now.getTime() + 300001);
-  await expect(
-    auth.handle(
-      '/api/auth/password',
-      'POST',
-      { password: 'new valid password phrase' },
-      ctx,
-    ),
-  ).rejects.toMatchObject({ status: 403 });
-  await auth.handle(
-    '/api/auth/reauthenticate',
-    'POST',
-    { username: 'staff', password, turnstile: 't' },
-    ctx,
-  );
-  const changed = await auth.handle(
-    '/api/auth/password',
-    'POST',
-    { password: 'new valid password phrase' },
-    ctx,
-  );
-  expect(await auth.session(ctx.token)).toBeUndefined();
-  expect(await auth.session(other.token)).toBeUndefined();
-  expect(await auth.session(changed.token)).toBeTruthy();
-  await manageAccount(database, 'disable', 'staff', undefined, now);
-  expect(await auth.session(changed.token)).toBeUndefined();
-});
-it('binds passkey challenges to browser, session and flow, consumes failures once, and expires challenges', async () => {
-  const ctx = await signedIn();
-  const options = await auth.handle(
-    '/api/auth/passkey/login/options',
-    'POST',
-    { turnstile: 't' },
-    context,
-  );
-  expect(options.challenge).toBeTruthy();
-  const challenge = await database.authChallenge.findFirstOrThrow();
-  expect(challenge.tokenHash).toBe(digest(options.challenge!));
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      { response: {} },
-      { ...context, browser: secret(), challenge: options.challenge },
-    ),
-  ).rejects.toMatchObject({ status: 401 });
-  expect(await database.authChallenge.count()).toBe(1);
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      { response: {} },
-      { ...context, challenge: options.challenge },
-    ),
-  ).rejects.toBeInstanceOf(AuthError);
-  expect(await database.authChallenge.count()).toBe(0);
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      { response: {} },
-      { ...context, challenge: options.challenge },
-    ),
-  ).rejects.toBeInstanceOf(AuthError);
-  const registration = await auth.handle(
-    '/api/auth/passkey/register/options',
-    'POST',
-    {},
-    ctx,
-  );
-  const body = registration.body as {
-    options: {
-      authenticatorSelection: { residentKey: string; userVerification: string };
-    };
-  };
-  expect(body.options.authenticatorSelection).toMatchObject({
-    residentKey: 'required',
-    userVerification: 'required',
+
+it('logs out only this device and cleans up expired rows in small batches', async () => {
+  const { code } = await mint();
+  const a = await signedIn(code);
+  const b = await signedIn(code, { ...context, browser: secret() });
+  expect(await auth.handle('/api/auth/logout', 'POST', {}, a)).toMatchObject({
+    clearSession: true,
   });
-  now = new Date(now.getTime() + 300001);
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/register/verify',
-      'POST',
-      { response: {}, name: 'Phone' },
-      { ...ctx, challenge: registration.challenge },
-    ),
-  ).rejects.toBeInstanceOf(AuthError);
-});
-it('cleans expired auth records in bounded batches without removing station data', async () => {
-  await signedIn();
+  expect(await auth.session(a.token)).toBeUndefined();
+  expect(await auth.session(b.token)).toBeTruthy();
+  await mint();
   await database.authRate.createMany({
     data: Array.from({ length: 150 }, (_, n) => ({
       key: 'old-' + n,
@@ -419,95 +271,38 @@ it('cleans expired auth records in bounded batches without removing station data
   expect(
     await database.authRate.count({ where: { key: { startsWith: 'old-' } } }),
   ).toBe(50);
-  expect(await database.authUser.count()).toBe(1);
+  // The revoked code has no sessions left; the active one stays.
+  expect(await database.accessCode.count()).toBe(1);
+  now = new Date(now.getTime() + 8 * 3600000);
+  await auth.cleanup();
+  expect(await database.accessCode.count()).toBe(0);
 });
 
-it('registers and authenticates signed passkeys, updates counters, rejects origin/UV/replay errors and removes credentials', async () => {
-  const { testAuthenticator } = await import('../tests/helpers/webauthn');
-  const ctx = await signedIn();
-  const authenticator = testAuthenticator(origin.hostname, origin.origin);
-  const options = await auth.handle(
-    '/api/auth/passkey/register/options',
-    'POST',
-    {},
-    ctx,
-  );
-  const challenge = (options.body as { options: { challenge: string } }).options
-    .challenge;
-  const registration = authenticator.registration(challenge);
-  await auth.handle(
-    '/api/auth/passkey/register/verify',
-    'POST',
-    { response: registration, name: 'Phone' },
-    { ...ctx, challenge: options.challenge },
-  );
-  expect(await database.authPasskey.count()).toBe(1);
-  async function attempt(requestOrigin?: string, verified = true) {
-    const opt = await auth.handle(
-      '/api/auth/passkey/login/options',
-      'POST',
-      { turnstile: 't' },
-      context,
-    );
-    const response = authenticator.authentication(
-      (opt.body as { options: { challenge: string } }).options.challenge,
-      1,
-      requestOrigin,
-      verified,
-    );
-    const request = { response };
-    const flow = { ...context, challenge: opt.challenge };
-    return { request, flow };
-  }
-  const badOrigin = await attempt('https://attacker.test');
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      badOrigin.request,
-      badOrigin.flow,
+it('the migration reattaches a browser’s workspace only when it had one account', async () => {
+  const sql = readFileSync(
+    new URL(
+      '../prisma/migrations/20261017000000_access_codes/migration.sql',
+      import.meta.url,
     ),
-  ).rejects.toMatchObject({ status: 401 });
-  const noUV = await attempt(origin.origin, false);
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      noUV.request,
-      noUV.flow,
-    ),
-  ).rejects.toMatchObject({ status: 401 });
-  const valid = await attempt();
-  const result = await auth.handle(
-    '/api/auth/passkey/login/verify',
-    'POST',
-    valid.request,
-    valid.flow,
+    'utf8',
   );
-  expect((await auth.session(result.token))?.user.username).toBe('staff');
-  expect((await database.authPasskey.findFirstOrThrow()).counter).toBe(1n);
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      valid.request,
-      valid.flow,
-    ),
-  ).rejects.toMatchObject({ status: 401 });
-  const cloned = await attempt();
-  await expect(
-    auth.handle(
-      '/api/auth/passkey/login/verify',
-      'POST',
-      cloned.request,
-      cloned.flow,
-    ),
-  ).rejects.toMatchObject({ status: 401 });
-  await auth.handle(
-    '/api/auth/passkey/remove',
-    'POST',
-    { id: authenticator.id },
-    ctx,
+  const seed = sql.slice(
+    sql.indexOf('INSERT INTO access_workspaces'),
+    sql.indexOf(';', sql.indexOf('INSERT INTO access_workspaces')),
   );
-  expect(await database.authPasskey.count()).toBe(0);
+  const rows = await database
+    .$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'CREATE TEMP TABLE auth_workspaces (user_id TEXT, browser_hash TEXT, workspace_key TEXT) ON COMMIT DROP',
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO auth_workspaces VALUES ('u1', 'single', 'w1'), ('u1', 'shared', 'w2'), ('u2', 'shared', 'w3')`,
+      );
+      await tx.$executeRawUnsafe(seed);
+      const result = await tx.accessWorkspace.findMany();
+      throw Object.assign(new Error('rollback'), { result });
+    })
+    .catch((error) => (error as { result: unknown }).result);
+  expect(rows).toEqual([{ browserHash: 'single', workspaceKey: 'w1' }]);
+  expect(await database.accessWorkspace.count()).toBe(0);
 });

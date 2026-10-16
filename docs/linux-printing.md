@@ -35,7 +35,7 @@ npm ci
 npm run db:deploy
 npm run build
 npm run build:printer
-npm run auth -- bootstrap fiona
+npm run access -- mint
 ```
 
 Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https://orders.example.com`, the real CUPS queue, local database URL, fixed capture cutoff, `ORDER_PAD_PROXY=cloudflare` and both Turnstile keys. Keep the secret key out of Git and browser builds. The widget must allow the exact final hostname. `npm run start:printer` loads `.env`; exported shell variables override it. Start the app from the repository root.
@@ -43,7 +43,7 @@ Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https:
 ### Cloudflare Tunnel and HTTPS
 
 1. Install `cloudflared` on the same Linux host using [Cloudflare’s installation instructions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/).
-2. Authenticate the connector and create a named tunnel. Use the final subdomain consistently; passkeys are bound to it.
+2. Authenticate the connector and create a named tunnel. Use the final subdomain consistently; Turnstile and the session cookies are bound to it.
 
    ```sh
    cloudflared tunnel login
@@ -62,19 +62,17 @@ Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https:
    ```
 
 6. Once validated, install the connector as a system service using Cloudflare’s [Linux service instructions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/as-a-service/linux/). Use the explicit configuration path; the credentials/configuration must be readable by the service identity. Keep the Node service managed separately by systemd.
-7. Test the public URL from a device with Tailscale disabled. Unauthenticated `/` and `/queue/` redirect to login; `/api/printer`, `/api/station`, `/api/orders/events` and all operational POSTs require a session. Sign in with Turnstile, add a passkey under **Account**, verify passkey login, and keep the queue open through several heartbeat intervals.
+7. Test the public URL from a device with Tailscale disabled. Unauthenticated `/` and `/queue/` redirect to login; `/api/printer`, `/api/station`, `/api/orders/events` and all operational POSTs require a session. Sign in with the current access code and Turnstile, and keep the queue open through several heartbeat intervals.
 
 `ORDER_PAD_PROXY=cloudflare` trusts a valid `CF-Connecting-IP` only from the loopback connector. Arbitrary `X-Forwarded-For` values are ignored. Missing or malformed Cloudflare client-IP headers reject public authentication requests. Local processes and connector configuration are trusted host administration; do not bind the app to a public interface. No inbound router port forwarding is required. Never expose Postgres 5432 or CUPS 631 through a tunnel.
 
 For an alternative trusted local HTTPS proxy, including Tailscale Serve, use `ORDER_PAD_PROXY=direct` and configure Turnstile for that exact hostname too. Login remains mandatory. Direct mode rate-limits the proxy’s socket address, so Cloudflare mode is preferred for this deployment.
 
-### Enrollment, recovery and upgrading
+### Access codes and upgrading
 
-Create the first account with `npm run auth -- bootstrap <username>` after building the service and migrating PostgreSQL. The command prompts without echo and refuses once accounts exist. To enroll someone else, run `npm run auth -- invite <username>` and hand them its 24-hour single-use code or URL in person. URLs use fragments; no messaging provider is needed. All users can order, print and manage the queue; none can issue enrollment codes through the website.
+There are no personal accounts. At the start of each shift, run `npm run access -- mint` on the station. It shows a code such as `K7QM4-XTD9A` in the terminal and prints it on a slip from the receipt printer; post it where staff can see it. The code works on any staff device for 8 hours, and every session ends when it does. Minting again voids the old code and signs out every device that used it, so do that whenever a code may have been seen by someone outside the staff. `npm run access -- revoke` ends access without a new code (for example at closing), and `npm run access -- status` shows whether a code is active without revealing it. If the slip doesn’t print, the terminal says so and the code is still valid. Nobody can mint codes through the website; see [README access codes](../README.md#access-codes-and-sign-in).
 
-`npm run auth -- recover <username>` immediately removes existing credentials/passkeys and sessions and issues a 30-minute reset code. `disable`, `enable`, `list` and `revoke` are terminal-only operations; see [README accounts](../README.md#accounts-and-sign-in).
-
-Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, bootstrap the first user, and restart the managed service. Preserve the capture cutoff. The authentication migration leaves old order history and anonymous workspaces intact without automatically assigning them to a user. The new domain receives new browser cookies and empty user/browser workspaces. Existing-domain cookies never transfer automatically. Re-enroll passkeys after a hostname change.
+Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, mint an access code, and restart the managed service. Preserve the capture cutoff. Upgrading from personal accounts deletes accounts, passwords and passkeys; browsers that only one account used keep that account’s workspace, and other workspaces stay in the database untouched. The new domain receives new browser cookies and empty workspaces. Existing-domain cookies never transfer automatically.
 
 On the S10e, open the configured public HTTPS URL and sign in. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
 
@@ -161,11 +159,11 @@ These are physical acceptance steps, not claims that this interaction update has
 
 These remain deployment/device checks; automated fixtures do not establish them.
 
-1. With Tailscale disabled, verify public HTTPS, HTTP-to-HTTPS redirect, correct Host forwarding and working Turnstile for password/passkey login, enrollment and recovery.
+1. With Tailscale disabled, verify public HTTPS, HTTP-to-HTTPS redirect, correct Host forwarding and working Turnstile for access-code sign-in.
 2. Before login and after logout, check protected pages, printer/backend APIs and SSE deny access. Confirm no protected HTML/API data is returned from browser or Cloudflare caches, including offline navigation and browser Back.
-3. Enroll a phone passkey, sign out and sign back in with device verification. Check username/password fallback. Confirm different users in one browser and one user on two devices have independent drafts/recovery.
-4. Check 16-hour expiry and local disable/recovery revocation, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
-5. Exercise local bootstrap refusal after first user, invite/recovery expiration and replay rejection, and account password/passkey management. Verify login rate-limit feedback and temporary recovery after cooldown. Keep station data backed up.
+3. Sign in on two devices with the same access code and confirm they have independent drafts/recovery. Mint a new code and confirm both devices return to sign-in, the old code is refused and the new code restores each device’s own draft.
+4. Check 8-hour code expiry and `npm run access -- revoke`, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
+5. Run `npm run access -- mint` with the printer ready and confirm the slip prints once, cuts cleanly and the code, expiry time and note are legible; then confirm a mint with the printer unplugged reports the failure and the terminal code still signs in. Verify wrong-code rate-limit feedback and recovery after cooldown. Keep station data backed up.
 
 ## Still to test
 
