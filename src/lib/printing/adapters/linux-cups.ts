@@ -1,3 +1,4 @@
+import { authFetch } from '../../auth/client';
 import type { OrderTicket } from '../../tickets/ticket';
 import type { PrintAttemptResult, TicketPrinter } from '../port';
 
@@ -9,7 +10,7 @@ export interface LinuxPrinterStatus {
 
 export async function linuxPrinterStatus(): Promise<LinuxPrinterStatus> {
   try {
-    const response = await fetch('/api/printer', {
+    const response = await authFetch('/api/printer', {
       cache: 'no-store',
       signal: AbortSignal.timeout(15000),
     });
@@ -40,7 +41,7 @@ export class LinuxCupsPrinter implements TicketPrinter {
   readonly label = 'Star USB via Linux CUPS';
   // Native fetch needs its global receiver when called in a browser.
   constructor(
-    private send: typeof fetch = (input, init) => fetch(input, init),
+    private send: typeof fetch = (input, init) => authFetch(input, init),
   ) {}
 
   async print(
@@ -61,6 +62,13 @@ export class LinuxCupsPrinter implements TicketPrinter {
         data?.attemptId === undefined &&
         data?.result === undefined
       ) {
+        if (response.status === 401 && data?.code === 'authentication-required')
+          return {
+            status: 'failed',
+            code: 'permission-denied',
+            simulated: false,
+            message: 'Sign in again. No job was submitted.',
+          };
         if (response.status === 409)
           return {
             status: 'failed',

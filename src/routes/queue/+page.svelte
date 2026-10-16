@@ -286,7 +286,10 @@
           height="44"
         /></a
       ><span class="header-rule" aria-hidden="true"></span>
-      <h1>Now Scooping</h1>
+      <div>
+        <h1>Now Scooping</h1>
+        <a class="queue-account" href="/account/">Account</a>
+      </div>
     </div>
     {#if trackingEnabled !== false}<dl
         class="queue-metrics"
@@ -388,6 +391,13 @@
 </div>
 
 <style>
+  .queue-account {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    color: inherit;
+    font-size: 13px;
+  }
   .queue-app {
     height: 100%;
     display: flex;

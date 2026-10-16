@@ -1,10 +1,11 @@
+import { authFetch } from '../auth/client';
 import type { QueueOrder } from './order';
 import { parseQueueOrders, parseChange, type OrderChange } from './live';
 
 export async function fetchOrders(
   signal?: AbortSignal,
 ): Promise<readonly QueueOrder[]> {
-  const response = await fetch('/api/orders', {
+  const response = await authFetch('/api/orders', {
     cache: 'no-store',
     signal: signal ?? AbortSignal.timeout(10000),
   });
@@ -19,7 +20,7 @@ export async function changeOrderStatus(
   id: string,
   action: 'done' | 'reopen',
 ): Promise<OrderChange> {
-  const response = await fetch(
+  const response = await authFetch(
     `/api/orders/${encodeURIComponent(id)}/${action}`,
     {
       method: 'POST',

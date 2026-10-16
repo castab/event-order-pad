@@ -850,6 +850,7 @@
             ></button
           >
           <div id="order-tools-panel" hidden={!toolsOpen}>
+            <a class="queue-link" href="/account/">Account</a>
             {#if trackingEnabled}<a class="queue-link" href="/queue/"
                 >Now Scooping</a
               >{/if}

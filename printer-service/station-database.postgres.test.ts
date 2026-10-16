@@ -1,3 +1,4 @@
+import { testAuth } from '../tests/helpers/auth';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { createOrderDatabase, PostgresOrderRepository } from './order-database';
 import { PostgresStationRepository } from './station-database';
@@ -230,6 +231,7 @@ it('runs the complete API client/session flow against Postgres and recovers thro
   const submit = vi.spyOn(cups, 'submit').mockResolvedValue('OrderPad-3');
   const origin = new URL('http://127.0.0.1:0');
   const server = createApp({
+    auth: testAuth(),
     origin,
     port: 4174,
     root: '/tmp',

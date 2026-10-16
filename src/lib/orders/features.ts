@@ -1,8 +1,9 @@
+import { authFetch } from '../auth/client';
 export const trackingDisabledCode = 'ORDER_TRACKING_DISABLED';
 
 export async function fetchTrackingEnabled(
   signal?: AbortSignal,
-  send: typeof fetch = (input, init) => fetch(input, init),
+  send: typeof fetch = (input, init) => authFetch(input, init),
 ): Promise<boolean> {
   const response = await send('/api/features', {
     cache: 'no-store',

@@ -1,3 +1,4 @@
+import { testAuth } from '../tests/helpers/auth';
 import { afterEach, expect, it, vi } from 'vitest';
 import { request } from 'node:http';
 import { mkdtemp, rm, writeFile, realpath, mkdir } from 'node:fs/promises';
@@ -12,6 +13,7 @@ import {
 } from '../tests/helpers/order-repository';
 import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
+import { AuthError, authPosts, type Authentication } from './auth';
 import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 
@@ -19,7 +21,11 @@ const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
 });
-async function app(trackingEnabled = true) {
+async function app(
+  trackingEnabled = true,
+  authentication: Authentication = testAuth(),
+  proxy: 'direct' | 'cloudflare' = 'direct',
+) {
   const directory = await mkdtemp(join(tmpdir(), 'order-pad-http-'));
   closers.push(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, 'index.html'), '<h1>Order Pad</h1>');
@@ -41,6 +47,8 @@ async function app(trackingEnabled = true) {
   await writeFile(join(directory, 'queue/index.html'), '<h1>Build queue</h1>');
   const station = new MemoryStationRepository(repository);
   const server = createApp({
+    auth: authentication,
+    proxy,
     origin: new URL('https://mint.test'),
     port: 4174,
     root: await realpath(directory),
@@ -63,41 +71,46 @@ async function app(trackingEnabled = true) {
     path: string,
     body?: string,
     headers: Record<string, string> = {},
+    method = body === undefined ? 'GET' : 'POST',
   ) =>
-    new Promise<{ status: number; body: string; cache: string | undefined }>(
-      (resolve, reject) => {
-        const req = request(
-          {
-            host: '127.0.0.1',
-            port,
-            path,
-            method: body === undefined ? 'GET' : 'POST',
-            headers: {
-              Host: 'mint.test',
-              ...(cookie ? { Cookie: cookie } : {}),
-              ...headers,
-            },
+    new Promise<{
+      status: number;
+      body: string;
+      cache: string | undefined;
+      headers: import('node:http').IncomingHttpHeaders;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path,
+          method,
+          headers: {
+            Host: 'mint.test',
+            ...(cookie ? { Cookie: cookie } : {}),
+            ...headers,
           },
-          (res) => {
-            if (res.headers['set-cookie'])
-              cookie = res.headers['set-cookie'][0].split(';')[0];
-            let response = '';
-            res.on('data', (chunk) => {
-              response += chunk.toString();
-            });
-            res.on('end', () =>
-              resolve({
-                status: res.statusCode!,
-                body: response,
-                cache: res.headers['cache-control'],
-              }),
-            );
-          },
-        );
-        req.on('error', reject);
-        req.end(body);
-      },
-    );
+        },
+        (res) => {
+          if (res.headers['set-cookie'])
+            cookie = res.headers['set-cookie'][0].split(';')[0];
+          let response = '';
+          res.on('data', (chunk) => {
+            response += chunk.toString();
+          });
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode!,
+              body: response,
+              cache: res.headers['cache-control'],
+              headers: res.headers,
+            }),
+          );
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
   return { print, check, send, orders, server, port, directory, station };
 }
 const payload = JSON.stringify({
@@ -713,8 +726,181 @@ it('issues a private workspace cookie and rejects missing-cookie writes without 
   );
   const foreign = await send('/api/print', payload, {
     ...headers,
-    Cookie: '__Host-order-pad-workspace=' + 'f'.repeat(64),
+    Cookie: '__Host-order-pad-browser=' + 'f'.repeat(64),
   });
   expect(foreign.status).toBe(409);
+  expect(print).not.toHaveBeenCalled();
+});
+
+it('requires authentication for every operational route and protected page, including HEAD', async () => {
+  const auth = testAuth({ session: async () => undefined });
+  const { send, print, station, check } = await app(true, auth);
+  const load = vi.spyOn(station, 'load');
+  for (const path of ['/', '/queue/', '/account/']) {
+    const reply = await send(path);
+    expect(reply.status).toBe(303);
+    expect(reply.headers.location).toBe('/login/');
+    expect(reply.cache).toBe('no-store');
+    expect((await send(path, undefined, {}, 'HEAD')).status).toBe(303);
+  }
+  for (const path of [
+    '/api/station',
+    '/api/database',
+    '/api/printer',
+    '/api/features',
+    '/api/orders',
+    '/api/orders/events',
+  ]) {
+    const reply = await send(path);
+    expect(reply.status).toBe(401);
+    expect(JSON.parse(reply.body).code).toBe('authentication-required');
+  }
+  for (const path of [
+    '/api/print',
+    '/api/station',
+    '/api/orders',
+    '/api/orders/id/done',
+    '/api/orders/id/reopen',
+  ])
+    expect((await send(path, '{}', headers)).status).toBe(401);
+  expect(load).not.toHaveBeenCalled();
+  expect(print).not.toHaveBeenCalled();
+  expect(check).not.toHaveBeenCalled();
+});
+it('guards every authentication POST and provides no HTTP account-administration route', async () => {
+  const handle = vi.fn(testAuth().handle);
+  const { send } = await app(true, testAuth({ handle }));
+  for (const path of authPosts) {
+    expect((await send(path, '{}')).status).toBe(403);
+    expect(
+      (await send(path, '{}', { ...headers, Origin: 'https://foreign.test' }))
+        .status,
+    ).toBe(403);
+  }
+  expect(handle).not.toHaveBeenCalled();
+  expect((await send('/api/auth/bootstrap', '{}', headers)).status).toBe(404);
+});
+it('sets secure authentication cookies and returns rate-limit Retry-After headers', async () => {
+  const auth = testAuth({
+    handle: async () => ({
+      body: { ok: true },
+      token: 'a'.repeat(64),
+      challenge: 'b'.repeat(64),
+    }),
+  });
+  const { send } = await app(true, auth);
+  const reply = await send('/api/auth/login', '{}', headers);
+  const cookies = reply.headers['set-cookie']!;
+  expect(
+    cookies.some(
+      (c) =>
+        c.startsWith('__Host-order-pad-session=') &&
+        c.includes('Max-Age=57600'),
+    ),
+  ).toBe(true);
+  for (const cookie of cookies)
+    expect(cookie).toMatch(/Path=\/; Secure; HttpOnly; SameSite=Strict/);
+  auth.ratePage = async () => {
+    throw new AuthError(429, 'Too many attempts.', 60);
+  };
+  const limited = await send('/login/');
+  expect(limited.status).toBe(429);
+  expect(limited.headers['retry-after']).toBe('60');
+});
+it('fails closed when authentication persistence fails and rejects a forged tunnel hop', async () => {
+  const auth = testAuth({
+    session: async () => {
+      throw new Error('database down');
+    },
+  });
+  const { send, print } = await app(true, auth);
+  expect((await send('/')).status).toBe(503);
+  expect((await send('/api/print', '{}', headers)).status).toBe(503);
+  expect(print).not.toHaveBeenCalled();
+  const cloud = await app(true, testAuth(), 'cloudflare');
+  expect((await cloud.send('/login/')).status).toBe(403);
+  expect(
+    (
+      await cloud.send('/api/auth/login', '{}', {
+        ...headers,
+        'X-Forwarded-For': '192.0.2.1',
+      })
+    ).status,
+  ).toBe(403);
+  expect(
+    (
+      await cloud.send('/api/auth/login', '{}', {
+        ...headers,
+        'CF-Connecting-IP': '192.0.2.1',
+      })
+    ).status,
+  ).toBe(200);
+});
+it('does not permit encoded path separators to bypass the protected-page gate', async () => {
+  const { send } = await app(
+    true,
+    testAuth({ session: async () => undefined }),
+  );
+  for (const path of ['/_app/%2f..%2findex.html', '/login/%2f..%2findex.html'])
+    expect((await send(path)).status).toBe(400);
+});
+
+it('authorizes inline hydration scripts with per-response CSP nonces and never caches HTML', async () => {
+  const { send, directory } = await app();
+  await writeFile(
+    join(directory, 'index.html'),
+    '<script>window.test=true</script><script src="/_app/test.js"></script>',
+  );
+  const first = await send('/');
+  const second = await send('/');
+  const nonce = /<script nonce="([^"]+)"/.exec(first.body)![1];
+  expect(first.headers['content-security-policy']).toContain(
+    "'nonce-" + nonce + "'",
+  );
+  expect(first.headers['content-security-policy']).not.toContain(
+    "script-src 'unsafe-inline'",
+  );
+  expect(second.body).not.toContain(nonce);
+  expect(first.cache).toBe('no-store');
+});
+it('revokes an open SSE subscription before sending the next order snapshot', async () => {
+  const identity = (await testAuth().session())!;
+  let valid = true;
+  const { port, orders } = await app(
+    true,
+    testAuth({ session: async () => (valid ? identity : undefined) }),
+  );
+  const client = await stream(port);
+  await client.next(1);
+  const closed = new Promise<void>((resolve) =>
+    client.response.once('close', resolve),
+  );
+  valid = false;
+  await orders.upsert(
+    sampleTicket('after-revocation', '2026-10-12T19:00:00.000Z'),
+  );
+  await closed;
+  expect(client.events).toHaveLength(1);
+});
+
+it('rejects an old tab’s expected user before resolving or mutating the new account’s workspace', async () => {
+  const { send, station, print } = await app();
+  const workspace = vi.spyOn(station, 'load');
+  expect(
+    (
+      await send('/api/station', undefined, {
+        'X-Order-Pad-User': 'different-user',
+      })
+    ).status,
+  ).toBe(401);
+  expect(
+    (
+      await send('/api/print', payload, {
+        ...headers,
+        'X-Order-Pad-User': 'different-user',
+      })
+    ).status,
+  ).toBe(401);
+  expect(workspace).not.toHaveBeenCalled();
   expect(print).not.toHaveBeenCalled();
 });

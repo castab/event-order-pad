@@ -9,11 +9,19 @@ export class OrderStream {
   private closed = false;
   private unsubscribe?: () => void;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private authorizing = false;
+  private expiry?: ReturnType<typeof setTimeout>;
   private stalled?: ReturnType<typeof setTimeout>;
   constructor(
     private response: ServerResponse,
     private removed: () => void,
+    private authorized: () => Promise<boolean> = async () => true,
+    expiresIn?: number,
   ) {
+    if (expiresIn !== undefined) {
+      this.expiry = setTimeout(this.dispose, expiresIn);
+      this.expiry.unref();
+    }
     response.on('close', this.dispose);
     response.on('error', this.dispose);
     response.on('drain', this.drain);
@@ -41,8 +49,13 @@ export class OrderStream {
     this.flush();
     if (this.closed) return;
     this.heartbeat = setInterval(() => {
-      if (!this.blocked && !this.closed)
-        this.write('event: ping\ndata: {}\n\n');
+      void this.authorized()
+        .then((valid) => {
+          if (!valid) this.dispose();
+          else if (!this.blocked && !this.closed)
+            this.write('event: ping\ndata: {}\n\n');
+        })
+        .catch(this.dispose);
     }, 15000);
     this.heartbeat.unref();
   }
@@ -61,10 +74,31 @@ export class OrderStream {
     }
   }
   private flush() {
-    if (!this.started || this.closed || this.blocked || !this.pending) return;
-    const chunk = this.pending;
-    this.pending = undefined;
-    this.write(chunk);
+    if (
+      !this.started ||
+      this.closed ||
+      this.blocked ||
+      !this.pending ||
+      this.authorizing
+    )
+      return;
+    this.authorizing = true;
+    void this.authorized()
+      .then((valid) => {
+        if (!valid) {
+          this.dispose();
+          return;
+        }
+        if (this.closed || this.blocked || !this.pending) return;
+        const chunk = this.pending;
+        this.pending = undefined;
+        this.write(chunk);
+      })
+      .catch(this.dispose)
+      .finally(() => {
+        this.authorizing = false;
+        this.flush();
+      });
   }
   private drain = () => {
     clearTimeout(this.stalled);
@@ -75,6 +109,7 @@ export class OrderStream {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.heartbeat);
+    clearTimeout(this.expiry);
     clearTimeout(this.stalled);
     this.unsubscribe?.();
     this.pending = undefined;

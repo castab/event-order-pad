@@ -5,7 +5,10 @@ import { OrderStream } from './order-stream';
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
-function setup() {
+function setup(
+  authorized: () => Promise<boolean> = async () => true,
+  expiresIn?: number,
+) {
   const response = Object.assign(new EventEmitter(), {
     write: vi.fn((_chunk: string) => true),
     writeHead: vi.fn(),
@@ -17,6 +20,8 @@ function setup() {
   const stream = new OrderStream(
     response as unknown as ServerResponse,
     removed,
+    authorized,
+    expiresIn,
   );
   const snapshot = (revision: number) =>
     stream.snapshot({
@@ -26,10 +31,13 @@ function setup() {
     });
   return { stream, response, unsubscribe, removed, snapshot };
 }
-it('sets streaming headers, sends initial/latest data, retry and 15-second heartbeats', () => {
+it('sets streaming headers, sends initial/latest data, retry and 15-second heartbeats', async () => {
   const s = setup();
   s.snapshot(0);
   s.stream.start(s.unsubscribe);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
   expect(s.response.writeHead).toHaveBeenCalledWith(
     200,
     expect.objectContaining({
@@ -42,7 +50,7 @@ it('sets streaming headers, sends initial/latest data, retry and 15-second heart
     'retry: 3000\n\n',
     expect.stringContaining('event: orders\n'),
   ]);
-  vi.advanceTimersByTime(15000);
+  await vi.advanceTimersByTimeAsync(15000);
   expect(s.response.write).toHaveBeenLastCalledWith(
     'event: ping\ndata: {}\n\n',
   );
@@ -51,18 +59,26 @@ it('sets streaming headers, sends initial/latest data, retry and 15-second heart
   expect(s.removed).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });
-it('retains only the newest snapshot during backpressure and resumes on drain', () => {
+it('retains only the newest snapshot during backpressure and resumes on drain', async () => {
   const s = setup();
   s.snapshot(0);
   s.stream.start(s.unsubscribe);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
   s.response.write.mockReturnValueOnce(false);
   s.snapshot(1);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
   s.snapshot(2);
   s.snapshot(3);
   expect(s.response.write).toHaveBeenCalledTimes(3);
-  vi.advanceTimersByTime(15000);
+  await vi.advanceTimersByTimeAsync(15000);
   expect(s.response.write).toHaveBeenCalledTimes(3);
   s.response.emit('drain');
+  await Promise.resolve();
+  await Promise.resolve();
   expect(s.response.write).toHaveBeenLastCalledWith(
     expect.stringContaining('"revision":3'),
   );
@@ -96,5 +112,36 @@ it('handles disconnect before registration completes and isolates write errors',
   t.snapshot(0);
   expect(() => t.stream.start(t.unsubscribe)).not.toThrow();
   expect(t.unsubscribe).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('checks authorization before every snapshot and heartbeat, and closes on revocation or lookup failure', async () => {
+  const authorized = vi.fn(async () => true);
+  const s = setup(authorized);
+  s.stream.start(s.unsubscribe);
+  s.snapshot(0);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(s.response.write).toHaveBeenLastCalledWith(
+    expect.stringContaining('"revision":0'),
+  );
+  authorized.mockResolvedValueOnce(false);
+  s.snapshot(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(s.response.destroy).toHaveBeenCalledOnce();
+  expect(
+    s.response.write.mock.calls.some(([c]) => c.includes('"revision":1')),
+  ).toBe(false);
+  const t = setup(async () => {
+    throw new Error('database unavailable');
+  });
+  t.stream.start(t.unsubscribe);
+  await vi.advanceTimersByTimeAsync(15000);
+  expect(t.response.destroy).toHaveBeenCalledOnce();
+});
+it('closes exactly at session expiry and clears timers', async () => {
+  const s = setup(async () => true, 100);
+  s.stream.start(s.unsubscribe);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(s.response.destroy).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });

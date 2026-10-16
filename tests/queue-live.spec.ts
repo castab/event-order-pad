@@ -1,3 +1,4 @@
+import { testAuth } from './helpers/auth';
 import { test as base, expect } from '@playwright/test';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -33,6 +34,7 @@ const test = base.extend<{ service: Service }>({
     const station = new MemoryStationRepository(repository);
     const makeServer = () => {
       const server = createApp({
+        auth: testAuth(),
         origin,
         port: Number(origin.port),
         root,

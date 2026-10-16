@@ -1,3 +1,4 @@
+import { holdActivity } from '../auth/activity';
 import type { OrderTicket } from '../tickets/ticket';
 import {
   draftTicket,
@@ -36,7 +37,19 @@ function blockedNotice(error: unknown, failure: string) {
 /** Durable intent precedes every send. No implicit retries, including after reload. */
 export class PrintSession {
   state: SessionState = { phase: 'loading', attempts: [] };
-  private busy = false;
+  private active = false;
+  private releaseActivity?: () => void;
+  private get busy() {
+    return this.active;
+  }
+  private set busy(value: boolean) {
+    if (value && !this.active) this.releaseActivity = holdActivity();
+    if (!value && this.active) {
+      this.releaseActivity?.();
+      this.releaseActivity = undefined;
+    }
+    this.active = value;
+  }
   private draftWrites: Promise<void> = Promise.resolve();
   constructor(
     private store: TicketStore,
@@ -53,6 +66,7 @@ export class PrintSession {
   }
 
   async initialize(returned?: PrintReturn): Promise<void> {
+    const release = holdActivity();
     try {
       const saved = await this.store.load();
       const ticket = saved?.ticket;
@@ -109,6 +123,8 @@ export class PrintSession {
           'Database unavailable. Order editing and printing are paused until it reconnects. Nothing will be resent automatically.',
         ),
       });
+    } finally {
+      release();
     }
   }
 
@@ -122,23 +138,26 @@ export class PrintSession {
       return;
     const draft = parseDraft(value);
     this.update({ ...this.state, draft, savingDraft: true });
-    this.draftWrites = this.draftWrites.then(async () => {
-      if (this.state.phase === 'blocked') return;
-      try {
-        await this.store.saveDraft(draft);
-        if (this.state.draft === draft)
-          this.update({ ...this.state, savingDraft: false });
-      } catch (error) {
-        this.update({
-          ...this.state,
-          phase: 'blocked',
-          ...blockedNotice(
-            error,
-            'Could not save the order draft. Printing is paused until the database reconnects; the last saved draft returns automatically.',
-          ),
-        });
-      }
-    });
+    const release = holdActivity();
+    this.draftWrites = this.draftWrites
+      .then(async () => {
+        if (this.state.phase === 'blocked') return;
+        try {
+          await this.store.saveDraft(draft);
+          if (this.state.draft === draft)
+            this.update({ ...this.state, savingDraft: false });
+        } catch (error) {
+          this.update({
+            ...this.state,
+            phase: 'blocked',
+            ...blockedNotice(
+              error,
+              'Could not save the order draft. Printing is paused until the database reconnects; the last saved draft returns automatically.',
+            ),
+          });
+        }
+      })
+      .finally(release);
   }
 
   block(): void {

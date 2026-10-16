@@ -1,3 +1,4 @@
+import { testAuth } from './helpers/auth';
 import { test, expect } from '@playwright/test';
 import { realpath } from 'node:fs/promises';
 import { createApp } from '../printer-service/http';
@@ -10,7 +11,7 @@ import {
   testCaptureFrom,
 } from './helpers/order-repository';
 
-test('two anonymous browsers edit independently, serialize prints, and recover their own tickets', async ({
+test('two authenticated browsers edit independently, serialize prints, and recover their own tickets', async ({
   browser,
 }) => {
   const repository = new MemoryOrderRepository();
@@ -43,6 +44,7 @@ test('two anonymous browsers edit independently, serialize prints, and recover t
     return 'request id is OrderPad-' + submissions.length + ' (1 file(s))';
   };
   const server = createApp({
+    auth: testAuth(),
     origin,
     port: 4174,
     root: await realpath('build'),
@@ -76,7 +78,7 @@ test('two anonymous browsers edit independently, serialize prints, and recover t
     ).toBeVisible();
     const cookiesA = await a.cookies();
     const cookie = cookiesA.find(
-      (cookie) => cookie.name === '__Host-order-pad-workspace',
+      (cookie) => cookie.name === '__Host-order-pad-browser',
     )!;
     expect(cookie).toMatchObject({
       secure: true,
@@ -85,7 +87,7 @@ test('two anonymous browsers edit independently, serialize prints, and recover t
     });
     expect(
       (await b.cookies()).find(
-        (cookie) => cookie.name === '__Host-order-pad-workspace',
+        (cookie) => cookie.name === '__Host-order-pad-browser',
       )?.value,
     ).not.toBe(cookie.value);
     const configure = async (
