@@ -684,7 +684,7 @@ dt {
   }
 }
 
-/* Sign-in, enrollment, recovery and account screens (design/AUTH.md). The document
+/* Sign-in, enrollment, recovery and account screens. The document
    itself never scrolls, so each screen scrolls inside its own root. */
 .auth-page,
 .account-app {
