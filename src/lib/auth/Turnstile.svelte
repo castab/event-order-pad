@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { authRequest } from './client';
   interface TurnstileApi {
     render(element: HTMLElement, options: Record<string, unknown>): string;
@@ -15,13 +15,15 @@
   let error = $state('');
   let api: TurnstileApi | undefined;
   let widget: string | undefined;
-  let ready = $state(false);
   $effect(() => {
     void generation;
-    if (ready && widget && api) {
-      token = '';
-      api.reset(widget);
-    }
+    // Refresh only after submission, without tracking widget callbacks or bindings.
+    untrack(() => {
+      if (widget && api) {
+        token = '';
+        api.reset(widget);
+      }
+    });
   });
   onMount(() => {
     let stopped = false;
@@ -75,7 +77,6 @@
             error = 'Verification failed. Reload and try again.';
           },
         });
-        ready = true;
       } catch (failure) {
         if (!stopped) error = (failure as Error).message;
       }

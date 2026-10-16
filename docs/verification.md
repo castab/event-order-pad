@@ -2,6 +2,12 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Turnstile widget lifecycle — 2026-10-15
+
+Removed the reset immediately after widget creation. A successful token now stays ready for submission; subsequent attempts explicitly refresh the widget, with third-party callbacks and bound token updates excluded from reactive dependency tracking. A browser regression checks zero initial resets, token submission and exactly one refresh after rejection. PostgreSQL coverage explicitly checks the Siteverify endpoint, submitted token and visitor IP.
+
+The new browser check failed on the previous build because the widget reset before submission, then passed with the fix. All required checks passed in order: 30 PostgreSQL integration tests against a disposable PostgreSQL 18 database, volume persistence, type checks (zero errors/warnings), lint, 233 unit/HTTP tests, both builds and 145 Chromium runs. The temporary database container was removed. A deliberately invalid token sent through the public login API was rejected, and a direct Siteverify connectivity check returned HTTP 200 with `invalid-input-response`. No real account credentials were used, no sessions were created and no print was submitted. A successful widget challenge still requires the owner’s interactive browser; password recovery remains available through the local account CLI.
+
 ## Authentication page deployment fix — 2026-10-15
 
 The public tunnel reached the service, but `/login/` returned 404 because authentication pages were built as `login.html` while the service serves page directories with `index.html`. The root layout now builds all pages with trailing slashes, and missing static files report “Not found” instead of suggesting a CUPS failure. A regression check runs the actual Node HTTP server against the production build, covering login, enrollment, recovery and the authenticated account page.

@@ -129,6 +129,15 @@ it('requires correct Turnstile hostname/action and rejects outages and invalid t
       context,
     ),
   ).rejects.toMatchObject({ status: 400 });
+  expect(send).toHaveBeenCalledTimes(4);
+  const [url, request] = send.mock.calls[0];
+  expect(url).toBe('https://challenges.cloudflare.com/turnstile/v0/siteverify');
+  expect(request?.method).toBe('POST');
+  expect(JSON.parse(request!.body as string)).toEqual({
+    secret: 'secret',
+    response: 'verified-token',
+    remoteip: context.ip,
+  });
   expect(await database.authSession.count()).toBe(0);
 });
 it('enrolls a reserved username exactly once under concurrent redemption and survives lost replies', async () => {

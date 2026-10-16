@@ -15,9 +15,9 @@ async function widget(page: Page) {
       route.fulfill({
         contentType: 'application/javascript',
         body: `
-    (() => { let callback; window.turnstile = {
+    (() => { let callback; window.turnstileResets = 0; window.turnstile = {
       render: (_element, options) => { callback = options.callback; setTimeout(() => callback('test-token'), 1); return 'widget'; },
-      reset: () => setTimeout(() => callback && callback('test-token'), 1), remove: () => {}
+      reset: () => { window.turnstileResets++; setTimeout(() => callback && callback('test-token'), 1); }, remove: () => {}
     }; })();`,
       }),
   );
@@ -176,6 +176,32 @@ async function passwordLogin(page: Page) {
     .fill('a long enough password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 }
+test('Turnstile keeps a successful token until submission and refreshes once after rejection', async ({
+  page,
+}) => {
+  await page.clock.install();
+  const auth = await setup(page);
+  auth.limitPassword();
+  await page.goto('/login/');
+  await page.clock.runFor(1000);
+  const resets = () =>
+    page.evaluate(
+      () => (window as unknown as { turnstileResets: number }).turnstileResets,
+    );
+  await expect(
+    page.getByRole('button', { name: 'Sign in', exact: true }),
+  ).toBeEnabled();
+  expect(await resets()).toBe(0);
+  const submitted = page.waitForRequest('**/api/auth/login');
+  await passwordLogin(page);
+  expect((await submitted).postDataJSON().turnstile).toBe('test-token');
+  await expect(page.getByRole('alert')).toContainText('Too many attempts');
+  await page.clock.runFor(1000);
+  expect(await resets()).toBe(1);
+  await expect(
+    page.getByRole('button', { name: 'Sign in', exact: true }),
+  ).toBeEnabled();
+});
 test('password login, rate-limit feedback, logout and back navigation protect the builder', async ({
   page,
 }) => {
