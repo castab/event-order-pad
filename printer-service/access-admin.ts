@@ -24,7 +24,7 @@ export function newAccessCode(pick = randomInt): string {
     code += ACCESS_CODE_ALPHABET[pick(ACCESS_CODE_ALPHABET.length)];
   return code;
 }
-/** Terminal-only access control; minting voids the previous code and every session it opened. */
+/** Local CLI and tailnet admin access control; minting voids the previous code and every session it opened. */
 export async function manageAccess(
   database: PrismaClient,
   command: string,

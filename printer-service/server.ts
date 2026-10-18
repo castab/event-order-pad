@@ -8,6 +8,8 @@ import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
 import { PostgresAuth, parseAuthConfig } from './auth';
+import { manageAccess, printAccessSlip } from './access-admin';
+import { createAdminApp, listenAdmin } from './admin-http';
 import {
   parseTrackingEnabled,
   parseDatabaseUrl,
@@ -16,6 +18,7 @@ import {
   parseServiceOrigin,
   assertPrintPlatform,
   parseFont,
+  parseAdminConfig,
 } from './config';
 
 const printMode = parsePrintMode(process.env.ORDER_PAD_PRINT_MODE);
@@ -24,6 +27,7 @@ const origin = parseServiceOrigin(process.env.ORDER_PAD_ORIGIN, printMode);
 const port = Number(process.env.ORDER_PAD_PORT ?? '4174');
 if (!Number.isInteger(port) || port < 1024 || port > 65535)
   throw new Error('Invalid local port.');
+const adminConfig = parseAdminConfig(process.env, origin);
 const trackingEnabled = parseTrackingEnabled(
   process.env.ORDER_PAD_TRACKING_ENABLED,
 );
@@ -76,15 +80,32 @@ const server = createApp({
   proxy: authConfig.proxy,
 
   pdfOutput,
-}).listen(port, '127.0.0.1', () =>
-  console.log(
-    `Order Pad service (${printMode} output) listening on 127.0.0.1:${port}; open ${origin.origin}`,
-  ),
+});
+await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+console.log(
+  `Order Pad service (${printMode} output) listening on 127.0.0.1:${port}; open ${origin.origin}`,
 );
+// Started after the main port binds, so a second instance exits before touching the socket.
+const admin = adminConfig
+  ? createAdminApp({
+      origin: adminConfig.origin,
+      capability: adminConfig.capability,
+      access: (command) => manageAccess(database, command),
+      slip: (code, expiresAt) => printAccessSlip(output, code, expiresAt, font),
+      slipMode: printMode,
+    })
+  : undefined;
+if (admin && adminConfig) {
+  await listenAdmin(admin, adminConfig.socket);
+  console.log(
+    `Tailnet access-code admin listening on ${adminConfig.socket} for ${adminConfig.origin.origin}`,
+  );
+}
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     clearInterval(cleanup);
+    admin?.close();
     server.close(() => {
       void database.$disconnect();
     });

@@ -70,13 +70,90 @@ For an alternative trusted local HTTPS proxy, including Tailscale Serve, use `OR
 
 ### Access codes and upgrading
 
-There are no personal accounts. At the start of each shift, run `npm run access -- mint` on the station. It shows a code such as `K7QM4-XTD9A` in the terminal and prints it on a slip from the receipt printer; post it where staff can see it. The code works on any staff device for 8 hours, and every session ends when it does. Minting again voids the old code and signs out every device that used it, so do that whenever a code may have been seen by someone outside the staff. `npm run access -- revoke` ends access without a new code (for example at closing), and `npm run access -- status` shows whether a code is active without revealing it. If the slip doesn’t print, the terminal says so and the code is still valid. Nobody can mint codes through the website; see [README access codes](../README.md#access-codes-and-sign-in).
+There are no personal accounts. At the start of each shift, run `npm run access -- mint` on the station. It shows a code such as `K7QM4-XTD9A` in the terminal and prints it on a slip from the receipt printer; post it where staff can see it. The code works on any staff device for 8 hours, and every session ends when it does. Minting again voids the old code and signs out every device that used it, so do that whenever a code may have been seen by someone outside the staff. `npm run access -- revoke` ends access without a new code (for example at closing), and `npm run access -- status` shows whether a code is active without revealing it. If the slip doesn’t print, the terminal says so and the code is still valid. Nobody can mint codes through the public website; the owner can also use the tailnet admin page below. See [README access codes](../README.md#access-codes-and-sign-in).
 
 Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, mint an access code, and restart the managed service. Preserve the capture cutoff. Upgrading from personal accounts deletes accounts, passwords and passkeys; browsers that only one account used keep that account’s workspace, and other workspaces stay in the database untouched. The new domain receives new browser cookies and empty workspaces. Existing-domain cookies never transfer automatically.
 
 On the S10e, open the configured public HTTPS URL and sign in. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
 
 Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each signed-in user/browser pair has its own workspace, resolved by a persistent opaque browser cookie. Login restores that user’s draft, latest receipt and recovery state; switching users hides the previous user’s state. Separate profiles/devices edit independently; stale tabs within the same profile are blocked by revision checks. The header displays “New order” until the service allocates a number while committing print intent. Clearing cookies starts a new workspace without deleting old records.
+
+### Tailnet admin page
+
+This lets chosen devices mint, check and revoke codes from a browser on the station’s tailnet, without a terminal. Staff use the public Cloudflare hostname and are not on the tailnet. The page is served on a private Unix socket that cloudflared never forwards to. Tailscale Serve publishes it on a separate HTTPS port.
+
+Which devices may use the page is decided by the **tailnet policy**, not by the service. The policy grants a Tailscale app capability to devices with a tag. Serve forwards the requesting device’s capabilities to the service and deletes any copy a client sends. The service refuses every request without the configured capability, including requests from devices signed in as the owner. To grant the ability, tag the device; to take it away, remove the tag. Neither removes the device from the tailnet.
+
+1. In the Tailscale admin console, edit the policy file. Add the tag owner, a host alias for the station (`tailscale ip -4` on the station) and the grant, keeping your existing rules:
+
+   ```json
+   {
+     "tagOwners": {
+       "tag:order-pad-admin": ["autogroup:admin"]
+     },
+     "hosts": {
+       "order-pad-station": "100.101.102.103"
+     },
+     "grants": [
+       {
+         "src": ["tag:order-pad-admin"],
+         "dst": ["order-pad-station"],
+         "ip": ["tcp:443"],
+         "app": {
+           "fionasicecream.com/cap/order-pad-admin": [{}]
+         }
+       }
+     ]
+   }
+   ```
+
+   Merge these keys into the existing file rather than replacing it. The `ip` entry keeps HTTPS on the station reachable for tagged devices even if other rules are tightened later.
+
+2. Tag each device that may mint: **Machines → ⋯ → Edit ACL tags → `tag:order-pad-admin`**. A tagged device is owned by the tag instead of a user, and its key expiry is disabled by default. Rules that grant access by user no longer apply to it, so make sure the policy still gives it whatever else it needs. To revoke the ability, remove the tag the same way, or delete the grant to revoke it for every device. See Tailscale’s [tags](https://tailscale.com/kb/1068/tags) and [grants](https://tailscale.com/kb/1324/grants) documentation.
+3. Add to `.env`. Use the station’s full tailnet name, which `tailscale status --json` shows under `Self.DNSName` without the trailing dot:
+
+   ```sh
+   ORDER_PAD_ADMIN_ORIGIN=https://station.example.ts.net
+   ORDER_PAD_ADMIN_SOCKET=/run/order-pad/admin.sock
+   ORDER_PAD_ADMIN_CAPABILITY=fionasicecream.com/cap/order-pad-admin
+   ```
+
+4. Give the service a private runtime directory with `sudo systemctl edit order-pad.service`, then restart:
+
+   ```ini
+   [Service]
+   RuntimeDirectory=order-pad
+   RuntimeDirectoryMode=0700
+   ```
+
+   ```sh
+   npm run build:printer
+   sudo systemctl daemon-reload
+   sudo systemctl restart order-pad.service
+   journalctl -u order-pad.service -n 5   # “Tailnet access-code admin listening on /run/order-pad/admin.sock …”
+   ```
+
+   The service refuses to start if the directory is missing, belongs to another user or is readable by anyone else. It also refuses if a non-socket file sits at the path, if the admin settings are incomplete, or if the retired `ORDER_PAD_ADMIN_LOGINS` is still set. systemd removes the directory when the service stops.
+
+5. Publish the socket on the tailnet only, passing the capability through. Use `serve`, never `funnel`:
+
+   ```sh
+   sudo tailscale serve --bg --https=443 --accept-app-caps=fionasicecream.com/cap/order-pad-admin unix:/run/order-pad/admin.sock
+   tailscale serve status   # https://…ts.net (tailnet only) |-- / proxy unix:/run/order-pad/admin.sock
+   ```
+
+   Without `--accept-app-caps`, Serve forwards no capabilities and every device is refused. Never add the socket to the cloudflared ingress. This takes the station’s tailnet port 443, so do not also proxy the staff app there; staff use the public hostname. Serve sends `Host: localhost` to socket backends, so the service checks Serve’s `X-Forwarded-Host` against `ORDER_PAD_ADMIN_ORIGIN`.
+
+6. Acceptance:
+   - On a tagged device, `https://station.example.ts.net/` shows the status line without minting anything.
+   - On an untagged tailnet device, the same address returns “This device can’t manage access codes.”
+   - On a station terminal, `curl --unix-socket /run/order-pad/admin.sock -H 'X-Forwarded-Host: station.example.ts.net' http://localhost/api/admin/access` returns 403 because no capability header is present.
+   - With Tailscale disabled, the tailnet address is unreachable and the public hostname’s `/api/admin/access` returns 401 or 404.
+   - When signing staff out is safe, tap **Mint new code** on a tagged device and confirm. The page shows the code and expiry, one slip prints, the new code signs in on a staff device, and the old code is refused. **Revoke code** signs every device out.
+   - Remove the tag from that device and reload the page: it is refused, and the device stays on the tailnet.
+   - `journalctl -u order-pad.service` shows the tailnet address of the device that minted, and never the code.
+
+To turn the page off, run `sudo tailscale serve --https=443 off`, remove the three `ORDER_PAD_ADMIN_*` variables and restart the service; the policy grant can stay or go. Codes already minted stay valid until they expire or are revoked.
 
 ## Behavior and limits
 
@@ -107,7 +184,7 @@ This section is a dated record of the first station check, not current instructi
 - Advertised media includes `X72MMY30MM` through `X72MMY200MM` and `X72MMY2000MM`. `Custom.WIDTHxHEIGHT` is a template; this host uses an advertised fixed stock keyword with variable-length trimming.
 - Installed option spellings are `0Variable`, `0NoCutPage`, `1PartialCutDoc`. The service was corrected to select supported keywords rather than send assumed spellings. A regression test covers this Mint configuration.
 - Owner applied `printer-error-policy=abort-job`; confirmed through CUPS IPP.
-- Private HTTPS root: **https://m710q-a2d606c.tail94e893.ts.net**, proxying only to **127.0.0.1:4174**. Root was unused before setup. HTTPS app loading and `/api/printer` returning `ready: true` were verified.
+- Private HTTPS root: **https://station.example.ts.net**, proxying only to **127.0.0.1:4174**. Root was unused before setup. HTTPS app loading and `/api/printer` returning `ready: true` were verified.
 - `npm run check`, all **53 tests**, `npm run lint`, static build and printer build passed. HTTP tests require unsandboxed loopback access; sandboxed HTTP tests timed out.
 - A Git-ignored, machine-specific `start-printer.local` launcher saves the actual Node path, working directory, queue and origin. Run `./start-printer.local` from this checkout to restart the foreground service when no instance is running. This does not provide boot startup.
 
@@ -164,6 +241,7 @@ These remain deployment/device checks; automated fixtures do not establish them.
 3. Sign in on two devices with the same access code and confirm they have independent drafts/recovery. Mint a new code and confirm both devices return to sign-in, the old code is refused and the new code restores each device’s own draft.
 4. Check 8-hour code expiry and `npm run access -- revoke`, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
 5. Run `npm run access -- mint` with the printer ready and confirm the slip prints once, cuts cleanly and the code, expiry time and note are legible; then confirm a mint with the printer unplugged reports the failure and the terminal code still signs in. Verify wrong-code rate-limit feedback and recovery after cooldown. Keep station data backed up.
+6. If the tailnet admin page is configured, complete its acceptance steps under [Tailnet admin page](#tailnet-admin-page), including a mint from the page with the printer unplugged: the page must keep showing the valid code and report the slip failure.
 
 ## Still to test
 

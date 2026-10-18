@@ -1,3 +1,5 @@
+import { isAbsolute } from 'node:path';
+
 /** Omission preserves existing deployments; typos must not silently change behavior. */
 export function parseTrackingEnabled(value: string | undefined): boolean {
   if (value === undefined || value === 'true') return true;
@@ -96,4 +98,71 @@ export function parseFont(value: string | undefined, mode: 'cups' | 'pdf') {
       ? '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
       : '')
   );
+}
+
+export type AdminConfig = Readonly<{
+  origin: URL;
+  socket: string;
+  capability: string;
+}>;
+/** The tailnet admin listener is all-or-nothing, so a partial setup stops startup. */
+export function parseAdminConfig(
+  env: NodeJS.ProcessEnv,
+  publicOrigin: URL,
+): AdminConfig | undefined {
+  const {
+    ORDER_PAD_ADMIN_ORIGIN: originValue,
+    ORDER_PAD_ADMIN_SOCKET: socket,
+    ORDER_PAD_ADMIN_CAPABILITY: capability,
+  } = env;
+  if (env.ORDER_PAD_ADMIN_LOGINS !== undefined)
+    throw new Error(
+      'ORDER_PAD_ADMIN_LOGINS is no longer used. Grant ORDER_PAD_ADMIN_CAPABILITY to tagged devices in the tailnet policy instead.',
+    );
+  if (
+    originValue === undefined &&
+    socket === undefined &&
+    capability === undefined
+  )
+    return undefined;
+  let origin: URL;
+  try {
+    origin = new URL(originValue ?? '');
+    if (
+      origin.protocol !== 'https:' ||
+      !origin.hostname.endsWith('.ts.net') ||
+      origin.pathname !== '/' ||
+      origin.username ||
+      origin.password ||
+      origin.search ||
+      origin.hash ||
+      origin.origin === publicOrigin.origin
+    )
+      throw new Error();
+  } catch {
+    throw new Error(
+      'ORDER_PAD_ADMIN_ORIGIN must be a root HTTPS Tailscale Serve origin (*.ts.net) that differs from ORDER_PAD_ORIGIN.',
+    );
+  }
+  // Linux socket addresses hold at most 107 bytes plus a terminator.
+  if (
+    !socket ||
+    !isAbsolute(socket) ||
+    /[\p{Cc}]/u.test(socket) ||
+    Buffer.byteLength(socket) > 107
+  )
+    throw new Error(
+      'ORDER_PAD_ADMIN_SOCKET must be an absolute socket path of at most 107 bytes.',
+    );
+  // Tailscale app capabilities are domain/path names; tailscale.com is reserved.
+  if (
+    !capability ||
+    capability.length > 200 ||
+    !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\/[A-Za-z0-9._~/-]+$/.test(capability) ||
+    /^(?:[a-z0-9-]+\.)*tailscale\.com\//.test(capability)
+  )
+    throw new Error(
+      'ORDER_PAD_ADMIN_CAPABILITY must be a Tailscale app capability name such as example.com/cap/order-pad-admin.',
+    );
+  return Object.freeze({ origin, socket, capability });
 }

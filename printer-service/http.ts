@@ -23,7 +23,7 @@ import { StationConflict, type StationRepository } from './station-database';
 import { parseStationCommand } from '../src/lib/storage/ticket-store';
 import { trackingDisabledCode } from '../src/lib/orders/features';
 
-class BadRequest extends Error {
+export class BadRequest extends Error {
   constructor(
     readonly status: number,
     message: string,
@@ -31,12 +31,15 @@ class BadRequest extends Error {
     super(message);
   }
 }
-async function readJson(req: IncomingMessage): Promise<unknown> {
+export async function readJson(
+  req: IncomingMessage,
+  limit = 131072,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > 131072) throw new BadRequest(413, 'Request too large.');
+    if (length > limit) throw new BadRequest(413, 'Request too large.');
     chunks.push(chunk);
   }
   try {
