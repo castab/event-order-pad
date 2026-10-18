@@ -29,8 +29,9 @@ async function directory() {
 async function admin(
   access = vi.fn(async (command: string): Promise<AccessResult> => {
     if (command === 'status') return { kind: 'status', expiresAt, sessions: 2 };
-    if (command === 'revoke') return { kind: 'revoked', revoked: true };
-    return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt };
+    if (command === 'revoke')
+      return { kind: 'revoked', revoked: true, signedOut: 3 };
+    return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt, signedOut: 2 };
   }),
   slip = vi.fn(async () => 'Star_TSP143-9'),
 ) {
@@ -41,6 +42,7 @@ async function admin(
     capability,
     access,
     slip,
+    assets: 'static',
     log,
   });
   await listenAdmin(server, socket);
@@ -133,7 +135,22 @@ describe('tailnet admin listener', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
     expect(page.body).toContain(`<script nonce="${nonce}">`);
-    expect(page.body).toContain('Mint new code');
+    expect(page.body).toContain('Mint a code');
+    expect(page.body).toContain(
+      '<span class="host">station.example.ts.net:8443</span>',
+    );
+  });
+
+  it('serves only the logo and font the page uses', async () => {
+    const { send } = await admin();
+    const logo = await send('/logo.svg');
+    expect(logo.status).toBe(200);
+    expect(logo.headers['content-type']).toBe('image/svg+xml');
+    expect((await send('/fonts/poppins-600.ttf')).headers['content-type']).toBe(
+      'font/ttf',
+    );
+    for (const path of ['/icon.svg', '/fonts/OFL.txt', '/../package.json'])
+      expect((await send(path)).status).toBe(404);
   });
 
   it.each([
@@ -277,6 +294,7 @@ describe('tailnet admin listener', () => {
       kind: 'minted',
       code: 'K7QM4-XTD9A',
       expiresAt: expiresAt.toISOString(),
+      signedOut: 2,
       slip: {
         printed: true,
         job: 'Star_TSP143-9',
@@ -304,7 +322,7 @@ describe('tailnet admin listener', () => {
     expect(body.slip).toEqual({
       printed: false,
       message:
-        'The slip did not print: Queue paused. The code above is valid; write it down for staff.',
+        'The slip didn’t print: Queue paused. The code above still works, so write it down for staff.',
     });
   });
 
@@ -355,6 +373,7 @@ describe('tailnet admin listener', () => {
     expect(JSON.parse(response.body)).toEqual({
       kind: 'revoked',
       revoked: true,
+      signedOut: 3,
     });
     expect(access).toHaveBeenCalledWith('revoke');
     expect(slip).not.toHaveBeenCalled();

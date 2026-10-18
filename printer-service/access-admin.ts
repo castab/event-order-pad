@@ -11,8 +11,17 @@ import { accessCodePdf, accessSlipHeightMm } from './receipt';
 
 export const accessCommands = ['mint', 'status', 'revoke'] as const;
 export type AccessResult =
-  | { readonly kind: 'minted'; readonly code: string; readonly expiresAt: Date }
-  | { readonly kind: 'revoked'; readonly revoked: boolean }
+  | {
+      readonly kind: 'minted';
+      readonly code: string;
+      readonly expiresAt: Date;
+      readonly signedOut: number;
+    }
+  | {
+      readonly kind: 'revoked';
+      readonly revoked: boolean;
+      readonly signedOut: number;
+    }
   | {
       readonly kind: 'status';
       readonly expiresAt?: Date;
@@ -49,18 +58,23 @@ export async function manageAccess(
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(721404)::text`;
     const previous = await tx.$queryRaw<{ id: string }[]>`
       UPDATE access_codes SET revoked_at = ${now} WHERE revoked_at IS NULL RETURNING id`;
+    let signedOut = 0;
     for (const { id } of previous) {
-      await tx.authSession.deleteMany({ where: { codeId: id } });
+      const { count } = await tx.authSession.deleteMany({
+        where: { codeId: id },
+      });
+      signedOut += count;
       await tx.authEvent.create({ data: { kind: 'code-revoked', codeId: id } });
     }
-    if (!code) return { kind: 'revoked', revoked: previous.length > 0 };
+    if (!code)
+      return { kind: 'revoked', revoked: previous.length > 0, signedOut };
     const expiresAt = new Date(now.getTime() + ACCESS_CODE_HOURS * 3600000);
     const id = randomUUID();
     await tx.accessCode.create({
       data: { id, codeHash: encoded!, createdAt: now, expiresAt },
     });
     await tx.authEvent.create({ data: { kind: 'code-minted', codeId: id } });
-    return { kind: 'minted', code, expiresAt };
+    return { kind: 'minted', code, expiresAt, signedOut };
   });
 }
 

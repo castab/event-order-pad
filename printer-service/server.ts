@@ -93,6 +93,7 @@ const admin = adminConfig
       access: (command) => manageAccess(database, command),
       slip: (code, expiresAt) => printAccessSlip(output, code, expiresAt, font),
       slipMode: printMode,
+      assets: root,
     })
   : undefined;
 if (admin && adminConfig) {

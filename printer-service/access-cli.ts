@@ -52,7 +52,7 @@ try {
         );
       } catch (error) {
         console.error(
-          `The slip did not print: ${(error as Error).message} The code above is valid; write it down for staff.`,
+          `The slip didn’t print: ${(error as Error).message} The code above still works, so write it down for staff.`,
         );
         process.exitCode = 1;
       }

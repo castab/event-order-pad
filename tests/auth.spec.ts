@@ -58,7 +58,10 @@ async function setup(
         !body.turnstile
       )
         return reply(
-          { error: 'That access code isn’t valid. Ask for the current code.' },
+          {
+            error:
+              'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
+          },
           401,
         );
       signedIn = true;
@@ -121,9 +124,6 @@ test('Turnstile keeps a successful token until submission and refreshes once aft
     )
     .toBe(1);
   await page.clock.runFor(1000);
-  await expect(
-    page.getByRole('button', { name: 'Start shift', exact: true }),
-  ).toBeEnabled();
   expect(await resets()).toBe(0);
   const submitted = page.waitForRequest('**/api/auth/login');
   await enterCode(page);
@@ -149,19 +149,28 @@ test('an access code signs in, the access menu signs out, and back navigation st
     if (request.url().endsWith('/api/auth/login'))
       loginRequests.push(request.url());
   });
-  await page.getByRole('button', { name: 'Start shift', exact: true }).click();
-  await expect(page.getByRole('alert')).toHaveText(
-    'Enter the 10-character access code printed at the station.',
+  const field = page.getByLabel('Access code', { exact: true });
+  const start = page.getByRole('button', { name: 'Start shift', exact: true });
+  await expect(start).toBeDisabled();
+  await expect(page.locator('#access-code-count')).toHaveText(
+    '10 letters and numbers. Capitals and the dash are added for you.',
   );
-  await expect(page.getByLabel('Access code', { exact: true })).toHaveAttribute(
-    'aria-invalid',
-    'true',
+  // Letters the code alphabet leaves out (O, I, L, 0, 1) are ignored as typed.
+  await field.pressSequentially('k7qm4o1xi');
+  await expect(field).toHaveValue('K7QM4-X');
+  await expect(page.locator('#access-code-count')).toHaveText(
+    '6 of 10 characters',
   );
+  await expect(start).toBeDisabled();
+  await field.pressSequentially('td9bL');
+  await expect(field).toHaveValue('K7QM4-XTD9B');
+  await expect(page.locator('#access-code-count')).toHaveText('Ready');
   expect(loginRequests).toHaveLength(0);
-  await enterCode(page, 'K7QM4-XTD9B');
+  await start.click();
   await expect(page.getByRole('alert')).toHaveText(
-    'That access code isn’t valid. Ask for the current code.',
+    'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
   );
+  await expect(field).toHaveAttribute('aria-invalid', 'true');
   // Typed the way it might be read off the slip: lowercase, with the hyphen.
   await enterCode(page, 'k7qm4-xtd9a');
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
@@ -189,6 +198,7 @@ test('pressing Start shift before Turnstile has a token waits for it instead of 
   await setup(page, false, { automaticTurnstile: false });
   await page.goto('/login/');
   const button = page.getByRole('button', { name: 'Start shift', exact: true });
+  await page.getByLabel('Access code', { exact: true }).fill(code);
   await expect(button).toBeEnabled();
   await expect
     .poll(() =>
@@ -312,7 +322,7 @@ test('a new code during a print waits for it, then recovers its durable result w
   expired = false;
   await enterCode(page, code);
   await expect(page.getByRole('alert')).toHaveText(
-    'That access code isn’t valid. Ask for the current code.',
+    'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
   );
   await enterCode(page, 'ZYXWV98765');
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();
