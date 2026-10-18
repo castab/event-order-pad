@@ -1,6 +1,6 @@
 # Fiona's Order Pad
 
-Touch-friendly order entry for an ice cream stand. Staff build each customer's order on a phone or tablet, a USB receipt printer attached to a Linux server prints a preparation ticket, and a second screen, **Now Scooping**, shows the build station which orders are still open. There are no prices or payments. Staff sign in with a username/password or an enrolled passkey; all users have equal order and queue access.
+Touch-friendly order entry for an ice cream stand. Staff build each customer's order on a phone or tablet, a USB receipt printer attached to a Linux server prints a preparation ticket, and a second screen, **Now Scooping**, shows the build station which orders are still open. There are no prices or payments. Staff sign in with a shared access code that the station computer mints for each 8-hour shift; there are no personal accounts.
 
 The app is a prerendered SvelteKit 3 / Svelte 5 PWA written in TypeScript. A small Node service on the Linux host serves it, prints through CUPS and uses PostgreSQL 18 as the source of truth for the whole station. The app service and database must run on the same machine. If the database is unavailable, order entry and printing are down.
 
@@ -22,7 +22,7 @@ flowchart TB
       PR["Printing + output (Cups or PdfOutput)<br/>one print at a time,<br/>PDF rendered with PDFKit"]
       OR["Orders + OrderStream<br/>order events, SSE snapshots"]
     end
-    DB[("PostgreSQL 18, loopback only<br/>station, workspaces, tickets, print_attempts,<br/>print_dispatches, order_events, auth tables")]
+    DB[("PostgreSQL 18, loopback only<br/>station, workspaces, tickets, print_attempts,<br/>print_dispatches, order_events, access-code tables")]
     C["CUPS queue"]
     P["Star TSP143IIIU"]
   end
@@ -103,62 +103,53 @@ The dev server listens on port 5173 on all interfaces (`--host 0.0.0.0`), so oth
 There is no in-app printer simulator, and the dev server has no `/api` routes. Expect this during development:
 
 - Protected screens stay behind “Checking sign-in” or a connection error because the dev server has no authentication/session API.
-- Login pages can render, but real sign-in and Turnstile configuration require the service.
+- The sign-in page can render, but real sign-in and Turnstile configuration require the service.
 - Draft work requires the real service and database, or the API fixtures in tests.
 
 Full print and queue flows run in the Playwright suite, which mocks the API or starts the real HTTP service with a stubbed CUPS. CUPS output requires Linux, a local USB CUPS queue and an HTTPS origin. PDF development output runs on Windows, macOS and Linux (see [PDF development printing](#pdf-development-printing)).
 
-## Accounts and sign-in
+## Access codes and sign-in
 
-The application has one permission level: every enabled account can build and print orders and manage Now Scooping. Authentication is mandatory; there is no public signup or browser-based account administration. A session lasts 16 hours, including browser restarts. Login, enrollment and recovery require server-verified Turnstile; a verification outage blocks new logins, including passkeys, while existing sessions continue to work.
-
-After building the service and applying migrations, create the first account on the Linux host:
+The order pad belongs to the location, not to individual staff, so there are no user accounts, passwords, passkeys or onboarding. Instead, the station computer mints a shared **access code** for the shift. Any staff device can sign in with it during its **8 hours**. Every session opened with a code ends when the code expires, even on a device that signed in late, and minting a new code voids the old one and signs out every device that used it. Authentication is mandatory, and codes can only be minted from a terminal on the station computer, never over HTTP.
 
 ```sh
-npm run auth -- bootstrap fiona
-npm run auth -- invite staff-name
-npm run auth -- recover staff-name
-npm run auth -- disable staff-name
-npm run auth -- enable staff-name
-npm run auth -- list
-npm run auth -- revoke staff-name
+npm run access -- mint              # new 8-hour code; voids the previous one and its sessions; prints a slip
+npm run access -- mint --no-print   # same, terminal only
+npm run access -- status            # whether a code is active, its expiry and how many devices use it
+npm run access -- revoke            # void the active code and sign every device out, without a new one
 ```
 
-`bootstrap` prompts for a password without echo and only succeeds when no users exist. Usernames are case-insensitive, 3–32 ASCII letters/digits/dots/underscores/hyphens. Passwords contain 15–128 Unicode characters; spaces are preserved and there are no composition rules. Passwords are salted Argon2id hashes (19 MiB, two iterations, parallelism one).
+`mint` shows the code in the terminal, for example `K7QM4-XTD9A`, and prints it on the receipt printer (CUPS mode) or saves the slip into `ORDER_PAD_PDF_DIR` (PDF mode). The slip is not an order: it takes no number, creates no attempt or queue event, and is never reprinted. If the slip fails, the terminal says so; the code is already valid, so copy it down. Run `mint` at the start of each shift, and again whenever a code may have been seen by someone it shouldn’t have. `status` never shows the code.
 
-`invite` reserves the chosen username and prints a single-use code and enrollment URL, valid for 24 hours. Hand the code or URL to the person directly; no email, SMS or account with another provider is required. Tokens are stored only as hashes, and URL tokens use fragments that the page immediately removes. Issuing another token replaces the previous one. `revoke` invalidates outstanding enrollment/recovery codes for that username.
+Codes have 10 characters from `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, so there is no 0/O or 1/I/L to confuse (about 49 bits). Staff may type them in either case, with or without the hyphen or spaces. The database keeps only a salted Argon2id hash of the code (19 MiB, two iterations, parallelism one). The builder and Now Scooping headers show **Access until 9:42 PM**; its menu has **Sign out this device**.
 
-`recover` immediately disables existing credentials, removes passkeys and revokes sessions. Its 30-minute code sets a new password and re-enables the account; passkeys must then be added again. Revoking or losing the recovery code leaves the account requiring another local recovery operation. `disable` and `enable` revoke sessions, retaining station/order history.
-
-Enrollment and recovery links carry their code in the URL fragment, so the page shows “Invite code added from your link” (or “Recovery code…”) instead of an empty code field; **Enter a code instead** reveals the field. After setting a password, the page offers to add a passkey for this device before opening the order builder; skipping is fine and the account is already usable.
-
-The username button in the builder, Now Scooping and account headers opens **Your account** and **Sign out**. The account page lets a user add/remove named passkeys, change their password, sign out, or sign out everywhere (which also ends the current session). Credential changes require authentication within five minutes; when the last sign-in is older, pressing **Add a passkey**, **Remove** or **Change password** opens a “Confirm it’s you” dialog (password or passkey, with Turnstile) and then continues into that action. **Lock now** only hides the unlocked state in that browser; the server keeps honouring the recent sign-in until its five minutes pass. Password changes revoke other sessions. Passkeys are bound to the exact configured HTTPS origin and hostname; choose the final hostname before enrolling them.
+Each device keeps its own workspace (draft, last order and any pending print to recover) across code changes: the workspace follows the browser cookie, not the code.
 
 Turnstile renders in interaction-only mode, so Cloudflare's widget appears only when it needs a tap. Buttons stay enabled while a token is pending: pressing one shows “Checking…”, waits up to 15 seconds for the token, then submits or reports that the browser couldn't be verified. Each token is used once.
 
-Authentication attempts have persistent per-IP, username/IP and username limits, with `429`/`Retry-After` responses and temporary cooldowns. Rejected usernames receive the same limits as existing ones. Turnstile is an additional check, not an account credential or a replacement for rate limiting. The only externally hosted script is the required Cloudflare Turnstile widget.
+Sign-in attempts have persistent per-IP and station-wide limits, with `429`/`Retry-After` responses and temporary cooldowns. Turnstile is an additional check, not a credential or a replacement for rate limiting. The only externally hosted script is the required Cloudflare Turnstile widget.
 
 ## Commands
 
-| Command                                | What it does                                                                                                                                                                              |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                          | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                   |
-| `npm run db:generate`                  | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                        |
-| `npm run db:migrate -- --name NAME`    | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                 |
-| `npm run db:deploy`                    | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                |
-| `npm run db:studio`                    | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                           |
-| `npm run test:postgres`                | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                            |
-| `npm run test:postgres:volume`         | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                 |
-| `npm run check`                        | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                            |
-| `npm run lint`                         | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                  |
-| `npm test`                             | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                  |
-| `npm run build`                        | Static app and service worker into `build/`.                                                                                                                                              |
-| `npm run build:printer`                | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                           |
-| `npm run auth -- <command> [username]` | Local account bootstrap, enrollment, recovery, enable/disable, listing and token revocation; uses `.env` and the bundled CLI.                                                             |
-| `npm run start:printer`                | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)). |
-| `npm run preview`                      | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                              |
-| `npx playwright install chromium`      | One-time browser download for the end-to-end tests.                                                                                                                                       |
-| `npm run test:e2e`                     | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                           |
+| Command                                    | What it does                                                                                                                                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                              | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                   |
+| `npm run db:generate`                      | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                        |
+| `npm run db:migrate -- --name NAME`        | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                 |
+| `npm run db:deploy`                        | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                |
+| `npm run db:studio`                        | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                           |
+| `npm run test:postgres`                    | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                            |
+| `npm run test:postgres:volume`             | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                 |
+| `npm run check`                            | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                            |
+| `npm run lint`                             | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                  |
+| `npm test`                                 | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                  |
+| `npm run build`                            | Static app and service worker into `build/`.                                                                                                                                              |
+| `npm run build:printer`                    | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                           |
+| `npm run access -- <mint\|status\|revoke>` | Mints, inspects or voids the shared 8-hour access code; `mint` also prints a slip (`--no-print` skips it). Uses `.env` and the bundled CLI.                                               |
+| `npm run start:printer`                    | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)). |
+| `npm run preview`                          | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                              |
+| `npx playwright install chromium`          | One-time browser download for the end-to-end tests.                                                                                                                                       |
+| `npm run test:e2e`                         | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                           |
 
 To run everything CI runs, in CI's order:
 
@@ -181,7 +172,7 @@ CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these aga
 
 ```text
 src/
-  lib/auth/           Session clients, login/Turnstile widgets and safe-navigation holds
+  lib/auth/           Session client, access-code sign-in/Turnstile widgets, access menu and safe-navigation holds
   lib/tickets/        Menu, draft editing, ticket validation, receipt layout (pure: no DOM, I/O or transport)
   lib/printing/       Print port, PrintSession (intent saved before every send), printer adapters
   lib/storage/        Database API client: station snapshots, revisions and durable writes
@@ -191,14 +182,14 @@ src/
   routes/+layout.*    Session gate, prerendering, design-token injection, update checks
   routes/+page.svelte         Order builder (/)
   routes/queue/+page.svelte   Now Scooping (/queue/)
-  routes/{login,enroll,recover,account}/  Sign-in and credential management
+  routes/login/       Access-code sign-in
   service-worker/     Versioned static asset cache; HTML and APIs always use the network (own tsconfig; excluded from the root project)
-printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, Postgres dispatch journal, Prisma station/order stores, authentication, SSE; auth-cli.ts bundles the local account command.
+printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, Postgres dispatch journal, Prisma station/order stores, access codes, SSE; access-cli.ts bundles the local access-code command.
                       Its Prisma client is generated into printer-service/generated/ (Git-ignored); `*.postgres.test.ts` need a real database.
 prisma/               Schema and committed PostgreSQL migrations (prisma.config.ts at the root loads .env for the db:* commands)
 compose.yaml          Local PostgreSQL 18 with a persistent named volume, bound to loopback
 deploy/               Cloudflare Tunnel example configuration
-tests/                Playwright specs: auth.spec.ts (login, virtual passkeys, account switching, offline protection and print-session expiry), app.spec.ts (builder, mocked API), queue.spec.ts (queue, mocked API and EventSource), queue-live.spec.ts and stations-live.spec.ts (real HTTP service with in-memory repositories and stubbed CUPS); helpers/ holds the in-memory test doubles
+tests/                Playwright specs: auth.spec.ts (access-code sign-in, code rotation during a print, offline protection and layout), app.spec.ts (builder, mocked API), queue.spec.ts (queue, mocked API and EventSource), queue-live.spec.ts and stations-live.spec.ts (real HTTP service with in-memory repositories and stubbed CUPS); helpers/ holds the in-memory test doubles
 scripts/              test-postgres.mjs and test-postgres-volume.mjs, the runners behind the two Postgres test commands
 .env.example          Template for the Git-ignored .env (service, Docker Compose and test variables)
 .github/workflows/    CI (checks.yml)
@@ -328,7 +319,7 @@ ORDER_PAD_FONT=C:/Windows/Fonts/consola.ttf
 ORDER_PAD_CAPTURE_FROM=2026-10-13T00:00:00.000Z
 ```
 
-Authentication remains mandatory in PDF mode. Configure Turnstile for localhost, use direct proxy mode, and bootstrap a development account on the separate database. Passkeys enrolled for localhost do not transfer to your public hostname.
+Authentication remains mandatory in PDF mode. Configure Turnstile for localhost, use direct proxy mode, and mint a development access code on the separate database; its slip is saved as a PDF beside the receipts.
 
 Create that database first with your local PostgreSQL administrator. Retain the cutoff across restarts and ensure it is not in the future. Choose a readable TTF: Windows can use the path above; macOS and Linux can use an installed or copied TTF via its absolute path. For matching typography, copy the station's DejaVuSansMono.ttf to the development machine and point `ORDER_PAD_FONT` to it. Different fonts change text widths. The same PDF renderer and 72 mm receipt geometry are used, with a minimum height of 30 mm; the real driver may select longer stock.
 
@@ -338,11 +329,11 @@ npm run db:generate
 npm run db:deploy
 npm run build
 npm run build:printer
-npm run auth -- bootstrap developer
+npm run access -- mint
 npm run start:printer
 ```
 
-Open [the local service](http://localhost:4174). Sign in with the development account. Chromium supports Secure cookies on localhost; keep using the same hostname for its user/browser workspace. The app shows **PDF development mode — no physical printing**. **Print order** creates a normal numbered order and queue event in the development database, then saves a PDF instead of sending paper. Open Order tools → Last submitted order → **View PDF** to view or download it. Reprints create separate files with REPRINT marking. Saved files are named by attempt ID, excluded from Git in the default directory, and survive service restarts. Choose an output directory outside `build/` so static serving cannot expose it.
+Open [the local service](http://localhost:4174). Sign in with the development access code. Chromium supports Secure cookies on localhost; keep using the same hostname for its user/browser workspace. The app shows **PDF development mode — no physical printing**. **Print order** creates a normal numbered order and queue event in the development database, then saves a PDF instead of sending paper. Open Order tools → Last submitted order → **View PDF** to view or download it. Reprints create separate files with REPRINT marking. Saved files are named by attempt ID, excluded from Git in the default directory, and survive service restarts. Choose an output directory outside `build/` so static serving cannot expose it.
 
 The dispatch journal still records intent and outcomes. Lost replies or interrupted saves require acknowledgment and are never retried automatically. Viewing reads an existing file; it does not regenerate missing receipts. PDF mode still requires the service and local Postgres; `npm run dev` alone has no APIs. PDF inspection does not verify physical output or cutting.
 
@@ -409,29 +400,20 @@ A queue order is `{ ticket, submittedAt, status: 'open' | 'done', doneAt? }`. `s
 - **Tracking off.** Only the queue GET routes (`/api/orders`, `/api/orders/events`) return 404 with `code: "ORDER_TRACKING_DISABLED"`. Every order POST stays available.
 - **Other errors.** Unknown order IDs return 404, an unknown `/api` path returns 404, and a request body over 128 KiB returns 413. An unavailable order database returns 503.
 - **No automatic retries.** Done and Undo are not retried. After an ambiguous response, refresh the queue before trying again.
-- **Static files.** Any other GET or HEAD outside `/api` serves a file from `build/`. Protected files require a session. Authentication pages and their static dependencies are public. Files under `/_app/immutable/` are cached for a year; other files are `no-store`. HTML scripts receive per-response CSP nonces.
+- **Static files.** Any other GET or HEAD outside `/api` serves a file from `build/`. Protected files require a session. The sign-in page and its static dependencies are public. Files under `/_app/immutable/` are cached for a year; other files are `no-store`. HTML scripts receive per-response CSP nonces.
 
 ### Authentication HTTP API
 
-All POST routes below require the configured Origin and JSON; all responses use `no-store`. Only config and login/enrollment/recovery operations are public. Credential management requires an authenticated session. `response` is the standard WebAuthn JSON response; options replies contain `{ options }`. Successful POSTs return `{ ok: true }` and set/clear secure cookies as applicable.
+All POST routes below require the configured Origin and JSON; all responses use `no-store`. Only config and login are public. There is no HTTP route for minting, inspecting or revoking codes.
 
-| Endpoint                                                                       | Input / response                                                                                     |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `GET /api/auth/config`                                                         | `{ sitekey }`; no secrets.                                                                           |
-| `GET /api/auth/session`                                                        | `{ user: { id, username }, expiresAt, authenticatedAt }`.                                            |
-| `POST /api/auth/login`                                                         | `{ username, password, turnstile }`.                                                                 |
-| `POST /api/auth/enroll`, `/api/auth/recover`                                   | `{ token, password, turnstile }`; reserved username comes from the token.                            |
-| `POST /api/auth/passkey/login/options`                                         | `{ turnstile }`; issues a single-use, five-minute browser-bound challenge after verification.        |
-| `POST /api/auth/passkey/login/verify`                                          | `{ response }`; consumes the approved challenge.                                                     |
-| `POST /api/auth/logout`, `/api/auth/logout-all`                                | `{}`; revoke current/all sessions.                                                                   |
-| `POST /api/auth/reauthenticate`                                                | `{ username, password, turnstile }`; refresh recent authentication without extending session expiry. |
-| `POST /api/auth/passkey/reauth/options`, `/api/auth/passkey/reauth/verify`     | `{ turnstile }` / `{ response }`; session-bound passkey confirmation.                                |
-| `POST /api/auth/password`                                                      | `{ password }`; recent authentication required; rotates the session and revokes other sessions.      |
-| `GET /api/auth/passkeys`                                                       | `{ passkeys: [{ id, name, createdAt }] }`; no public keys or secrets.                                |
-| `POST /api/auth/passkey/register/options`, `/api/auth/passkey/register/verify` | `{}` / `{ response, name }`; recent authentication and a session-bound challenge required.           |
-| `POST /api/auth/passkey/remove`                                                | `{ id }`; recent authentication required.                                                            |
+| Endpoint                | Input / response                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/auth/config`  | `{ sitekey }`; no secrets.                                                                                                             |
+| `GET /api/auth/session` | `{ expiresAt, authenticatedAt }`; `expiresAt` is the access code’s expiry.                                                             |
+| `POST /api/auth/login`  | `{ code, turnstile }`; returns `{ ok: true }` and sets the session cookie. Wrong, expired and voided codes get the same `401` message. |
+| `POST /api/auth/logout` | `{}`; ends this device’s session and clears its cookie.                                                                                |
 
-Limits are 120 authentication-page requests/IP/minute, 10 unauthenticated authentication operations/IP/minute, five password failures/username/IP per 15 minutes, and 20 password failures/username per 15 minutes. Username failure budgets reserve a slot before verification and refund it on successful authentication. At most two password hashes run concurrently; excess work receives `429` instead of queuing. IPv6 addresses are canonicalized. No account is permanently locked by failed login attempts.
+Limits are 120 sign-in page requests/IP/minute, 10 sign-in attempts/IP/minute, five wrong codes/IP per 15 minutes, and 100 wrong codes per 15 minutes across all addresses. Each attempt reserves a slot before verification and a successful sign-in refunds it. At most two code hashes run concurrently; excess work receives `429` instead of queuing. IPv6 addresses are canonicalized. A burst of wrong codes from many addresses can pause new sign-ins station-wide for up to 15 minutes; devices already signed in are unaffected.
 
 ## Data and persistence
 
@@ -448,11 +430,15 @@ Limits are 120 authentication-page requests/IP/minute, 10 unauthenticated authen
 
 Prisma also maintains migration metadata. First submissions commit the ticket, locked draft, attempt and queue event atomically. Finalizing an accepted attempt commits its outcome and next draft together. Stored data passes through shared validators. One service process owns writes and SSE versions; multiple printer services and direct database writes are unsupported.
 
-The browser holds transient view state and two opaque `Secure; HttpOnly; SameSite=Strict; Path=/` cookies: `__Host-order-pad-session` (16 hours) and `__Host-order-pad-browser` (one year). A five-minute `__Host-order-pad-challenge` cookie binds a passkey ceremony to its browser. No order data is stored in IndexedDB, localStorage, sessionStorage or an outbox. `auth_workspaces` resolves each user/browser pair to an internal workspace key; the old anonymous cookie is not accepted for authenticated authorization. Clearing browser cookies creates a new workspace without deleting history.
+The browser holds transient view state and two opaque `Secure; HttpOnly; SameSite=Strict; Path=/` cookies: `__Host-order-pad-session` (at most 8 hours; the server ends it with its access code) and `__Host-order-pad-browser` (one year). No order data is stored in IndexedDB, localStorage, sessionStorage or an outbox. `access_workspaces` resolves each browser cookie to an internal workspace key, so a device keeps its workspace across access codes; the old anonymous cookie is not accepted for authenticated authorization. Clearing browser cookies creates a new workspace without deleting history.
 
-Authentication tables are `auth_users`, `auth_sessions`, `auth_passkeys`, `auth_challenges`, `auth_tokens`, `auth_rates`, `auth_events` and `auth_workspaces`. Sessions, enrollment/recovery tokens and challenges store only opaque token hashes. Passkeys retain public keys, counters and authenticator metadata. Authentication events record event type, optional user ID and hashed client IP, without credentials or tokens. Minute-by-minute cleanup removes up to 100 expired rows per transient table and up to 100 security events older than 90 days.
+Authentication tables are `access_codes`, `auth_sessions`, `auth_rates`, `auth_events` and `access_workspaces`. A partial unique index allows only one unrevoked code. Codes are stored as Argon2id hashes and sessions as opaque token hashes. Authentication events record event type, optional access-code ID and hashed client IP, without codes or tokens; rows from before access codes keep their old user ID. Minute-by-minute cleanup removes up to 100 expired sessions and rate rows, up to 100 expired or voided codes with no sessions left, and up to 100 security events older than 90 days.
 
-A failed draft write or database health check blocks editing and printing until Postgres answers again. Authentication loss blocks interaction immediately, waits for active saves/prints to settle, and returns to login. After login, saved state is reloaded without replaying mutations or prints. A structured authentication rejection before print dispatch means nothing was submitted; a lost or ambiguous reply remains unknown. SSE checks authorization before snapshots and on 15-second heartbeats and closes exactly at session expiry.
+A failed draft write or database health check blocks editing and printing until Postgres answers again. Authentication loss (code expiry, a new code, or signing out) blocks interaction immediately, waits for active saves/prints to settle, and returns to login. After login, saved state is reloaded without replaying mutations or prints. A structured authentication rejection before print dispatch means nothing was submitted; a lost or ambiguous reply remains unknown. SSE checks authorization before snapshots and on 15-second heartbeats and closes exactly at session expiry.
+
+### Upgrading from personal accounts to access codes
+
+With no print attempt or CUPS job pending, stop the service, back up PostgreSQL, then run `npm run db:deploy` to apply the `access_codes` migration, rebuild with `npm run build` and `npm run build:printer`, start the service and run `npm run access -- mint`. The migration deletes `auth_users`, `auth_passkeys`, `auth_challenges`, `auth_tokens` and all sessions, so everyone signs in again with the new code; the security log is kept. Each browser that was used by exactly one account keeps that account’s workspace (draft and recovery). Workspaces from browsers shared by several accounts stay in `workspaces` as untouched archives and the browser starts with a new empty workspace, so settle pending work on shared devices first. `npm run auth` is replaced by `npm run access`.
 
 Queue projections select the latest event before filtering. A partial unique submission index and per-order advisory transaction locks prevent duplicate registrations. Workspace mutations use a transaction lock plus an expected revision to reject stale tabs in the same workspace. Edits in other workspaces do not invalidate that revision. A shared counter assigns unique numbers at first-order intent commit, above preserved counters and existing Postgres history. Abandoned editable drafts consume no numbers; committed failed/unknown prints retain their number. Reprints reuse the original number. The blank-name label is resolved only after number assignment; draft previews display “Assigned when printed”.
 
@@ -460,11 +446,11 @@ Database waits are bounded (1 s service-operation queue, 1 s connection/acquisit
 
 ### Set up Postgres and upgrade the station
 
-1. Before switching, finish or reconcile drafts and all pending/ambiguous attempts. Close ordering tabs, stop the old service and back up PostgreSQL and legacy data. Apply the new `authentication` migration explicitly with `npm run db:deploy`; startup never migrates. Existing tickets, attempts, events and anonymous workspaces remain intact but are not automatically assigned to an account. New authenticated workspaces start empty. Changing domains creates new browser cookies/workspaces; retain the old history and settle pending work before moving. Legacy IndexedDB and `.print-data/` remain untouched archives.
+1. Before switching, finish or reconcile drafts and all pending/ambiguous attempts. Close ordering tabs, stop the old service and back up PostgreSQL and legacy data. Apply the new migrations explicitly with `npm run db:deploy`; startup never migrates. Existing tickets, attempts, events and anonymous workspaces remain intact but are not automatically assigned to a signed-in browser. New authenticated workspaces start empty. Changing domains creates new browser cookies/workspaces; retain the old history and settle pending work before moving. Legacy IndexedDB and `.print-data/` remain untouched archives.
 2. Copy `.env.example` to `.env` (Git-ignored). Choose a local database password and update `DATABASE_URL` with its URL-encoded value. Set the real HTTPS origin and CUPS queue. Set `ORDER_PAD_CAPTURE_FROM` once to the rollout time in UTC; keep device clocks accurate and retain this cutoff across restarts.
 3. Install Docker with Compose, or run PostgreSQL 18 directly on this same app host. Remote database deployment is unsupported. For local Docker, run `docker compose up -d --wait`. Postgres binds only to loopback and uses a named volume mounted at `/var/lib/postgresql`, the PostgreSQL 18 image’s versioned data layout. Container recreation preserves it; `docker compose down --volumes` deletes database history.
 4. Run `npm ci`, `npm run db:deploy`, `npm run build`, and `npm run build:printer`. Migrations are explicit; startup never applies them. Client generation needs no database connection and runs automatically before checks and the printer build.
-5. Set both Turnstile keys and `ORDER_PAD_PROXY`, build the service, run `npm run auth -- bootstrap <username>`, and configure the Cloudflare Tunnel as described in [Linux printing](docs/linux-printing.md). With no print attempt or CUPS job pending, stop the old service and start `npm run start:printer` from the repository root. Reload ordering and queue tabs together. A direct Node launcher such as `start-printer.local` must use `node --env-file=.env build-printer/server.mjs` or export all required configuration variables. For an existing systemd service, configure `EnvironmentFile=/absolute/path/to/order-pad/.env`, run `sudo systemctl daemon-reload`, then `sudo systemctl restart order-pad.service` instead of starting a second process. The verified Mint station uses this systemd service; its process must restart after rebuilding the service.
+5. Set both Turnstile keys and `ORDER_PAD_PROXY`, build the service, run `npm run access -- mint`, and configure the Cloudflare Tunnel as described in [Linux printing](docs/linux-printing.md). With no print attempt or CUPS job pending, stop the old service and start `npm run start:printer` from the repository root. Reload ordering and queue tabs together. A direct Node launcher such as `start-printer.local` must use `node --env-file=.env build-printer/server.mjs` or export all required configuration variables. For an existing systemd service, configure `EnvironmentFile=/absolute/path/to/order-pad/.env`, run `sudo systemctl daemon-reload`, then `sudo systemctl restart order-pad.service` instead of starting a second process. The verified Mint station uses this systemd service; its process must restart after rebuilding the service.
 
 `npm run test:postgres:volume` creates its own disposable container and volume, verifies persistence after container recreation, and cleans them up. Docker access is required; it does not touch the station database.
 

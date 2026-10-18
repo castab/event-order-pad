@@ -5,7 +5,6 @@ import {
   publicAuthPosts,
   sessionCookie,
   browserCookie,
-  challengeCookie,
   sessionSeconds,
   opaque,
   secret,
@@ -162,7 +161,7 @@ export function createApp({
           return;
         }
       }
-      const authPage = ['/login/', '/enroll/', '/recover/'].includes(
+      const authPage = ['/login/'].includes(
         path.endsWith('/') ? path : path + '/',
       );
       const publicAsset =
@@ -200,28 +199,12 @@ export function createApp({
         }
         return;
       }
-      if (
-        identity &&
-        req.headers['x-order-pad-user'] &&
-        req.headers['x-order-pad-user'] !== identity.user.id
-      ) {
-        json(401, {
-          error:
-            'The signed-in account changed. Reload after signing in. No new job was submitted.',
-          code: 'authentication-required',
-        });
-        return;
-      }
       if (path.startsWith('/api/auth/')) {
         if (
           !(req.method === 'POST' && authPosts.has(path)) &&
           !(
             req.method === 'GET' &&
-            [
-              '/api/auth/config',
-              '/api/auth/session',
-              '/api/auth/passkeys',
-            ].includes(path)
+            ['/api/auth/config', '/api/auth/session'].includes(path)
           )
         ) {
           json(404, { error: 'Not found.' });
@@ -235,15 +218,12 @@ export function createApp({
             ip,
             browser: browser!,
             token,
-            challenge: cookie(challengeCookie),
             identity,
           },
         );
         if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);
         if (reply.token) setCookie(sessionCookie, reply.token, sessionSeconds);
         if (reply.clearSession) setCookie(sessionCookie, '', 0);
-        if (reply.challenge) setCookie(challengeCookie, reply.challenge, 300);
-        if (path.endsWith('/verify')) setCookie(challengeCookie, '', 0);
         json(200, reply.body);
         return;
       }

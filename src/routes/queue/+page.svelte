@@ -12,10 +12,10 @@
   import { fetchTrackingEnabled } from '#lib/orders/features.js';
   import { QueueFeed } from '#lib/orders/stream.js';
   import { totalScoops } from '#lib/tickets/ticket.js';
-  import UserMenu from '#lib/auth/UserMenu.svelte';
-  import { sessionUsername } from '#lib/auth/session-context.js';
+  import AccessMenu from '#lib/auth/AccessMenu.svelte';
+  import { sessionExpiry } from '#lib/auth/session-context.js';
 
-  const username = sessionUsername();
+  const expiresAt = sessionExpiry();
   let orders = $state<readonly QueueOrder[]>([]);
   let now = $state(Date.now());
   let loaded = $state(false);
@@ -291,8 +291,8 @@
       ><span class="header-rule" aria-hidden="true"></span>
       <h1>Now Scooping</h1>
     </div>
-    {#if username()}<div class="queue-user">
-        <UserMenu username={username()} />
+    {#if expiresAt()}<div class="queue-user">
+        <AccessMenu expiresAt={expiresAt()!} />
       </div>{/if}
     {#if trackingEnabled !== false}<dl
         class="queue-metrics"

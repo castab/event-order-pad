@@ -87,3 +87,13 @@ export function assertPrintPlatform(
       'The CUPS service requires Linux. Set ORDER_PAD_PRINT_MODE=pdf for development on other systems.',
     );
 }
+
+/** CUPS has a Linux default; PDF mode must name a font explicitly. */
+export function parseFont(value: string | undefined, mode: 'cups' | 'pdf') {
+  return (
+    value ??
+    (mode === 'cups'
+      ? '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+      : '')
+  );
+}

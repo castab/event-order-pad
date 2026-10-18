@@ -2,6 +2,12 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Shared access codes replace personal accounts — 2026-10-16
+
+Replaced usernames, passwords, passkeys, enrollment and recovery with one shared access code minted on the station terminal (`npm run access -- mint|status|revoke`). A code lasts 8 hours; every session it opened ends with it, and minting a new code voids the old one and its sessions. Workspaces now follow the browser cookie, so a device keeps its draft and recovery across codes. The `access_codes` migration drops the account tables and reattaches workspaces for browsers that had exactly one account.
+
+All required checks passed in order: 27 PostgreSQL integration tests against a disposable PostgreSQL 18 container (separate from the station database), volume persistence, type checks (zero errors/warnings), lint, 234 unit/HTTP tests, both builds and 150 Chromium runs. A Turnstile browser test that could read its reset counter before the mocked widget loaded now waits for the widget; it then passed 30 of 30 repeated runs under parallel load. The bundled CLI was exercised in PDF mode against the disposable database (status, mint with a saved slip, mint `--no-print`, revoke, unknown command); the slip PDF rendered legibly. No station data was touched, and no physical slip or receipt was printed. Printing the slip on the Star printer and live Cloudflare/Turnstile sign-in remain owner checks.
+
 ## Turnstile widget lifecycle — 2026-10-15
 
 Removed the reset immediately after widget creation. A successful token now stays ready for submission; subsequent attempts explicitly refresh the widget, with third-party callbacks and bound token updates excluded from reactive dependency tracking. A browser regression checks zero initial resets, token submission and exactly one refresh after rejection. PostgreSQL coverage explicitly checks the Siteverify endpoint, submitted token and visitor IP.

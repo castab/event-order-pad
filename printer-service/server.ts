@@ -15,6 +15,7 @@ import {
   parsePrintMode,
   parseServiceOrigin,
   assertPrintPlatform,
+  parseFont,
 } from './config';
 
 const printMode = parsePrintMode(process.env.ORDER_PAD_PRINT_MODE);
@@ -27,11 +28,7 @@ const trackingEnabled = parseTrackingEnabled(
   process.env.ORDER_PAD_TRACKING_ENABLED,
 );
 const root = await realpath(resolve('build'));
-const font =
-  process.env.ORDER_PAD_FONT ??
-  (printMode === 'cups'
-    ? '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
-    : '');
+const font = parseFont(process.env.ORDER_PAD_FONT, printMode);
 const pdfOutput =
   printMode === 'pdf'
     ? new PdfOutput(process.env.ORDER_PAD_PDF_DIR ?? '.receipt-pdfs', font)
