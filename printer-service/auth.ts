@@ -101,7 +101,10 @@ export function parseAuthConfig(env: NodeJS.ProcessEnv) {
 }
 export type AuthConfig = ReturnType<typeof parseAuthConfig>;
 const invalid = () =>
-  new AuthError(401, 'That access code isn’t valid. Ask for the current code.');
+  new AuthError(
+    401,
+    'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
+  );
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new AuthError(400, 'Invalid authentication request.');
@@ -358,7 +361,10 @@ export class PostgresAuth implements Authentication {
         },
       });
       await this.audit(tx, 'signed-in', current.id, context.ip);
-      return { body: { ok: true }, token };
+      return {
+        body: { ok: true, expiresAt: current.expiresAt.toISOString() },
+        token,
+      };
     });
   }
   async cleanup() {

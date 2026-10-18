@@ -1,14 +1,24 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { chmod, lstat, stat, unlink } from 'node:fs/promises';
+import { chmod, lstat, readFile, stat, unlink } from 'node:fs/promises';
 import { isIP } from 'node:net';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { formatAccessCode } from '../src/lib/auth/model';
 import type { AccessResult } from './access-admin';
 import { BadRequest, readJson } from './http';
 
 export const adminAccessPath = '/api/admin/access';
 type AccessCommand = 'mint' | 'status' | 'revoke';
+// The page shares the app's self-hosted logo and font, read from the static build.
+const pageAssets: Record<string, string> = {
+  '/logo.svg': 'image/svg+xml',
+  ...Object.fromEntries(
+    [400, 500, 600, 700].map((weight) => [
+      `/fonts/poppins-${weight}.ttf`,
+      'font/ttf',
+    ]),
+  ),
+};
 
 /** Whether Serve's capability header grants `capability` to the requesting device. */
 export function hasCapability(value: unknown, capability: string): boolean {
@@ -39,10 +49,12 @@ export function createAdminApp({
   access,
   slip,
   slipMode = 'cups',
+  assets,
   log = console.log,
 }: {
   origin: URL;
   capability: string;
+  assets?: string;
   access: (command: AccessCommand) => Promise<AccessResult>;
   slip: (code: string, expiresAt: Date) => Promise<string>;
   slipMode?: 'cups' | 'pdf';
@@ -60,7 +72,7 @@ export function createAdminApp({
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader(
       'Content-Security-Policy',
-      `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
     );
     const json = (status: number, body: unknown) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -89,12 +101,31 @@ export function createAdminApp({
     try {
       const path = new URL(req.url ?? '/', origin).pathname;
       if (['GET', 'HEAD'].includes(req.method ?? '') && path === '/') {
-        const page = Buffer.from(adminPage(nonce));
+        const page = Buffer.from(adminPage(nonce, origin.host));
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Length': page.length,
         });
         res.end(req.method === 'HEAD' ? undefined : page);
+        return;
+      }
+      if (
+        ['GET', 'HEAD'].includes(req.method ?? '') &&
+        assets &&
+        Object.hasOwn(pageAssets, path)
+      ) {
+        let file;
+        try {
+          file = await readFile(join(assets, path));
+        } catch {
+          json(404, { error: 'Not found.' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': pageAssets[path],
+          'Content-Length': file.length,
+        });
+        res.end(req.method === 'HEAD' ? undefined : file);
         return;
       }
       if (req.method === 'GET' && path === adminAccessPath) {
@@ -170,7 +201,11 @@ export function createAdminApp({
           }
           log(`Access ${command} from tailnet by ${device}.`);
           if (result.kind === 'revoked') {
-            json(200, { kind: 'revoked', revoked: result.revoked });
+            json(200, {
+              kind: 'revoked',
+              revoked: result.revoked,
+              signedOut: result.signedOut,
+            });
             return;
           }
           if (result.kind !== 'minted') throw new Error('Unexpected result.');
@@ -189,13 +224,14 @@ export function createAdminApp({
           } catch (error) {
             printed = {
               printed: false,
-              message: `The slip did not print: ${(error as Error).message} The code above is valid; write it down for staff.`,
+              message: `The slip didn’t print: ${(error as Error).message} The code above still works, so write it down for staff.`,
             };
           }
           json(200, {
             kind: 'minted',
             code: formatAccessCode(result.code),
             expiresAt: result.expiresAt.toISOString(),
+            signedOut: result.signedOut,
             slip: printed,
           });
         } finally {
@@ -244,7 +280,7 @@ export async function listenAdmin(server: Server, socket: string) {
   await chmod(socket, 0o600);
 }
 
-function adminPage(nonce: string) {
+function adminPage(nonce: string, host: string) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -253,102 +289,266 @@ function adminPage(nonce: string) {
 <meta name="robots" content="noindex">
 <title>Access codes · Order Pad</title>
 <style nonce="${nonce}">
-:root{--olive-900:#3d3a2b;--olive-800:#4a4733;--olive-700:#5f5b40;--cream-100:#f6f1e4;--cream-200:#ede5d3;--ink-700:#2b2921;--ink-500:#55523f;--rust-600:#a3492f;--border-soft:rgba(61,58,43,.16);--focus-ring:rgba(95,91,64,.45);--radius-card:16px;--radius-input:10px;font-family:'Helvetica Neue',sans-serif;color:var(--ink-700);background:var(--cream-200)}
-body{margin:0;padding:24px 16px}
-main{max-width:520px;margin:0 auto;display:grid;gap:16px}
-h1{margin:0;color:var(--olive-900);font-size:1.6rem}
-section{background:var(--cream-100);border:1px solid var(--border-soft);border-radius:var(--radius-card);padding:16px;display:grid;gap:12px}
-p{margin:0;line-height:1.5}
-.muted{color:var(--ink-500)}
-.actions{display:flex;flex-wrap:wrap;gap:8px}
-button{min-height:44px;padding:0 16px;border-radius:var(--radius-input);border:1px solid var(--olive-700);background:var(--cream-100);color:var(--olive-900);font:inherit;font-weight:600}
-button.primary{background:var(--olive-700);color:var(--cream-200)}
-button.danger{border-color:var(--rust-600);color:var(--rust-600)}
-button:disabled{opacity:.5}
+@font-face{font-family:Poppins;src:url('/fonts/poppins-400.ttf') format('truetype');font-weight:400;font-display:swap}
+@font-face{font-family:Poppins;src:url('/fonts/poppins-500.ttf') format('truetype');font-weight:500;font-display:swap}
+@font-face{font-family:Poppins;src:url('/fonts/poppins-600.ttf') format('truetype');font-weight:600;font-display:swap}
+@font-face{font-family:Poppins;src:url('/fonts/poppins-700.ttf') format('truetype');font-weight:700;font-display:swap}
+:root{--olive-900:#3d3a2b;--olive-800:#4a4733;--olive-700:#5f5b40;--olive-300:#aaa68e;--olive-100:#d9d6c6;--cream-100:#f6f1e4;--cream-200:#ede5d3;--cream-300:#e2d8c3;--paper-100:#ddd6cc;--ink-700:#2b2921;--ink-500:#55523f;--rust-600:#a3492f;--moss-600:#6b7a4a;--alert-bg:#f3e0d8;--alert-ink:#6e2d1b;--focus-ring:rgba(95,91,64,.45);--shadow-card:0 2px 6px rgba(61,58,43,.08),0 12px 28px rgba(61,58,43,.1);--radius-card:16px;--radius-input:10px;--font-sans:'Poppins','Helvetica Neue',sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--font-sans);color:var(--ink-700);background:var(--cream-200)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column}
+header{height:64px;flex-shrink:0;padding:0 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--olive-700)}
+.brand{display:flex;align-items:center;gap:14px}
+.brand img{display:block;height:30px;width:auto}
+.divider{width:1px;height:26px;background:rgba(237,229,211,.3)}
+h1{margin:0;font:600 13px/1 var(--font-sans);letter-spacing:.24em;text-transform:uppercase;color:var(--cream-200)}
+.host{display:none;font:500 13px/1 var(--font-sans);color:var(--cream-300)}
+main{flex-grow:1;padding:24px 16px 32px}
+.column{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.card{padding:20px;border-radius:var(--radius-card);background:var(--cream-100);box-shadow:var(--shadow-card);display:flex;flex-direction:column;gap:16px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;padding:4px 12px;border-radius:999px;font:600 12px/1.4 var(--font-sans);letter-spacing:.13em;text-transform:uppercase;background:var(--olive-100);color:var(--olive-900)}
+.badge.active{background:var(--moss-600);color:var(--cream-100)}
+.badge.unavailable{background:var(--rust-600);color:var(--cream-100)}
+.badge.busy{background:var(--olive-700);color:var(--cream-200)}
+.status{display:flex;flex-direction:column;gap:6px}
+h2{margin:0;color:var(--olive-900)}
+.status h2{font:700 26px/1.2 var(--font-sans);letter-spacing:-.015em}
+p{margin:0}
+.detail{font:400 15px/1.55 var(--font-sans)}
+.small{font:400 13px/1.5 var(--font-sans);color:var(--ink-500)}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.stat{padding:12px 14px;border-radius:var(--radius-input);background:var(--cream-200);display:flex;flex-direction:column;gap:4px}
+.stat span:first-child{font:600 11px/1.3 var(--font-sans);letter-spacing:.2em;text-transform:uppercase;color:var(--ink-500)}
+.stat span:last-child{font:700 22px/1.2 var(--font-sans);color:var(--olive-900)}
+.actions{display:flex;flex-wrap:wrap;gap:10px}
+.actions>*{flex:1 1 220px;min-width:0}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+button{min-height:44px;padding:0 20px;border:2px solid transparent;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font:600 12px/1 var(--font-sans);letter-spacing:.13em;text-transform:uppercase;cursor:pointer;background:transparent;color:var(--olive-800)}
 button:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px}
-.code{font:700 2rem/1.2 ui-monospace,monospace;letter-spacing:.08em;color:var(--olive-900)}
-dialog{border:0;border-radius:var(--radius-card);padding:16px;max-width:420px;background:var(--cream-100);color:var(--ink-700)}
-dialog::backdrop{background:rgba(18,16,12,.4)}
-dialog .actions{margin-top:16px;justify-content:flex-end}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--olive-700);color:var(--cream-200)}
+button.primary:hover:not(:disabled){background:var(--olive-800)}
+button.secondary{border-color:var(--olive-700)}
+button.secondary:hover:not(:disabled),button.ghost:hover:not(:disabled){background:var(--olive-100)}
+button.danger{border-color:var(--rust-600);color:var(--rust-600)}
+button.danger-solid{background:var(--rust-600);color:var(--cream-100)}
+button.large{min-height:52px;font-size:14px}
+button.link{padding:0 10px;font-size:13px;letter-spacing:0;text-transform:none}
+.code-card h2,.eyebrow{font:600 12px/1.4 var(--font-sans);letter-spacing:.26em;text-transform:uppercase;color:var(--ink-500)}
+.code-box{padding:18px 12px;border-radius:var(--radius-input);border:2px dashed var(--olive-300);background:var(--cream-200);display:flex;justify-content:center}
+.code{font:700 34px/1.1 var(--font-mono);letter-spacing:.12em;color:var(--olive-900);overflow-wrap:anywhere;text-align:center}
+.code .dash{color:var(--olive-300);padding:0 4px}
+.expiry{font:500 15px/1.5 var(--font-sans);color:var(--olive-900)}
+.body{font:400 14px/1.55 var(--font-sans)}
+.note{padding:10px 12px;border-radius:var(--radius-input);display:flex;gap:10px;align-items:flex-start;font:500 14px/1.5 var(--font-sans);background:var(--olive-100);color:var(--olive-900)}
+.note svg,.footnote svg,.alert-title svg{flex-shrink:0;margin-top:1px}
+.note.failed{background:var(--alert-bg);border:1.5px solid var(--rust-600);color:var(--alert-ink)}
+.note.failed svg{color:var(--rust-600)}
+.notice{padding:14px 16px;border-radius:var(--radius-card);font-size:15px}
+.alert{padding:18px;border-radius:var(--radius-card);background:var(--alert-bg);border:1.5px solid var(--rust-600);display:flex;flex-direction:column;gap:12px;color:var(--alert-ink)}
+.alert-title{display:flex;gap:10px;align-items:center;font:700 17px/1.3 var(--font-sans);color:var(--alert-ink)}
+.alert-title svg{color:var(--rust-600)}
+.alert button{align-self:flex-start}
+.footnote{margin:4px 4px 0;display:flex;gap:8px;align-items:flex-start;font:400 13px/1.55 var(--font-sans);color:var(--ink-500)}
+.footnote svg{margin-top:3px}
+dialog{width:calc(100% - 32px);max-width:420px;border:0;border-radius:var(--radius-card);padding:24px;background:var(--cream-100);color:var(--ink-700);box-shadow:var(--shadow-card)}
+dialog::backdrop{background:rgba(18,16,12,.45)}
+dialog h2{font:700 22px/1.25 var(--font-sans)}
+dialog form{display:flex;flex-direction:column;gap:14px}
+dialog .detail{margin:0}
+.devices{padding:10px 12px;border-radius:var(--radius-input);background:var(--paper-100);font:600 14px/1.45 var(--font-sans)}
+dialog .row{justify-content:flex-end;margin-top:4px}
 [hidden]{display:none!important}
+@media (min-width:640px){.host{display:inline}}
 </style>
 </head>
 <body>
+<header>
+<span class="brand"><img src="/logo.svg" alt="Fiona’s Ice Cream" width="56" height="30"><span class="divider" aria-hidden="true"></span><h1>Access codes</h1></span>
+<span class="host">${host}</span>
+</header>
 <main>
-<h1>Access codes</h1>
-<section aria-label="Status">
-<p id="status" role="status">Checking…</p>
+<div class="column">
+<section class="card" aria-labelledby="status-title">
+<div class="top">
+<span id="badge" class="badge">Checking</span>
+<button type="button" class="link" id="refresh"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Check again</button>
+</div>
+<div class="status" role="status">
+<h2 id="status-title">Checking status…</h2>
+<p class="detail" id="detail"></p>
+<p class="small" id="checked"></p>
+</div>
+<div class="stats" id="stats" hidden>
+<div class="stat"><span>Time left</span><span id="time-left"></span></div>
+<div class="stat"><span>Signed in</span><span id="devices"></span></div>
+</div>
 <div class="actions">
-<button type="button" class="primary" data-command="mint">Mint new code</button>
-<button type="button" class="danger" data-command="revoke">Revoke code</button>
-<button type="button" id="refresh">Refresh status</button>
+<button type="button" class="primary large" id="mint" disabled>Mint a code</button>
+<button type="button" class="danger large" id="revoke" hidden>Revoke code</button>
+<button type="button" class="primary large" id="retry" hidden>Try again</button>
 </div>
-<p class="muted">Only reachable on the station’s tailnet. Each change runs once and is never retried.</p>
 </section>
-<section id="result" aria-live="polite" aria-label="Result" hidden>
-<div id="code-box" hidden>
-<p class="muted">New access code</p>
-<p class="code" id="code"></p>
-<p id="expiry"></p>
+<section class="card code-card" id="code-card" aria-labelledby="code-title" hidden>
+<h2 id="code-title">New access code</h2>
+<div class="code-box"><span class="code" id="code"></span></div>
+<p class="expiry" id="expiry"></p>
+<p class="body" id="replaced"></p>
+<p class="note" id="slip"></p>
+<div class="row">
+<button type="button" class="secondary" id="copy">Copy code</button>
+<button type="button" class="ghost" id="hide">Hide code</button>
 </div>
-<p id="message"></p>
-<div class="actions"><button type="button" id="hide" hidden>Hide code</button></div>
 </section>
+<p class="note notice" id="notice" hidden></p>
+<section class="alert" id="alert" role="alert" hidden>
+<span class="alert-title"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></svg><span id="alert-title"></span></span>
+<p class="body" id="alert-text"></p>
+<button type="button" class="danger-solid" id="check-status">Check status</button>
+</section>
+<p class="footnote"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>Only admin-tagged devices on the station’s tailnet can open this page. Each change asks first, runs once and is never retried.</p>
+</div>
 </main>
 <dialog id="confirm" aria-labelledby="confirm-title">
+<form method="dialog">
 <h2 id="confirm-title"></h2>
-<p id="confirm-text"></p>
-<div class="actions">
-<button type="button" id="cancel">Cancel</button>
-<button type="button" class="primary" id="go"></button>
+<p class="detail" id="confirm-text"></p>
+<p class="devices" id="confirm-devices" hidden></p>
+<div class="row">
+<button type="button" class="ghost" id="cancel">Cancel</button>
+<button type="button" id="go"></button>
 </div>
+</form>
 </dialog>
 <script nonce="${nonce}">
 const $ = (id) => document.getElementById(id);
-const actions = [...document.querySelectorAll('[data-command]'), $('refresh')];
-const time = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-const copy = {
-  mint: ['Mint a new code?', 'Minting signs out every staff device and prints a slip.', 'Mint and sign out devices', 'The station didn’t answer. A new code may already be valid, so check the slip or reload status before minting again. Nothing was retried.'],
-  revoke: ['Revoke the access code?', 'Revoking signs out every staff device. Nobody can sign in until you mint a new code.', 'Revoke and sign out devices', 'The station didn’t answer. The code may already be revoked, so reload status before trying again. Nothing was retried.'],
+const icons = {
+  printer: '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v7H6z"/></svg>',
+  alert: '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>',
+  check: '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
 };
+const buttons = ['refresh', 'mint', 'revoke', 'retry', 'check-status'].map($);
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+const clock = (date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const time = (iso) => {
+  const date = new Date(iso);
+  return date.toDateString() === new Date().toDateString() ? clock(date) : date.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+};
+const left = (iso) => {
+  const minutes = Math.floor((Date.parse(iso) - Date.now()) / 60000);
+  if (minutes < 1) return 'Under 1 min';
+  return minutes < 60 ? minutes + ' min' : Math.floor(minutes / 60) + ' h' + (minutes % 60 ? ' ' + (minutes % 60) + ' min' : '');
+};
+const withIcon = (element, icon, text) => { element.innerHTML = icons[icon]; const span = document.createElement('span'); span.textContent = text; element.append(span); };
+const lost = {
+  mint: 'A new code may already be valid. Nothing was retried. Check the printer for a slip and check status before minting again.',
+  revoke: 'The code may already be revoked. Nothing was retried. Check status before trying again.',
+};
+let state = { kind: 'loading' };
+let busy;
 let pending;
-let busy = false;
-const setBusy = (value) => { busy = value; for (const button of actions) button.disabled = value; };
-const hideCode = () => { $('code').textContent = ''; $('expiry').textContent = ''; $('code-box').hidden = true; $('hide').hidden = true; };
+let shownCode = '';
+function render() {
+  const s = state;
+  const active = s.kind === 'active';
+  const badge = $('badge');
+  badge.className = 'badge' + (busy ? ' busy' : active ? ' active' : s.kind === 'unavailable' ? ' unavailable' : '');
+  badge.textContent = busy === 'mint' ? 'Minting' : busy === 'revoke' ? 'Revoking' : active ? 'Active' : s.kind === 'none' ? 'No code' : s.kind === 'unavailable' ? 'Can’t reach the station' : 'Checking';
+  $('status-title').textContent = busy === 'mint' ? 'Minting a new code…' : busy === 'revoke' ? 'Revoking the code…'
+    : active ? 'Code works until ' + time(s.expiresAt) : s.kind === 'none' ? 'No code is active' : s.kind === 'unavailable' ? 'Couldn’t read the status' : 'Checking status…';
+  $('detail').textContent = busy ? 'Wait for the result. Don’t close this page.'
+    : active ? 'Staff sign in with it on any order pad. It ends on its own after 8 hours.'
+    : s.kind === 'none' ? 'Nobody can sign in until you mint a code.'
+    : s.kind === 'unavailable' ? s.error : '';
+  $('checked').textContent = s.checkedAt ? 'Status checked ' + clock(s.checkedAt) + '.' : '';
+  $('stats').hidden = !active || !!busy;
+  if (active) { $('time-left').textContent = left(s.expiresAt); $('devices').textContent = plural(s.sessions, 'device'); }
+  $('mint').hidden = s.kind === 'unavailable';
+  $('mint').textContent = active ? 'Replace code' : 'Mint a code';
+  $('revoke').hidden = !active;
+  $('retry').hidden = s.kind !== 'unavailable';
+  for (const button of buttons) button.disabled = !!busy;
+  $('mint').disabled = !!busy || s.kind === 'loading';
+}
 async function refresh() {
-  $('status').textContent = 'Checking…';
+  if (busy) return;
   try {
     const response = await fetch('/api/admin/access', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
     const body = await response.json();
-    if (!response.ok) { $('status').textContent = body.error ?? 'Status unavailable.'; return; }
-    $('status').textContent = body.active
-      ? 'Access code active until ' + time(body.expiresAt) + ' · ' + body.sessions + (body.sessions === 1 ? ' signed-in device' : ' signed-in devices')
-      : 'No access code is active.';
-  } catch {
-    $('status').textContent = 'Status unavailable. Check the station, then refresh.';
+    if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : '');
+    state = body.active ? { kind: 'active', expiresAt: body.expiresAt, sessions: body.sessions } : { kind: 'none' };
+  } catch (error) {
+    state = { kind: 'unavailable', error: error.message || 'Check that the station and its database are running, then check again.' };
   }
+  state.checkedAt = new Date();
+  render();
 }
-for (const button of document.querySelectorAll('[data-command]'))
-  button.addEventListener('click', () => {
-    if (busy) return;
-    pending = button.dataset.command;
-    $('confirm-title').textContent = copy[pending][0];
-    $('confirm-text').textContent = copy[pending][1];
-    $('go').textContent = copy[pending][2];
-    $('confirm').showModal();
-  });
+function hideCode() {
+  shownCode = '';
+  $('code').textContent = '';
+  $('code-card').hidden = true;
+}
+function showCode(body) {
+  shownCode = body.code;
+  const [first, second] = body.code.split('-');
+  const dash = document.createElement('span');
+  dash.className = 'dash';
+  dash.textContent = '-';
+  $('code').replaceChildren(first, dash, second);
+  $('expiry').textContent = 'Works until ' + time(body.expiresAt) + ' (8 hours).';
+  $('replaced').textContent = body.signedOut > 0
+    ? 'The old code stopped working and ' + plural(body.signedOut, 'device') + ' signed in with it ' + (body.signedOut === 1 ? 'was' : 'were') + ' signed out.'
+    : 'Any previous code stopped working. Hand this one to staff or let them read it off the slip.';
+  $('slip').className = 'note' + (body.slip.printed ? '' : ' failed');
+  $('slip').setAttribute('role', body.slip.printed ? 'status' : 'alert');
+  withIcon($('slip'), body.slip.printed ? 'printer' : 'alert', body.slip.message);
+  $('copy').textContent = 'Copy code';
+  $('code-card').hidden = false;
+}
+function showAlert(title, text) {
+  $('alert-title').textContent = title;
+  $('alert-text').textContent = text;
+  $('alert').hidden = false;
+}
+function ask(command) {
+  if (busy) return;
+  pending = command;
+  const active = state.kind === 'active';
+  const revoke = command === 'revoke';
+  $('confirm-title').textContent = revoke ? 'Revoke the access code?' : active ? 'Replace the access code?' : 'Mint an access code?';
+  $('confirm-text').textContent = revoke ? 'Nobody can sign in until you mint a new code.'
+    : active ? 'A new code works for 8 hours and prints a slip. The current code stops working right away.'
+    : 'It works for 8 hours and prints a slip for staff.';
+  $('confirm-devices').hidden = !active || !state.sessions;
+  $('confirm-devices').textContent = active ? plural(state.sessions, 'device') + ' signed in now will be signed out.' : '';
+  $('go').className = revoke ? 'danger-solid' : 'primary';
+  $('go').textContent = revoke ? 'Revoke and sign out' : active ? 'Replace code' : 'Mint code';
+  $('confirm').showModal();
+}
+$('mint').addEventListener('click', () => ask('mint'));
+$('revoke').addEventListener('click', () => ask('revoke'));
 $('cancel').addEventListener('click', () => $('confirm').close());
-$('refresh').addEventListener('click', () => { if (!busy) refresh(); });
+for (const id of ['refresh', 'retry', 'check-status'])
+  $(id).addEventListener('click', () => { $('alert').hidden = true; refresh(); });
 $('hide').addEventListener('click', hideCode);
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(shownCode);
+    $('copy').textContent = 'Copied';
+  } catch {
+    $('copy').textContent = 'Couldn’t copy';
+  }
+});
 $('go').addEventListener('click', async () => {
   $('confirm').close();
   if (busy || !pending) return;
   const command = pending;
   pending = undefined;
-  setBusy(true);
+  busy = command;
   hideCode();
-  $('result').hidden = false;
-  $('message').textContent = command === 'mint' ? 'Minting…' : 'Revoking…';
+  $('notice').hidden = true;
+  $('alert').hidden = true;
+  render();
   try {
     const response = await fetch('/api/admin/access', {
       method: 'POST',
@@ -359,24 +559,23 @@ $('go').addEventListener('click', async () => {
     });
     let body;
     try { body = await response.json(); } catch { body = undefined; }
-    if (!body || (!response.ok && typeof body.error !== 'string')) $('message').textContent = copy[command][3];
-    else if (!response.ok) $('message').textContent = body.error;
-    else if (body.kind === 'minted') {
-      $('code').textContent = body.code;
-      $('expiry').textContent = 'Valid until ' + time(body.expiresAt) + '. The previous code and every device signed in with it have been signed out.';
-      $('code-box').hidden = false;
-      $('hide').hidden = false;
-      $('message').textContent = body.slip.message;
-    } else
-      $('message').textContent = body.revoked
-        ? 'The access code is void and every device signed in with it has been signed out.'
-        : 'No access code was active.';
+    if (!body || (!response.ok && typeof body.error !== 'string')) showAlert('The station didn’t answer', lost[command]);
+    else if (!response.ok) showAlert('Check before trying again', body.error);
+    else if (body.kind === 'minted') showCode(body);
+    else {
+      withIcon($('notice'), 'check', body.revoked
+        ? 'Code revoked. ' + plural(body.signedOut, 'device') + ' signed out. Nobody can sign in until you mint a new code.'
+        : 'No access code was active, so nothing changed.');
+      $('notice').hidden = false;
+    }
   } catch {
-    $('message').textContent = copy[command][3];
+    showAlert('The station didn’t answer', lost[command]);
   }
-  setBusy(false);
+  busy = undefined;
+  render();
   refresh();
 });
+render();
 refresh();
 </script>
 </body>

@@ -86,12 +86,14 @@ it('minting voids the previous code and signs out every device that used it', as
   const b = await signedIn(first.code, { ...context, browser: secret() });
   const second = await mint();
   expect(second.code).not.toBe(first.code);
+  expect(second.signedOut).toBe(2);
   expect(await auth.session(a.token)).toBeUndefined();
   expect(await auth.session(b.token)).toBeUndefined();
   expect(await database.authSession.count()).toBe(0);
   await expect(login(first.code)).rejects.toMatchObject({
     status: 401,
-    message: 'That access code isn’t valid. Ask for the current code.',
+    message:
+      'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
   });
   expect((await login(second.code)).token).toBeTruthy();
   expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
@@ -129,12 +131,14 @@ it('revoke ends access without minting and status never reveals the code', async
   expect(await manageAccess(database, 'revoke', now)).toEqual({
     kind: 'revoked',
     revoked: true,
+    signedOut: 1,
   });
   expect(await auth.session(ctx.token)).toBeUndefined();
   await expect(login(code)).rejects.toMatchObject({ status: 401 });
   expect(await manageAccess(database, 'revoke', now)).toEqual({
     kind: 'revoked',
     revoked: false,
+    signedOut: 0,
   });
   await expect(manageAccess(database, 'invite', now)).rejects.toThrow();
 });

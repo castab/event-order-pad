@@ -1,4 +1,4 @@
-import { test as base, expect } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
 import { createAdminApp } from '../printer-service/admin-http';
 import type { AccessResult } from '../printer-service/access-admin';
 
@@ -28,20 +28,22 @@ const test = base.extend<{ admin: Admin }>({
     const server = createAdminApp({
       origin,
       capability,
+      assets: 'static',
       access: async (command): Promise<AccessResult> => {
         commands.push(command);
         if (command === 'status')
           return active
-            ? { kind: 'status', expiresAt, sessions: 1 }
+            ? { kind: 'status', expiresAt, sessions: 3 }
             : { kind: 'status', sessions: 0 };
         await gate;
         if (command === 'revoke') {
           const revoked = active;
           active = false;
-          return { kind: 'revoked', revoked };
+          return { kind: 'revoked', revoked, signedOut: revoked ? 3 : 0 };
         }
+        const signedOut = active ? 3 : 0;
         active = true;
-        return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt };
+        return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt, signedOut };
       },
       slip: async () => {
         if (slipFails) throw new Error('Queue paused.');
@@ -83,43 +85,71 @@ test.beforeEach(async ({ page }) => {
   await page.setExtraHTTPHeaders({ 'Tailscale-App-Capabilities': granted });
 });
 
+const heading = (page: Page) => page.locator('#status-title');
+async function mint(page: Page, confirm = 'Mint code') {
+  await page.getByRole('button', { name: 'Mint a code' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: confirm }).click();
+}
+
 test('confirms before minting once, shows the code and can hide it', async ({
   page,
   admin,
 }) => {
   await page.goto(admin.url);
-  await expect(page.getByRole('status')).toHaveText(
-    'No access code is active.',
-  );
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Mint a new code?' });
-  await expect(dialog).toContainText('signs out every staff device');
+  await expect(heading(page)).toHaveText('No code is active');
+  await expect(page.locator('#badge')).toHaveText('No code');
+  await expect(page.getByRole('button', { name: 'Revoke code' })).toBeHidden();
+  await page.getByRole('button', { name: 'Mint a code' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Mint an access code?' });
+  await expect(dialog).toContainText('prints a slip for staff');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
   expect(admin.posts()).toBe(0);
 
   const release = admin.hold();
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  await dialog
-    .getByRole('button', { name: 'Mint and sign out devices' })
-    .click();
-  await expect(page.getByText('Minting…')).toBeVisible();
-  for (const name of ['Mint new code', 'Revoke code', 'Refresh status'])
+  await mint(page);
+  await expect(heading(page)).toHaveText('Minting a new code…');
+  await expect(page.locator('#badge')).toHaveText('Minting');
+  for (const name of ['Mint a code', 'Check again'])
     await expect(page.getByRole('button', { name })).toBeDisabled();
   release();
   await expect(page.getByText('K7QM4-XTD9A')).toBeVisible();
+  await expect(page.getByText('(8 hours).')).toBeVisible();
   await expect(
     page.getByText('Slip submitted to the printer (Star_TSP143-9).'),
   ).toBeVisible();
-  await expect(page.getByRole('status')).toContainText(
-    'Access code active until',
-  );
-  await expect(page.getByRole('status')).toContainText('1 signed-in device');
+  await expect(heading(page)).toContainText('Code works until');
+  await expect(page.locator('#badge')).toHaveText('Active');
+  await expect(page.locator('#devices')).toHaveText('3 devices');
+  await expect(
+    page.getByRole('button', { name: 'Replace code', exact: true }),
+  ).toBeEnabled();
   expect(admin.posts()).toBe(1);
   expect(admin.commands.filter((c) => c === 'mint')).toHaveLength(1);
 
   await page.getByRole('button', { name: 'Hide code' }).click();
   await expect(page.getByText('K7QM4-XTD9A')).toHaveCount(0);
+});
+
+test('replacing a code names the devices it signs out', async ({
+  page,
+  admin,
+}) => {
+  await page.goto(admin.url);
+  await mint(page);
+  await expect(page.locator('#devices')).toHaveText('3 devices');
+  await page.getByRole('button', { name: 'Replace code', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Replace the access code?' });
+  await expect(dialog).toContainText(
+    '3 devices signed in now will be signed out.',
+  );
+  await dialog.getByRole('button', { name: 'Replace code' }).click();
+  await expect(
+    page.getByText(
+      'The old code stopped working and 3 devices signed in with it were signed out.',
+    ),
+  ).toBeVisible();
+  expect(admin.commands.filter((c) => c === 'mint')).toHaveLength(2);
 });
 
 test('keeps the valid code visible when the slip fails', async ({
@@ -128,14 +158,11 @@ test('keeps the valid code visible when the slip fails', async ({
 }) => {
   admin.failSlip();
   await page.goto(admin.url);
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  await page.getByRole('button', { name: 'Mint and sign out devices' }).click();
+  await mint(page);
   await expect(page.getByText('K7QM4-XTD9A')).toBeVisible();
-  await expect(
-    page.getByText(
-      'The slip did not print: Queue paused. The code above is valid; write it down for staff.',
-    ),
-  ).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText(
+    'The slip didn’t print: Queue paused. The code above still works, so write it down for staff.',
+  );
 });
 
 // Chromium transparently resends a POST whose reused connection closed before
@@ -146,13 +173,10 @@ test('refuses a browser resend of a confirmed mint', async ({
 }) => {
   await page.goto(admin.url);
   admin.dropReplies(1);
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  await page.getByRole('button', { name: 'Mint and sign out devices' }).click();
-  await expect(
-    page.getByText(
-      'The station already received this request, so it wasn’t repeated. A new code may already be valid; check the slip or reload status before trying again.',
-    ),
-  ).toBeVisible();
+  await mint(page);
+  await expect(page.getByRole('alert')).toContainText(
+    'The station already received this request, so it wasn’t repeated. A new code may already be valid; check the slip or reload status before trying again.',
+  );
   expect(admin.posts()).toBe(2);
   expect(admin.commands.filter((c) => c === 'mint')).toHaveLength(1);
 });
@@ -163,41 +187,69 @@ test('reports a lost reply as possibly minted and never retries', async ({
 }) => {
   await page.goto(admin.url);
   admin.dropReplies(Infinity);
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  await page.getByRole('button', { name: 'Mint and sign out devices' }).click();
-  await expect(
-    page.getByText(
-      'The station didn’t answer. A new code may already be valid, so check the slip or reload status before minting again. Nothing was retried.',
-    ),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Mint new code' }),
-  ).toBeEnabled();
+  await mint(page);
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('The station didn’t answer');
+  await expect(alert).toContainText(
+    'A new code may already be valid. Nothing was retried. Check the printer for a slip and check status before minting again.',
+  );
   const posts = admin.posts();
   await page.waitForTimeout(500);
   expect(admin.posts()).toBe(posts);
   expect(admin.commands.filter((c) => c === 'mint')).toHaveLength(1);
+  await alert.getByRole('button', { name: 'Check status' }).click();
+  await expect(alert).toBeHidden();
+  await expect(heading(page)).toContainText('Code works until');
 });
 
 test('revokes after confirmation', async ({ page, admin }) => {
   await page.goto(admin.url);
-  await page.getByRole('button', { name: 'Mint new code' }).click();
-  await page.getByRole('button', { name: 'Mint and sign out devices' }).click();
+  await mint(page);
   await expect(page.getByText('K7QM4-XTD9A')).toBeVisible();
   await page.getByRole('button', { name: 'Revoke code' }).click();
   await page
     .getByRole('dialog', { name: 'Revoke the access code?' })
-    .getByRole('button', { name: 'Revoke and sign out devices' })
+    .getByRole('button', { name: 'Revoke and sign out' })
     .click();
   await expect(
     page.getByText(
-      'The access code is void and every device signed in with it has been signed out.',
+      'Code revoked. 3 devices signed out. Nobody can sign in until you mint a new code.',
     ),
   ).toBeVisible();
   await expect(page.getByText('K7QM4-XTD9A')).toHaveCount(0);
-  await expect(page.getByRole('status')).toHaveText(
-    'No access code is active.',
-  );
+  await expect(heading(page)).toHaveText('No code is active');
+});
+
+test('shows the station header and lays out at phone and laptop widths', async ({
+  page,
+  admin,
+}) => {
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 1280, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(admin.url);
+    await expect(heading(page)).toHaveText('No code is active');
+    await expect(
+      page.getByRole('heading', { name: 'Access codes', level: 1 }),
+    ).toBeVisible();
+    expect(
+      await page
+        .getByRole('img', { name: 'Fiona’s Ice Cream' })
+        .evaluate((img: HTMLImageElement) => img.naturalWidth),
+    ).toBeGreaterThan(0);
+    await expect(page.getByText(new URL(admin.url).host)).toBeVisible({
+      visible: viewport.width >= 640,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+    const button = page.getByRole('button', { name: 'Mint a code' });
+    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
 });
 
 test('refuses devices the tailnet policy has not granted', async ({
@@ -207,5 +259,5 @@ test('refuses devices the tailnet policy has not granted', async ({
   await page.setExtraHTTPHeaders({});
   const response = await page.goto(admin.url);
   expect(response?.status()).toBe(403);
-  await expect(page.getByText('Mint new code')).toHaveCount(0);
+  await expect(page.getByText('Mint a code')).toHaveCount(0);
 });

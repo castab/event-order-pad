@@ -2,6 +2,24 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Sign-in and access-code admin redesign — 2026-10-18
+
+The sign-in screen and the tailnet admin page now follow the Order Builder & Ticket design canvas.
+
+- **Sign-in:** the code field drops characters the code alphabet never uses, capitalises and adds the dash as you type, and shows a live character count. **Start shift** stays disabled until all 10 characters are in. A rejected code now points staff to the latest slip. A “Where’s the code?” card replaces the footer note.
+- **Admin page:** it has the app’s olive header, logo and Poppins font, which the listener serves from the static build under `img-src`/`font-src 'self'`. The status card shows a state badge, expiry, time left and signed-in devices, with one state-matched main action. Revoke appears only while a code is active. Confirmations name the devices that will be signed out. The new code appears in a large card with Copy and Hide, the slip result is styled separately, and a lost reply gets its own warning card.
+- **Service:** mint and revoke results include `signedOut`, and a successful login returns the session expiry.
+- **Cleanup:** removed the unused password/passkey icons, enrollment styles and per-user workspace wording left from personal accounts.
+
+All required checks passed in order:
+
+- 27 integration tests on a disposable PostgreSQL 18 container (since removed), and volume recreation.
+- Type checks with zero errors and warnings, and formatting.
+- 301 unit/HTTP tests.
+- Both builds, and 158 Chromium tests, including new admin-page layout, replacement and lost-reply checks.
+
+No station data was touched and no slip was printed. The admin page and sign-in on real devices remain owner checks.
+
 ## Tailnet-only access-code admin page — 2026-10-18
 
 Added an optional second listener (`printer-service/admin-http.ts`) for minting, checking and revoking access codes from a browser. It listens on a private Unix socket, meant to be published only with Tailscale Serve on `:8443`. It requires the admin host and the Tailscale app capability named in `ORDER_PAD_ADMIN_CAPABILITY`, which the tailnet policy grants to tagged devices. An allowlist of user logins came first and was replaced the same day, because Serve sends no login for tagged devices and the owner wants per-device, revocable access. POSTs also need the admin `Origin`, JSON, explicit confirmation and a once-only `requestId`, and only one change runs at a time. The main `createApp` still has no admin route. The uncommitted Android/SSH shortcut was withdrawn before commit.
