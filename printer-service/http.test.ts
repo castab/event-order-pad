@@ -13,6 +13,7 @@ import {
 } from '../tests/helpers/order-repository';
 import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
+import { adminAccessPath } from './admin-http';
 import { AuthError, authPosts, type Authentication } from './auth';
 import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
@@ -824,6 +825,24 @@ it('guards every authentication POST and provides no HTTP access-code administra
   ])
     expect((await send(path, '{}', headers)).status).toBe(404);
   expect((await send('/api/auth/passkeys')).status).toBe(404);
+  // Access administration exists only on the separate tailnet socket listener.
+  const tailnet = {
+    'Tailscale-App-Capabilities': JSON.stringify({
+      'fionasicecream.com/cap/order-pad-admin': [{}],
+    }),
+  };
+  for (const body of [undefined, '{"command":"mint","confirm":true}'])
+    expect(
+      (await send(adminAccessPath, body, { ...headers, ...tailnet })).status,
+    ).toBe(404);
+  expect(
+    (
+      await send(adminAccessPath, undefined, {
+        ...tailnet,
+        Host: 'station.example.ts.net:8443',
+      })
+    ).status,
+  ).toBe(403);
 });
 it('sets secure authentication cookies and returns rate-limit Retry-After headers', async () => {
   const auth = testAuth({

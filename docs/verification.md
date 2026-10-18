@@ -2,6 +2,23 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Tailnet-only access-code admin page — 2026-10-18
+
+Added an optional second listener (`printer-service/admin-http.ts`) for minting, checking and revoking access codes from a browser. It listens on a private Unix socket, meant to be published only with Tailscale Serve on `:8443`. It requires the admin host and the Tailscale app capability named in `ORDER_PAD_ADMIN_CAPABILITY`, which the tailnet policy grants to tagged devices. An allowlist of user logins came first and was replaced the same day, because Serve sends no login for tagged devices and the owner wants per-device, revocable access. POSTs also need the admin `Origin`, JSON, explicit confirmation and a once-only `requestId`, and only one change runs at a time. The main `createApp` still has no admin route. The uncommitted Android/SSH shortcut was withdrawn before commit.
+
+A browser test found that Chromium silently resends a POST when a reused connection closes before any reply. Without the request ID this minted two codes. The station now refuses the resend with 409, and the page tells the owner a code may already be valid.
+
+Verification passed:
+
+- 27 integration tests on a separate disposable PostgreSQL 18 container, and volume recreation.
+- Type checks with zero errors and warnings, and formatting.
+- 300 unit/HTTP tests, including the admin listener’s capability and host checks, socket permissions and configuration.
+- Both builds, and 156 Chromium tests, including the admin page.
+
+A bundled PDF-mode service also ran against the disposable database on a temporary socket. Requests without the required identity were refused, the database mint saved a slip PDF, the resend got 409, the public port answered 401, the journal recorded the login without the code, and shutdown removed the socket.
+
+On the station, the systemd runtime directory and Tailscale Serve `:8443` were then configured. The first request through Serve was refused, because Serve sends `Host: localhost` to Unix-socket backends (tailscale v1.104.1 `serve.go`). The listener now checks Serve’s `X-Forwarded-Host` in that case. Access then moved from a login allowlist to a tag-granted app capability. The admin page moved from `:8443` to the tailnet’s port 443, replacing the old Serve route to the staff app, which had stopped working once the service origin became the public hostname. After the owner saved the policy grant, tagged the Galaxy S10e `tag:order-pad-admin` and restarted the service, the station checks passed. Serve published only `:443` with `AcceptAppCaps`, and `tailscale whois` showed the phone holding the capability. The untagged station was refused with 403 through Serve, `:8443` no longer answered, and the public hostname returned 401. A physical slip and tailnet sign-in remain untested; see [Tailnet admin page](linux-printing.md#tailnet-admin-page).
+
 ## Shared access codes replace personal accounts — 2026-10-16
 
 Replaced usernames, passwords, passkeys, enrollment and recovery with one shared access code minted on the station terminal (`npm run access -- mint|status|revoke`). A code lasts 8 hours; every session it opened ends with it, and minting a new code voids the old one and its sessions. Workspaces now follow the browser cookie, so a device keeps its draft and recovery across codes. The `access_codes` migration drops the account tables and reattaches workspaces for browsers that had exactly one account.
