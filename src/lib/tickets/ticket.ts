@@ -58,6 +58,26 @@ const ADJ = [
   'Merry',
   'Peppy',
   'Snazzy',
+  'Bubbly',
+  'Chipper',
+  'Dandy',
+  'Dreamy',
+  'Fancy',
+  'Fluffy',
+  'Frosty',
+  'Giggly',
+  'Gleeful',
+  'Golden',
+  'Groovy',
+  'Jazzy',
+  'Perky',
+  'Plucky',
+  'Rosy',
+  'Silly',
+  'Sparkly',
+  'Spunky',
+  'Zesty',
+  'Zippy',
 ];
 const NOUN = [
   'Sprinkle',
@@ -72,6 +92,26 @@ const NOUN = [
   'Almond',
   'Caramel',
   'Gummy Bear',
+  'Biscuit',
+  'Brownie',
+  'Cookie',
+  'Cupcake',
+  'Float',
+  'Honeycomb',
+  'Jellybean',
+  'Lollipop',
+  'Macaron',
+  'Malt',
+  'Marshmallow',
+  'Meringue',
+  'Milkshake',
+  'Muffin',
+  'Pancake',
+  'Pretzel',
+  'Pudding',
+  'Snow Cone',
+  'Toffee',
+  'Truffle',
 ];
 const controls = /[\p{Cc}\u2028\u2029]/u;
 
@@ -104,13 +144,22 @@ export function parseReference(value: unknown): string {
 export function blankNameLabel(ticketId: string): string {
   if (typeof ticketId !== 'string' || !ticketId)
     throw new Error('Invalid label ticket ID.');
-  // FNV-1a spreads every ID across all adjective and noun pairs.
+  // FNV-1a, then a Murmur3 finalizer so the power-of-two pick uses every bit.
   let hash = 0x811c9dc5;
   for (let i = 0; i < ticketId.length; i++)
     hash = Math.imul(hash ^ ticketId.charCodeAt(i), 0x01000193);
-  const pick = (hash >>> 0) % (ADJ.length * NOUN.length);
+  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+  const pick = ((hash ^ (hash >>> 16)) >>> 0) % (ADJ.length * NOUN.length);
   return `${ADJ[Math.floor(pick / NOUN.length)]} ${NOUN[pick % NOUN.length]}`;
 }
+const longest = (words: readonly string[]) =>
+  words.reduce((a, b) => (b.length > a.length ? b : a));
+/** The longest possible label; tests check no other label prints taller. */
+export const widestBlankNameLabel = `${longest(ADJ)} ${longest(NOUN)}`;
+export const blankNameLabels: readonly string[] = Object.freeze(
+  ADJ.flatMap((adjective) => NOUN.map((noun) => `${adjective} ${noun}`)),
+);
 export function totalScoops(serving: Pick<ServingEditor, 'flavors'>): number {
   return serving.flavors.reduce((total, portion) => total + portion.count, 0);
 }

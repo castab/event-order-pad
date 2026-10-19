@@ -4,10 +4,12 @@ import {
   CONTAINERS,
   TOPPINGS,
   blankNameLabel,
+  blankNameLabels,
   parseReference,
   parseTicket,
   sampleTicket,
   totalScoops,
+  widestBlankNameLabel,
 } from './ticket';
 import {
   assertPrintable,
@@ -197,7 +199,7 @@ describe('structured immutable tickets', () => {
       expect(() => parseTicket({ ...input(), customerName })).toThrow('Name');
     for (const customerName of [undefined, '', '  \n\x00 '])
       expect(parseTicket({ ...input(), customerName }).displayName).toBe(
-        'Friendly Sprinkle',
+        'Silly Meringue',
       );
     expect(
       parseTicket({ ...input(), displayName: 'Stored friendly label' })
@@ -211,19 +213,37 @@ describe('structured immutable tickets', () => {
       expect(() => parseTicket({ ...input(), displayName })).toThrow();
   });
   it('derives labels from ticket IDs, not references', () => {
-    expect(blankNameLabel('id')).toBe('Friendly Sprinkle');
+    expect(blankNameLabel('id')).toBe('Silly Meringue');
     expect(blankNameLabel('id')).toBe(blankNameLabel('id'));
     expect(parseTicket({ ...input(), reference: '0001' }).displayName).toBe(
       parseTicket({ ...input(), reference: '0002' }).displayName,
     );
-    const labels = new Set(
-      Array.from({ length: 2000 }, (_, i) =>
-        blankNameLabel(i.toString(16).padStart(32, '0')),
-      ),
-    );
-    expect(labels.size).toBe(144);
+    expect(new Set(blankNameLabels).size).toBe(1024);
+    const counts = new Map<string, number>();
+    for (let i = 0; i < 64 * 1024; i++) {
+      const label = blankNameLabel(i.toString(16).padStart(32, '0'));
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    expect(counts.size).toBe(1024);
+    expect(Math.min(...counts.values())).toBeGreaterThan(32);
+    expect(Math.max(...counts.values())).toBeLessThan(96);
     for (const id of ['', 43, undefined])
       expect(() => blankNameLabel(id as string)).toThrow('ticket ID');
+  });
+  it('never prints a blank-name label taller than the widest one checked before printing', () => {
+    const size = (displayName: string) => {
+      const ticket = parseTicket({ ...input(), displayName });
+      return [
+        prepTicketLayout(ticket, true).height,
+        formatTicket(ticket, true, 36).length,
+      ];
+    };
+    const [height, lines] = size(widestBlankNameLabel);
+    for (const label of blankNameLabels) {
+      const [labelHeight, labelLines] = size(label);
+      expect(labelHeight).toBeLessThanOrEqual(height);
+      expect(labelLines).toBeLessThanOrEqual(lines);
+    }
   });
   it('uses safe numeric references', () => {
     expect(parseReference('43')).toBe('0043');

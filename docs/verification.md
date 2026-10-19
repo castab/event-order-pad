@@ -4,13 +4,13 @@ A dated log of automated check results and owner-reported hardware evidence, **n
 
 ## Random blank-name labels — 2026-10-19
 
-Blank-name labels now come from an FNV-1a hash of the random ticket ID instead of the order number. The old formula could produce only 12 labels and always gave #0001 “Bouncy Sundae”. Now 144,000 random 32-hex IDs reach all 144 adjective and noun pairs, 898–1079 times each. Stored tickets keep their saved `displayName`, and a locked draft’s placeholder uses its ticket ID.
+Blank-name labels now come from a hash of the random ticket ID (FNV-1a with a Murmur3 finalizer) instead of the order number. The old formula could produce only 12 labels and always gave #0001 “Bouncy Sundae”. The word lists grew to 32 adjectives and 32 nouns, so there are 1,024 labels; a unit test spreads 65,536 sequential IDs across all of them with no label picked more than 96 times. Printability checks for blank-name drafts use the widest label, and an exhaustive test confirms no label prints taller. Stored tickets keep their saved `displayName`, and a locked draft’s placeholder uses its ticket ID.
 
 All required checks passed in order:
 
 - 28 integration tests on a disposable PostgreSQL 18 container, and volume recreation.
 - Type checks with zero errors and warnings, and formatting.
-- 312 unit/HTTP tests.
+- 313 unit/HTTP tests.
 - Both builds, and 159 Chromium tests. The blank-name test now checks that a reprint keeps the printed label.
 
 No station data was touched and nothing was printed.
