@@ -17,7 +17,11 @@ export function testAuth(
     ratePage: async () => {},
     handle: async (path) => ({
       body:
-        path === '/api/auth/session' ? identity : { sitekey: 'test-sitekey' },
+        path === '/api/auth/session'
+          ? identity
+          : path === '/api/auth/request'
+            ? { status: 'approved', expiresAt: identity.expiresAt }
+            : { sitekey: 'test-sitekey' },
     }),
     ...overrides,
   };

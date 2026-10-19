@@ -26,7 +26,24 @@ export type AccessResult =
       readonly kind: 'status';
       readonly expiresAt?: Date;
       readonly sessions: number;
+      readonly requests: readonly WaitingDevice[];
     };
+export interface WaitingDevice {
+  readonly id: string;
+  readonly match: string;
+  readonly device: string;
+  readonly requestedAt: Date;
+  readonly expiresAt: Date;
+}
+export type SignInDecision = 'approve' | 'deny';
+export type DecisionResult =
+  | {
+      readonly kind: 'approved' | 'denied';
+      readonly id: string;
+      readonly match: string;
+      readonly device: string;
+    }
+  | { readonly kind: 'gone' };
 export function newAccessCode(pick = randomInt): string {
   let code = '';
   for (let i = 0; i < ACCESS_CODE_LENGTH; i++)
@@ -46,10 +63,27 @@ export async function manageAccess(
       where: { revokedAt: null, expiresAt: { gt: now } },
       include: { _count: { select: { sessions: true } } },
     });
+    const requests = active
+      ? await database.signInRequest.findMany({
+          where: {
+            codeId: active.id,
+            status: 'pending',
+            expiresAt: { gt: now },
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
     return {
       kind: 'status',
       expiresAt: active?.expiresAt,
       sessions: active?._count.sessions ?? 0,
+      requests: requests.map((r) => ({
+        id: r.id,
+        match: r.matchNumber,
+        device: r.device,
+        requestedAt: r.createdAt,
+        expiresAt: r.expiresAt,
+      })),
     };
   }
   const code = command === 'mint' ? newAccessCode() : undefined;
@@ -64,6 +98,8 @@ export async function manageAccess(
         where: { codeId: id },
       });
       signedOut += count;
+      // Devices still waiting on the old code see their request expire.
+      await tx.signInRequest.deleteMany({ where: { codeId: id } });
       await tx.authEvent.create({ data: { kind: 'code-revoked', codeId: id } });
     }
     if (!code)
@@ -75,6 +111,66 @@ export async function manageAccess(
     });
     await tx.authEvent.create({ data: { kind: 'code-minted', codeId: id } });
     return { kind: 'minted', code, expiresAt, signedOut };
+  });
+}
+
+/**
+ * Approves or denies one waiting device. Only approval creates a session, and
+ * it serializes with mint and revoke, so a replaced code never gains one.
+ */
+export async function decideSignIn(
+  database: PrismaClient,
+  target: { readonly id: string } | { readonly match: string },
+  decision: SignInDecision,
+  now = new Date(),
+): Promise<DecisionResult> {
+  return database.$transaction(async (tx): Promise<DecisionResult> => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(721404)::text`;
+    const rows =
+      'id' in target
+        ? await tx.$queryRaw<{ token_hash: string }[]>`
+          SELECT token_hash FROM sign_in_requests
+          WHERE id = ${target.id} AND status = 'pending' FOR UPDATE`
+        : await tx.$queryRaw<{ token_hash: string }[]>`
+          SELECT token_hash FROM sign_in_requests
+          WHERE match_number = ${target.match} AND status = 'pending' FOR UPDATE`;
+    if (!rows.length) return { kind: 'gone' };
+    const request = await tx.signInRequest.findUniqueOrThrow({
+      where: { tokenHash: rows[0].token_hash },
+      include: { code: true },
+    });
+    if (
+      request.expiresAt <= now ||
+      request.code.revokedAt ||
+      request.code.expiresAt <= now
+    )
+      return { kind: 'gone' };
+    const approve = decision === 'approve';
+    if (approve)
+      await tx.authSession.create({
+        data: {
+          tokenHash: request.tokenHash,
+          codeId: request.codeId,
+          authenticatedAt: now,
+          expiresAt: request.code.expiresAt,
+        },
+      });
+    await tx.signInRequest.update({
+      where: { tokenHash: request.tokenHash },
+      data: { status: approve ? 'approved' : 'denied', decidedAt: now },
+    });
+    await tx.authEvent.create({
+      data: {
+        kind: approve ? 'sign-in-approved' : 'sign-in-denied',
+        codeId: request.codeId,
+      },
+    });
+    return {
+      kind: approve ? 'approved' : 'denied',
+      id: request.id,
+      match: request.matchNumber,
+      device: request.device,
+    };
   });
 }
 

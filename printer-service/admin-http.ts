@@ -4,10 +4,15 @@ import { chmod, lstat, readFile, stat, unlink } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { dirname, join } from 'node:path';
 import { formatAccessCode } from '../src/lib/auth/model';
-import type { AccessResult } from './access-admin';
+import type {
+  AccessResult,
+  DecisionResult,
+  SignInDecision,
+} from './access-admin';
 import { BadRequest, readJson } from './http';
 
 export const adminAccessPath = '/api/admin/access';
+export const adminRequestsPath = '/api/admin/requests';
 type AccessCommand = 'mint' | 'status' | 'revoke';
 // The page shares the app's self-hosted logo and font, read from the static build.
 const pageAssets: Record<string, string> = {
@@ -47,6 +52,7 @@ export function createAdminApp({
   origin,
   capability,
   access,
+  decide,
   slip,
   slipMode = 'cups',
   assets,
@@ -56,6 +62,7 @@ export function createAdminApp({
   capability: string;
   assets?: string;
   access: (command: AccessCommand) => Promise<AccessResult>;
+  decide: (id: string, decision: SignInDecision) => Promise<DecisionResult>;
   slip: (code: string, expiresAt: Date) => Promise<string>;
   slipMode?: 'cups' | 'pdf';
   log?: (message: string) => void;
@@ -64,6 +71,14 @@ export function createAdminApp({
   // Browsers can resend a POST whose connection closed before any reply bytes,
   // so each confirmation carries an ID that is handled at most once.
   const handled = new Set<string>();
+  const once = (requestId: unknown): requestId is string =>
+    typeof requestId === 'string' && /^[A-Za-z0-9_-]{16,100}$/.test(requestId);
+  const remember = (requestId: string) => {
+    handled.add(requestId);
+    if (handled.size > 200) handled.delete(handled.values().next().value!);
+  };
+  // Decisions never wait behind a mint that is still printing its slip.
+  const deciding = new Set<string>();
   return createServer(async (req, res) => {
     const nonce = randomBytes(18).toString('base64');
     res.setHeader('Cache-Control', 'no-store');
@@ -143,17 +158,89 @@ export function createAdminApp({
           active: !!result.expiresAt,
           expiresAt: result.expiresAt?.toISOString(),
           sessions: result.sessions,
+          requests: result.requests.map((r) => ({
+            id: r.id,
+            match: r.match,
+            device: r.device,
+            requestedAt: r.requestedAt.toISOString(),
+            expiresAt: r.expiresAt.toISOString(),
+          })),
         });
         return;
       }
-      if (req.method === 'POST' && path === adminAccessPath) {
+      if (
+        req.method === 'POST' &&
+        (path === adminAccessPath || path === adminRequestsPath) &&
+        (req.headers.origin !== origin.origin ||
+          req.headers['content-type']?.split(';')[0] !== 'application/json')
+      ) {
+        json(403, { error: 'Use the station’s tailnet admin page.' });
+        return;
+      }
+      if (req.method === 'POST' && path === adminRequestsPath) {
+        const body = (await readJson(req, 1024)) as {
+          decision?: unknown;
+          id?: unknown;
+          requestId?: unknown;
+        } | null;
+        const decision = body?.decision;
+        const id = body?.id;
+        const requestId = body?.requestId;
         if (
-          req.headers.origin !== origin.origin ||
-          req.headers['content-type']?.split(';')[0] !== 'application/json'
-        ) {
-          json(403, { error: 'Use the station’s tailnet admin page.' });
+          (decision !== 'approve' && decision !== 'deny') ||
+          typeof id !== 'string' ||
+          !/^[A-Za-z0-9-]{1,100}$/.test(id) ||
+          !once(requestId)
+        )
+          throw new BadRequest(
+            400,
+            'Choose approve or deny for a waiting device. Nothing changed.',
+          );
+        if (handled.has(requestId)) {
+          json(409, {
+            error:
+              'The station already received this request, so it wasn’t repeated. Check the waiting devices before trying again.',
+          });
           return;
         }
+        if (deciding.has(id)) {
+          json(409, {
+            error:
+              'A decision for this device is still running. Nothing new was sent; wait for its result.',
+          });
+          return;
+        }
+        remember(requestId);
+        deciding.add(id);
+        try {
+          let result;
+          try {
+            result = await decide(id, decision);
+          } catch {
+            log(
+              `Sign-in ${decision} from tailnet by ${device} was not confirmed.`,
+            );
+            json(503, {
+              error:
+                'The station couldn’t confirm the decision. Check the waiting devices before trying again. Nothing was retried.',
+            });
+            return;
+          }
+          if (result.kind === 'gone') {
+            json(409, {
+              error:
+                'That device is no longer waiting. It may have cancelled or timed out, someone may have decided already, or the code changed. Nothing changed.',
+            });
+            return;
+          }
+          log(`Sign-in ${decision} from tailnet by ${device}.`);
+          json(200, { kind: result.kind, id: result.id, match: result.match });
+        } finally {
+          deciding.delete(id);
+        }
+        return;
+      }
+      if (req.method === 'POST' && path === adminAccessPath) {
         const body = (await readJson(req, 1024)) as {
           command?: unknown;
           confirm?: unknown;
@@ -164,8 +251,7 @@ export function createAdminApp({
         if (
           (command !== 'mint' && command !== 'revoke') ||
           body?.confirm !== true ||
-          typeof requestId !== 'string' ||
-          !/^[A-Za-z0-9_-]{16,100}$/.test(requestId)
+          !once(requestId)
         )
           throw new BadRequest(400, 'Confirm mint or revoke. Nothing changed.');
         if (handled.has(requestId)) {
@@ -183,8 +269,7 @@ export function createAdminApp({
           return;
         }
         changing = true;
-        handled.add(requestId);
-        if (handled.size > 200) handled.delete(handled.values().next().value!);
+        remember(requestId);
         try {
           let result;
           try {
@@ -358,8 +443,17 @@ dialog form{display:flex;flex-direction:column;gap:14px}
 dialog .detail{margin:0}
 .devices{padding:10px 12px;border-radius:var(--radius-input);background:var(--paper-100);font:600 14px/1.45 var(--font-sans)}
 dialog .row{justify-content:flex-end;margin-top:4px}
+.badge.waiting{background:var(--rust-600);color:var(--cream-100)}
+.requests{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.request{padding:12px 14px;border-radius:var(--radius-input);background:var(--cream-200);display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:'match who' 'actions actions';gap:12px 14px;align-items:center}
+.match{grid-area:match;font:700 30px/1 var(--font-mono);letter-spacing:.12em;color:var(--olive-900)}
+.who{grid-area:who;display:flex;flex-direction:column;gap:2px}
+.who .name{font:600 15px/1.4 var(--font-sans);color:var(--olive-900);overflow-wrap:anywhere}
+.request .row{grid-area:actions}
+.request .row button{flex:1 1 0}
+dialog .match{padding:14px;border-radius:var(--radius-input);background:var(--cream-200);text-align:center;font-size:40px}
 [hidden]{display:none!important}
-@media (min-width:640px){.host{display:inline}}
+@media (min-width:640px){.host{display:inline}.request{grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:'match who actions'}.request .row button{flex:none}}
 </style>
 </head>
 <body>
@@ -389,6 +483,15 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 <button type="button" class="primary large" id="retry" hidden>Try again</button>
 </div>
 </section>
+<section class="card" id="waiting" aria-labelledby="waiting-title" hidden>
+<div class="top">
+<h2 class="eyebrow" id="waiting-title">Devices waiting</h2>
+<span id="waiting-count" class="badge">None</span>
+</div>
+<p class="body">Approve a device only when its screen shows the same number. Staff can read it to you.</p>
+<ul class="requests" id="requests"></ul>
+<p class="small" id="no-requests">No devices are waiting. New requests appear here on their own.</p>
+</section>
 <section class="card code-card" id="code-card" aria-labelledby="code-title" hidden>
 <h2 id="code-title">New access code</h2>
 <div class="code-box"><span class="code" id="code"></span></div>
@@ -413,6 +516,7 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 <form method="dialog">
 <h2 id="confirm-title"></h2>
 <p class="detail" id="confirm-text"></p>
+<p class="match" id="confirm-match" hidden></p>
 <p class="devices" id="confirm-devices" hidden></p>
 <div class="row">
 <button type="button" class="ghost" id="cancel">Cancel</button>
@@ -447,7 +551,11 @@ const lost = {
 let state = { kind: 'loading' };
 let busy;
 let pending;
+let pendingRequest;
+let deciding;
 let shownCode = '';
+const rows = new Map();
+const title = document.title;
 function render() {
   const s = state;
   const active = s.kind === 'active';
@@ -457,7 +565,7 @@ function render() {
   $('status-title').textContent = busy === 'mint' ? 'Minting a new code…' : busy === 'revoke' ? 'Revoking the code…'
     : active ? 'Code works until ' + time(s.expiresAt) : s.kind === 'none' ? 'No code is active' : s.kind === 'unavailable' ? 'Couldn’t read the status' : 'Checking status…';
   $('detail').textContent = busy ? 'Wait for the result. Don’t close this page.'
-    : active ? 'Staff sign in with it on any order pad. It ends on its own after 8 hours.'
+    : active ? 'Staff enter it on any order pad, then you approve each device below. It ends on its own after 8 hours.'
     : s.kind === 'none' ? 'Nobody can sign in until you mint a code.'
     : s.kind === 'unavailable' ? s.error : '';
   $('checked').textContent = s.checkedAt ? 'Status checked ' + clock(s.checkedAt) + '.' : '';
@@ -469,6 +577,55 @@ function render() {
   $('retry').hidden = s.kind !== 'unavailable';
   for (const button of buttons) button.disabled = !!busy;
   $('mint').disabled = !!busy || s.kind === 'loading';
+  renderRequests();
+}
+function renderRequests() {
+  const requests = state.kind === 'active' ? state.requests : [];
+  $('waiting').hidden = state.kind !== 'active';
+  $('no-requests').hidden = requests.length > 0;
+  $('waiting-count').textContent = requests.length ? plural(requests.length, 'device') : 'None';
+  $('waiting-count').className = 'badge' + (requests.length ? ' waiting' : '');
+  document.title = (requests.length ? '(' + requests.length + ') ' : '') + title;
+  const ids = new Set(requests.map((r) => r.id));
+  for (const [id, row] of rows) if (!ids.has(id)) { row.remove(); rows.delete(id); }
+  for (const request of requests) {
+    let row = rows.get(request.id);
+    if (!row) {
+      row = document.createElement('li');
+      row.className = 'request';
+      const match = document.createElement('span');
+      match.className = 'match';
+      match.textContent = request.match;
+      const who = document.createElement('span');
+      who.className = 'who';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = request.device;
+      const when = document.createElement('span');
+      when.className = 'small';
+      who.append(name, when);
+      const actions = document.createElement('span');
+      actions.className = 'row';
+      const deny = document.createElement('button');
+      deny.type = 'button';
+      deny.className = 'danger';
+      deny.textContent = 'Deny';
+      deny.setAttribute('aria-label', 'Deny device ' + request.match);
+      deny.addEventListener('click', () => decide(request, 'deny'));
+      const approve = document.createElement('button');
+      approve.type = 'button';
+      approve.className = 'primary';
+      approve.textContent = 'Approve';
+      approve.setAttribute('aria-label', 'Approve device ' + request.match);
+      approve.addEventListener('click', () => ask('approve', request));
+      actions.append(deny, approve);
+      row.append(match, who, actions);
+      $('requests').append(row);
+      rows.set(request.id, row);
+    }
+    row.querySelector('.who .small').textContent = 'Asked ' + clock(new Date(request.requestedAt)) + ' · ' + left(request.expiresAt) + ' left';
+    for (const button of row.querySelectorAll('button')) button.disabled = !!deciding;
+  }
 }
 async function refresh() {
   if (busy) return;
@@ -476,7 +633,7 @@ async function refresh() {
     const response = await fetch('/api/admin/access', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
     const body = await response.json();
     if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : '');
-    state = body.active ? { kind: 'active', expiresAt: body.expiresAt, sessions: body.sessions } : { kind: 'none' };
+    state = body.active ? { kind: 'active', expiresAt: body.expiresAt, sessions: body.sessions, requests: Array.isArray(body.requests) ? body.requests : [] } : { kind: 'none' };
   } catch (error) {
     state = { kind: 'unavailable', error: error.message || 'Check that the station and its database are running, then check again.' };
   }
@@ -510,9 +667,22 @@ function showAlert(title, text) {
   $('alert-text').textContent = text;
   $('alert').hidden = false;
 }
-function ask(command) {
-  if (busy) return;
+function ask(command, request) {
+  if (busy || deciding) return;
   pending = command;
+  pendingRequest = request;
+  $('confirm-match').hidden = command !== 'approve';
+  if (command === 'approve') {
+    $('confirm-title').textContent = 'Approve this device?';
+    $('confirm-text').textContent = 'Approve only if the device asking to sign in shows this number. It can take orders until ' + time(state.expiresAt) + '.';
+    $('confirm-match').textContent = request.match;
+    $('confirm-devices').hidden = false;
+    $('confirm-devices').textContent = request.device + ', asked ' + clock(new Date(request.requestedAt)) + '.';
+    $('go').className = 'primary';
+    $('go').textContent = 'Approve device';
+    $('confirm').showModal();
+    return;
+  }
   const active = state.kind === 'active';
   const revoke = command === 'revoke';
   $('confirm-title').textContent = revoke ? 'Revoke the access code?' : active ? 'Replace the access code?' : 'Mint an access code?';
@@ -539,9 +709,47 @@ $('copy').addEventListener('click', async () => {
     $('copy').textContent = 'Couldn’t copy';
   }
 });
+const lostDecision = 'The station may already have recorded it. Nothing was retried. Check the waiting devices before trying again.';
+async function decide(request, decision) {
+  if (busy || deciding) return;
+  deciding = request.id;
+  $('notice').hidden = true;
+  $('alert').hidden = true;
+  renderRequests();
+  try {
+    const response = await fetch('/api/admin/requests', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, id: request.id, requestId: crypto.randomUUID() }),
+      signal: AbortSignal.timeout(30000),
+    });
+    let body;
+    try { body = await response.json(); } catch { body = undefined; }
+    if (!body || (!response.ok && typeof body.error !== 'string')) showAlert('The station didn’t answer', lostDecision);
+    else if (!response.ok) showAlert('Check before trying again', body.error);
+    else {
+      withIcon($('notice'), 'check', body.kind === 'approved'
+        ? 'Approved ' + body.match + '. That device opens the order pad now.'
+        : 'Denied ' + body.match + '. That device is back at the sign-in screen. Didn’t expect it? Replace the code too.');
+      $('notice').hidden = false;
+    }
+  } catch {
+    showAlert('The station didn’t answer', lostDecision);
+  }
+  deciding = undefined;
+  render();
+  refresh();
+}
 $('go').addEventListener('click', async () => {
   $('confirm').close();
   if (busy || !pending) return;
+  if (pending === 'approve') {
+    const request = pendingRequest;
+    pending = pendingRequest = undefined;
+    decide(request, 'approve');
+    return;
+  }
   const command = pending;
   pending = undefined;
   busy = command;
@@ -577,6 +785,10 @@ $('go').addEventListener('click', async () => {
 });
 render();
 refresh();
+// New requests appear without a tap while the page is open.
+setInterval(() => {
+  if (document.visibilityState === 'visible' && !busy && !deciding && !$('confirm').open) refresh();
+}, 3000);
 </script>
 </body>
 </html>

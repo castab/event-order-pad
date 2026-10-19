@@ -174,7 +174,8 @@ export function createApp({
           path === '/manifest.webmanifest' ||
           /\.(?:svg|png|ico|woff2|ttf)$/.test(path));
       const publicAuth =
-        (req.method === 'GET' && path === '/api/auth/config') ||
+        (req.method === 'GET' &&
+          ['/api/auth/config', '/api/auth/request'].includes(path)) ||
         (req.method === 'POST' && publicAuthPosts.has(path));
       const ip =
         authPage || path.startsWith('/api/auth/')
@@ -207,7 +208,11 @@ export function createApp({
           !(req.method === 'POST' && authPosts.has(path)) &&
           !(
             req.method === 'GET' &&
-            ['/api/auth/config', '/api/auth/session'].includes(path)
+            [
+              '/api/auth/config',
+              '/api/auth/session',
+              '/api/auth/request',
+            ].includes(path)
           )
         ) {
           json(404, { error: 'Not found.' });
@@ -222,6 +227,7 @@ export function createApp({
             browser: browser!,
             token,
             identity,
+            userAgent: req.headers['user-agent'],
           },
         );
         if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);

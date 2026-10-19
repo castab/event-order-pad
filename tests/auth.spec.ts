@@ -19,15 +19,20 @@ async function widget(page: Page, automatic = true) {
       }),
   );
 }
+type Request = { status: 'pending' | 'approved' | 'denied' | 'expired' };
 async function setup(
   page: Page,
   initial = false,
-  { automaticTurnstile = true } = {},
+  { automaticTurnstile = true, automaticApproval = true } = {},
 ) {
   const station = await mockStationApi(page);
   let signedIn = initial;
   let limited = false;
   let current = code;
+  // The station's decision about this browser's sign-in request.
+  let request: Request | undefined;
+  let cancels = 0;
+  const waitUntil = new Date(Date.now() + 10 * 60000).toISOString();
   await widget(page, automaticTurnstile);
   await page.route('**/api/auth/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -48,6 +53,25 @@ async function setup(
           );
     if (path.endsWith('/logout')) {
       signedIn = false;
+      request = undefined;
+      return reply({ ok: true });
+    }
+    if (path.endsWith('/request'))
+      return reply(
+        !request
+          ? { status: 'none' }
+          : request.status === 'pending'
+            ? { status: 'pending', match: '4821', expiresAt: waitUntil }
+            : request.status === 'approved'
+              ? {
+                  status: 'approved',
+                  expiresAt: new Date(Date.now() + 8 * 3600000).toISOString(),
+                }
+              : { status: request.status },
+      );
+    if (path.endsWith('/cancel')) {
+      cancels++;
+      request = undefined;
       return reply({ ok: true });
     }
     if (path.endsWith('/login')) {
@@ -64,8 +88,9 @@ async function setup(
           },
           401,
         );
-      signedIn = true;
-      return reply({ ok: true });
+      request = { status: automaticApproval ? 'approved' : 'pending' };
+      signedIn = automaticApproval;
+      return reply({ status: 'pending', match: '4821', expiresAt: waitUntil });
     }
     return reply({ error: 'Not found' }, 404);
   });
@@ -81,10 +106,20 @@ async function setup(
     rotate: (next: string) => {
       current = next;
       signedIn = false;
+      request = undefined;
     },
     signOut: () => {
       signedIn = false;
+      request = undefined;
     },
+    approve: () => {
+      request = { status: 'approved' };
+      signedIn = true;
+    },
+    deny: () => (request = { status: 'denied' }),
+    expire: () => (request = { status: 'expired' }),
+    request: () => request?.status,
+    cancels: () => cancels,
     limit: () => {
       limited = true;
     },
@@ -405,5 +440,121 @@ for (const viewport of [
     await menu.click();
     const item = page.getByRole('menuitem', { name: 'Sign out this device' });
     expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect(await overflow()).toBeLessThanOrEqual(0);
+  });
+
+test('a correct code waits for the station to approve this device', async ({
+  page,
+}) => {
+  const auth = await setup(page, false, { automaticApproval: false });
+  await page.goto('/login/');
+  await enterCode(page);
+  const waiting = page.getByRole('region', { name: 'Waiting for approval' });
+  await expect(waiting).toBeVisible();
+  await expect(waiting).toContainText('Your number is 4821');
+  await expect(waiting).toContainText('Waits up to 10 more minutes.');
+  await expect(page.getByLabel('Access code', { exact: true })).toBeHidden();
+  // Still waiting after a few checks: nothing opens on its own.
+  await page.waitForTimeout(3500);
+  await expect(waiting).toBeVisible();
+  await expect(page).toHaveURL(/\/login\/?$/);
+  auth.approve();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled({
+    timeout: 10000,
+  });
+});
+test('a denied request returns to the form with a toast that a reload does not repeat', async ({
+  page,
+}) => {
+  const auth = await setup(page, false, { automaticApproval: false });
+  await page.goto('/login/');
+  await enterCode(page);
+  await expect(
+    page.getByRole('region', { name: 'Waiting for approval' }),
+  ).toBeVisible();
+  auth.deny();
+  const toast = page.getByRole('alert');
+  await expect(toast).toContainText('The request to sign in was denied.', {
+    timeout: 10000,
+  });
+  await expect(toast).toContainText(
+    'Check with the shift lead before trying again.',
+  );
+  await expect(page.getByLabel('Access code', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Start shift', exact: true }),
+  ).toBeVisible();
+  // The decided request is forgotten.
+  await expect.poll(() => auth.cancels()).toBe(1);
+  expect(auth.request()).toBeUndefined();
+  const dismiss = toast.getByRole('button', { name: 'Dismiss' });
+  expect((await dismiss.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await dismiss.click();
+  await expect(toast).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByLabel('Access code', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+test('a device can cancel its request, and an expired request asks for the code again', async ({
+  page,
+}) => {
+  const auth = await setup(page, false, { automaticApproval: false });
+  await page.goto('/login/');
+  await enterCode(page);
+  const waiting = page.getByRole('region', { name: 'Waiting for approval' });
+  await waiting.getByRole('button', { name: 'Cancel' }).click();
+  await expect(waiting).toHaveCount(0);
+  await expect(page.getByLabel('Access code', { exact: true })).toBeVisible();
+  expect(auth.request()).toBeUndefined();
+  await enterCode(page);
+  await expect(waiting).toBeVisible();
+  auth.expire();
+  await expect(page.getByRole('alert')).toHaveText(
+    'The request expired before anyone approved it. Enter the code to try again.',
+    { timeout: 10000 },
+  );
+  await expect(page.getByLabel('Access code', { exact: true })).toBeVisible();
+});
+test('reloading while waiting picks the request back up', async ({ page }) => {
+  const auth = await setup(page, false, { automaticApproval: false });
+  await page.goto('/login/');
+  await enterCode(page);
+  await expect(
+    page.getByRole('region', { name: 'Waiting for approval' }),
+  ).toBeVisible();
+  await page.reload();
+  const waiting = page.getByRole('region', { name: 'Waiting for approval' });
+  await expect(waiting).toContainText('Your number is 4821');
+  auth.approve();
+  await expect(page.getByLabel('Customer name (optional)')).toBeEnabled({
+    timeout: 10000,
+  });
+});
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 1280, height: 800 },
+])
+  test(`the waiting screen and denial toast lay out at ${viewport.width}×${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    const auth = await setup(page, false, { automaticApproval: false });
+    await page.goto('/login/');
+    await enterCode(page);
+    const waiting = page.getByRole('region', { name: 'Waiting for approval' });
+    await expect(waiting).toBeVisible();
+    const overflow = () =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+    expect(await overflow()).toBeLessThanOrEqual(0);
+    const cancel = waiting.getByRole('button', { name: 'Cancel' });
+    expect((await cancel.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    auth.deny();
+    const toast = page.getByRole('alert');
+    await expect(toast).toBeVisible({ timeout: 10000 });
+    const box = (await toast.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
     expect(await overflow()).toBeLessThanOrEqual(0);
   });

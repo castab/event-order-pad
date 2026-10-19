@@ -13,7 +13,7 @@ import {
 } from '../tests/helpers/order-repository';
 import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
-import { adminAccessPath } from './admin-http';
+import { adminAccessPath, adminRequestsPath } from './admin-http';
 import { AuthError, authPosts, type Authentication } from './auth';
 import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
@@ -813,7 +813,11 @@ it('guards every authentication POST and provides no HTTP access-code administra
     ).toBe(403);
   }
   expect(handle).not.toHaveBeenCalled();
-  expect([...authPosts]).toEqual(['/api/auth/login', '/api/auth/logout']);
+  expect([...authPosts]).toEqual([
+    '/api/auth/login',
+    '/api/auth/cancel',
+    '/api/auth/logout',
+  ]);
   for (const path of [
     '/api/auth/bootstrap',
     '/api/auth/mint',
@@ -837,12 +841,59 @@ it('guards every authentication POST and provides no HTTP access-code administra
     ).toBe(404);
   expect(
     (
+      await send(adminRequestsPath, '{"decision":"approve","id":"x"}', {
+        ...headers,
+        ...tailnet,
+      })
+    ).status,
+  ).toBe(404);
+  expect(
+    (
       await send(adminAccessPath, undefined, {
         ...tailnet,
         Host: 'station.example.ts.net:8443',
       })
     ).status,
   ).toBe(403);
+});
+it('lets a waiting device check and cancel its sign-in request without a session', async () => {
+  const handle = vi.fn(async () => ({
+    body: { status: 'none' },
+    clearSession: true,
+  }));
+  const { send, station } = await app(
+    true,
+    testAuth({ session: async () => undefined, handle }),
+  );
+  const load = vi.spyOn(station, 'load');
+  const token = 'b'.repeat(64);
+  const status = await send('/api/auth/request', undefined, {
+    Cookie: '__Host-order-pad-session=' + token,
+    'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1',
+  });
+  expect(status.status).toBe(200);
+  expect(handle).toHaveBeenLastCalledWith(
+    '/api/auth/request',
+    'GET',
+    undefined,
+    expect.objectContaining({
+      token,
+      identity: undefined,
+      userAgent: 'Mozilla/5.0 (iPhone) Safari/604.1',
+    }),
+  );
+  expect((await send('/api/auth/cancel', '{}')).status).toBe(403);
+  const cancelled = await send('/api/auth/cancel', '{}', headers);
+  expect(cancelled.status).toBe(200);
+  expect(
+    cancelled.headers['set-cookie']!.some((c) =>
+      c.startsWith('__Host-order-pad-session=; Max-Age=0'),
+    ),
+  ).toBe(true);
+  // A pending request opens nothing else.
+  expect((await send('/api/auth/session')).status).toBe(401);
+  expect((await send('/api/station')).status).toBe(401);
+  expect(load).not.toHaveBeenCalled();
 });
 it('sets secure authentication cookies and returns rate-limit Retry-After headers', async () => {
   const auth = testAuth({

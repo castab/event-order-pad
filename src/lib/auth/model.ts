@@ -38,3 +38,35 @@ export function parseAuthSession(value: unknown): AuthSession {
     authenticatedAt: v.authenticatedAt,
   });
 }
+/** How long a device waits for the station to approve its sign-in. */
+export const SIGN_IN_REQUEST_MINUTES = 10;
+export type SignInRequest =
+  | {
+      readonly status: 'pending';
+      readonly match: string;
+      readonly expiresAt: string;
+    }
+  | { readonly status: 'approved'; readonly expiresAt: string }
+  | { readonly status: 'denied' | 'expired' | 'none' };
+/** This device's sign-in request, as the station reports it. */
+export function parseSignInRequest(value: unknown): SignInRequest {
+  const v = value as Record<string, unknown> | null;
+  const time = (t: unknown): t is string =>
+    typeof t === 'string' && Number.isFinite(Date.parse(t));
+  if (
+    v?.status === 'pending' &&
+    typeof v.match === 'string' &&
+    /^\d{4}$/.test(v.match) &&
+    time(v.expiresAt)
+  )
+    return Object.freeze({
+      status: 'pending',
+      match: v.match,
+      expiresAt: v.expiresAt,
+    });
+  if (v?.status === 'approved' && time(v.expiresAt))
+    return Object.freeze({ status: 'approved', expiresAt: v.expiresAt });
+  if (v?.status === 'denied' || v?.status === 'expired' || v?.status === 'none')
+    return Object.freeze({ status: v.status });
+  throw new Error('Invalid sign-in request.');
+}

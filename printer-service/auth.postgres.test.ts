@@ -1,8 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { createOrderDatabase } from './order-database';
-import { PostgresAuth, digest, secret, type AuthContext } from './auth';
-import { manageAccess } from './access-admin';
+import {
+  PostgresAuth,
+  digest,
+  secret,
+  type AuthContext,
+  type AuthReply,
+} from './auth';
+import { decideSignIn, manageAccess } from './access-admin';
 import { PostgresStationRepository } from './station-database';
 
 const url = process.env.TEST_DATABASE_URL!;
@@ -23,7 +29,7 @@ const send = vi.fn<typeof fetch>(verified);
 let auth: PostgresAuth;
 let context: AuthContext;
 beforeEach(async () => {
-  await database.$executeRaw`TRUNCATE access_workspaces, auth_events, auth_rates, auth_sessions, access_codes, workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
+  await database.$executeRaw`TRUNCATE sign_in_requests, access_workspaces, auth_events, auth_rates, auth_sessions, access_codes, workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
   now = new Date('2026-10-16T12:00:00.000Z');
   send.mockReset();
   send.mockImplementation(verified);
@@ -50,11 +56,17 @@ function login(code: string, ctx = context) {
     ctx,
   );
 }
+const match = (reply: AuthReply) => (reply.body as { match: string }).match;
 async function signedIn(code: string, ctx = context) {
   const reply = await login(code, ctx);
+  expect(
+    await decideSignIn(database, { match: match(reply) }, 'approve', now),
+  ).toMatchObject({ kind: 'approved' });
   const identity = (await auth.session(reply.token))!;
   return { ...ctx, token: reply.token, identity };
 }
+const iphone =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
 it('stores only hashes and ends every session when the code’s 8 hours run out', async () => {
   const { code, expiresAt } = await mint();
@@ -63,13 +75,13 @@ it('stores only hashes and ends every session when the code’s 8 hours run out'
   expect(stored.codeHash).toMatch(/^\$argon2id\$/);
   expect(stored.codeHash).not.toContain(code);
   // Lowercase with a hyphen, as staff might type it.
-  const early = await login(
+  const early = await signedIn(
     `${code.slice(0, 5)}-${code.slice(5)}`.toLowerCase(),
   );
   const row = await database.authSession.findFirstOrThrow();
   expect(row.tokenHash).toBe(digest(early.token!));
   now = new Date(now.getTime() + 7 * 3600000);
-  const late = await login(code, { ...context, browser: secret() });
+  const late = await signedIn(code, { ...context, browser: secret() });
   for (const token of [early.token, late.token])
     expect((await auth.session(token))?.expiresAt).toBe(
       expiresAt.toISOString(),
@@ -122,11 +134,17 @@ it('revoke ends access without minting and status never reveals the code', async
     kind: 'status',
     expiresAt: undefined,
     sessions: 0,
+    requests: [],
   });
   const { code, expiresAt } = await mint();
   const ctx = await signedIn(code);
   const status = await manageAccess(database, 'status', now);
-  expect(status).toEqual({ kind: 'status', expiresAt, sessions: 1 });
+  expect(status).toEqual({
+    kind: 'status',
+    expiresAt,
+    sessions: 1,
+    requests: [],
+  });
   expect(JSON.stringify(status)).not.toContain(code);
   expect(await manageAccess(database, 'revoke', now)).toEqual({
     kind: 'revoked',
@@ -280,6 +298,202 @@ it('logs out only this device and cleans up expired rows in small batches', asyn
   now = new Date(now.getTime() + 8 * 3600000);
   await auth.cleanup();
   expect(await database.accessCode.count()).toBe(0);
+});
+
+it('a correct code only asks; approval at the station opens the session', async () => {
+  const { code, expiresAt } = await mint();
+  const ctx = { ...context, userAgent: iphone };
+  const reply = await login(code, ctx);
+  const waitUntil = new Date(now.getTime() + 10 * 60000).toISOString();
+  expect(reply.body).toEqual({
+    status: 'pending',
+    match: expect.stringMatching(/^\d{4}$/),
+    expiresAt: waitUntil,
+  });
+  const number = match(reply);
+  expect(await auth.session(reply.token)).toBeUndefined();
+  expect(await database.authSession.count()).toBe(0);
+  expect(await auth.request(reply.token)).toEqual({
+    status: 'pending',
+    match: number,
+    expiresAt: waitUntil,
+  });
+  expect(await auth.request(secret())).toEqual({ status: 'none' });
+  expect(await auth.request('not-a-token')).toEqual({ status: 'none' });
+  const stored = await database.signInRequest.findFirstOrThrow();
+  expect(stored.tokenHash).toBe(digest(reply.token!));
+  expect(stored.ipHash).toBe(digest(context.ip));
+  expect(JSON.stringify(stored)).not.toContain(reply.token);
+  const status = await manageAccess(database, 'status', now);
+  expect(status).toMatchObject({
+    sessions: 0,
+    requests: [
+      {
+        id: stored.id,
+        match: number,
+        device: 'Safari on iPhone',
+        requestedAt: now,
+        expiresAt: new Date(waitUntil),
+      },
+    ],
+  });
+  now = new Date(now.getTime() + 60000);
+  expect(
+    await decideSignIn(database, { id: stored.id }, 'approve', now),
+  ).toEqual({
+    kind: 'approved',
+    id: stored.id,
+    match: number,
+    device: 'Safari on iPhone',
+  });
+  const identity = await auth.session(reply.token);
+  expect(identity).toMatchObject({
+    expiresAt: expiresAt.toISOString(),
+    authenticatedAt: now.toISOString(),
+  });
+  expect(await auth.request(reply.token)).toEqual({
+    status: 'approved',
+    expiresAt: expiresAt.toISOString(),
+  });
+  expect(
+    await decideSignIn(database, { id: stored.id }, 'approve', now),
+  ).toEqual({ kind: 'gone' });
+  expect(await decideSignIn(database, { match: number }, 'deny', now)).toEqual({
+    kind: 'gone',
+  });
+  expect(await auth.session(reply.token)).toBeTruthy();
+  expect((await manageAccess(database, 'status', now)).kind).toBe('status');
+  expect(
+    (await database.authEvent.findMany({ orderBy: { id: 'asc' } })).map(
+      (e) => e.kind,
+    ),
+  ).toEqual(['code-minted', 'sign-in-requested', 'sign-in-approved']);
+});
+
+it('denied, expired, cancelled and replaced requests never open a session', async () => {
+  const { code } = await mint();
+  const browser = () => ({ ...context, browser: secret() });
+  const denied = await login(code, browser());
+  expect(
+    await decideSignIn(database, { match: match(denied) }, 'deny', now),
+  ).toMatchObject({ kind: 'denied' });
+  expect(await auth.request(denied.token)).toEqual({ status: 'denied' });
+  expect(
+    await decideSignIn(database, { match: match(denied) }, 'approve', now),
+  ).toEqual({ kind: 'gone' });
+
+  const lapsed = await login(code, browser());
+  const lapsedId = (
+    await database.signInRequest.findUniqueOrThrow({
+      where: { tokenHash: digest(lapsed.token!) },
+    })
+  ).id;
+  const cancelled = await login(code, browser());
+  const cancelledId = (
+    await database.signInRequest.findUniqueOrThrow({
+      where: { tokenHash: digest(cancelled.token!) },
+    })
+  ).id;
+  expect(
+    await auth.handle(
+      '/api/auth/cancel',
+      'POST',
+      {},
+      {
+        ...context,
+        token: cancelled.token,
+      },
+    ),
+  ).toEqual({ body: { ok: true }, clearSession: true });
+  expect(await auth.request(cancelled.token)).toEqual({ status: 'none' });
+  expect(
+    await decideSignIn(database, { id: cancelledId }, 'approve', now),
+  ).toEqual({ kind: 'gone' });
+
+  now = new Date(now.getTime() + 10 * 60000);
+  expect(await auth.request(lapsed.token)).toEqual({ status: 'expired' });
+  expect(
+    await decideSignIn(database, { id: lapsedId }, 'approve', now),
+  ).toEqual({ kind: 'gone' });
+
+  const replaced = await login(code, browser());
+  const second = await mint();
+  expect(second.signedOut).toBe(0);
+  expect(await auth.request(replaced.token)).toEqual({ status: 'none' });
+  expect(
+    await decideSignIn(database, { match: match(replaced) }, 'approve', now),
+  ).toEqual({ kind: 'gone' });
+  for (const reply of [denied, lapsed, cancelled, replaced])
+    expect(await auth.session(reply.token)).toBeUndefined();
+  expect(await database.authSession.count()).toBe(0);
+  // Cancelling also ends a session the station approved meanwhile.
+  const raced = await login(second.code, browser());
+  await decideSignIn(database, { match: match(raced) }, 'approve', now);
+  await auth.handle(
+    '/api/auth/cancel',
+    'POST',
+    {},
+    {
+      ...context,
+      token: raced.token,
+    },
+  );
+  expect(await auth.session(raced.token)).toBeUndefined();
+});
+
+it('keeps one waiting request per browser, unique numbers and at most ten per code', async () => {
+  const { code } = await mint();
+  const first = await login(code);
+  const again = await login(code);
+  expect(await auth.request(first.token)).toEqual({ status: 'none' });
+  expect(await auth.request(again.token)).toMatchObject({ status: 'pending' });
+  const replies = [again];
+  for (let n = 1; n < 10; n++)
+    replies.push(
+      await login(code, {
+        ...context,
+        ip: `192.0.2.${10 + n}`,
+        browser: secret(),
+      }),
+    );
+  expect(new Set(replies.map(match)).size).toBe(10);
+  await expect(
+    login(code, { ...context, ip: '192.0.2.99', browser: secret() }),
+  ).rejects.toMatchObject({
+    status: 429,
+    message:
+      'Too many devices are waiting for approval. Ask the station to review them first.',
+  });
+  await decideSignIn(database, { match: match(replies[0]) }, 'deny', now);
+  expect(
+    (await login(code, { ...context, ip: '192.0.2.98', browser: secret() }))
+      .body,
+  ).toMatchObject({ status: 'pending' });
+});
+
+it('an approval racing a new code never leaves a session for the old one', async () => {
+  let { code } = await mint();
+  for (let n = 0; n < 5; n++) {
+    const reply = await login(code, { ...context, browser: secret() });
+    const [decision, minted] = await Promise.all([
+      decideSignIn(database, { match: match(reply) }, 'approve', now),
+      mint(),
+    ]);
+    expect(['approved', 'gone']).toContain(decision.kind);
+    expect(minted.signedOut).toBe(decision.kind === 'approved' ? 1 : 0);
+    expect(await auth.session(reply.token)).toBeUndefined();
+    expect(await database.authSession.count()).toBe(0);
+    ({ code } = minted);
+  }
+});
+
+it('cleans up requests that stopped waiting', async () => {
+  const { code } = await mint();
+  await login(code);
+  await login(code, { ...context, browser: secret() });
+  now = new Date(now.getTime() + 10 * 60000);
+  await auth.cleanup();
+  expect(await database.signInRequest.count()).toBe(0);
 });
 
 it('the migration reattaches a browser’s workspace only when it had one account', async () => {

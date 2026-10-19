@@ -5,8 +5,17 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { adminAccessPath, createAdminApp, listenAdmin } from './admin-http';
-import type { AccessResult } from './access-admin';
+import {
+  adminAccessPath,
+  adminRequestsPath,
+  createAdminApp,
+  listenAdmin,
+} from './admin-http';
+import type {
+  AccessResult,
+  DecisionResult,
+  SignInDecision,
+} from './access-admin';
 
 const origin = new URL('https://station.example.ts.net:8443');
 const host = origin.host;
@@ -14,6 +23,13 @@ const capability = 'fionasicecream.com/cap/order-pad-admin';
 const granted = JSON.stringify({ [capability]: [{}] });
 const phone = '100.101.102.104';
 const expiresAt = new Date('2026-10-18T23:00:00.000Z');
+const waiting = {
+  id: '6f1c2f8e-5d0b-4c47-9a35-1f9c1b7e2a10',
+  match: '4821',
+  device: 'Safari on iPhone',
+  requestedAt: new Date('2026-10-18T15:41:00.000Z'),
+  expiresAt: new Date('2026-10-18T15:51:00.000Z'),
+};
 const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
@@ -28,12 +44,24 @@ async function directory() {
 
 async function admin(
   access = vi.fn(async (command: string): Promise<AccessResult> => {
-    if (command === 'status') return { kind: 'status', expiresAt, sessions: 2 };
+    if (command === 'status')
+      return { kind: 'status', expiresAt, sessions: 2, requests: [waiting] };
     if (command === 'revoke')
       return { kind: 'revoked', revoked: true, signedOut: 3 };
     return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt, signedOut: 2 };
   }),
   slip = vi.fn(async () => 'Star_TSP143-9'),
+  decide = vi.fn(
+    async (id: string, decision: SignInDecision): Promise<DecisionResult> =>
+      id === waiting.id
+        ? {
+            kind: decision === 'approve' ? 'approved' : 'denied',
+            id,
+            match: waiting.match,
+            device: waiting.device,
+          }
+        : { kind: 'gone' },
+  ),
 ) {
   const socket = join(await directory(), 'admin.sock');
   const log = vi.fn();
@@ -41,6 +69,7 @@ async function admin(
     origin,
     capability,
     access,
+    decide,
     slip,
     assets: 'static',
     log,
@@ -101,8 +130,9 @@ async function admin(
   const post = (
     body: unknown,
     headers: Record<string, string | string[] | undefined> = {},
+    path = adminAccessPath,
   ) =>
-    send(adminAccessPath, {
+    send(path, {
       method: 'POST',
       headers: {
         origin: origin.origin,
@@ -119,7 +149,11 @@ async function admin(
                 : body,
             ),
     });
-  return { socket, access, slip, log, send, post };
+  const decision = (
+    body: unknown,
+    headers: Record<string, string | string[] | undefined> = {},
+  ) => post(body, headers, adminRequestsPath);
+  return { socket, access, slip, decide, log, send, post, decision };
 }
 
 describe('tailnet admin listener', () => {
@@ -224,7 +258,7 @@ describe('tailnet admin listener', () => {
     expect(response.status).toBe(200);
   });
 
-  it('reports status without the code', async () => {
+  it('reports status and waiting devices without the code', async () => {
     const { send } = await admin();
     const response = await send(adminAccessPath);
     expect(response.status).toBe(200);
@@ -232,6 +266,15 @@ describe('tailnet admin listener', () => {
       active: true,
       expiresAt: expiresAt.toISOString(),
       sessions: 2,
+      requests: [
+        {
+          id: waiting.id,
+          match: '4821',
+          device: 'Safari on iPhone',
+          requestedAt: '2026-10-18T15:41:00.000Z',
+          expiresAt: '2026-10-18T15:51:00.000Z',
+        },
+      ],
     });
   });
 
@@ -378,6 +421,101 @@ describe('tailnet admin listener', () => {
     expect(access).toHaveBeenCalledWith('revoke');
     expect(slip).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['another origin', { origin: 'https://orders.example.com' }],
+    ['no origin', { origin: '' }],
+    ['a form body', { 'content-type': 'application/x-www-form-urlencoded' }],
+    ['a device without the capability', { 'tailscale-app-capabilities': '{}' }],
+    ['the wrong host', { 'x-forwarded-host': 'orders.example.com' }],
+  ])('refuses a sign-in decision from %s', async (_, headers) => {
+    const { decision, decide } = await admin();
+    expect(
+      (await decision({ decision: 'approve', id: waiting.id }, headers)).status,
+    ).toBe(403);
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { decision: 'allow', id: waiting.id },
+    { decision: 'approve' },
+    { decision: 'approve', id: '' },
+    { decision: 'approve', id: 'has spaces' },
+    { decision: 'approve', id: waiting.id, requestId: 'short' },
+    null,
+  ])('rejects an invalid sign-in decision %j', async (body) => {
+    const { decision, decide } = await admin();
+    expect((await decision(body)).status).toBe(400);
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it('approves and denies a waiting device and logs who decided', async () => {
+    const { decision, decide, log } = await admin();
+    const approved = await decision({ decision: 'approve', id: waiting.id });
+    expect(approved.status).toBe(200);
+    expect(JSON.parse(approved.body)).toEqual({
+      kind: 'approved',
+      id: waiting.id,
+      match: '4821',
+    });
+    const denied = await decision({ decision: 'deny', id: waiting.id });
+    expect(JSON.parse(denied.body).kind).toBe('denied');
+    expect(decide.mock.calls).toEqual([
+      [waiting.id, 'approve'],
+      [waiting.id, 'deny'],
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      `Sign-in approve from tailnet by ${phone}.`,
+    );
+  });
+
+  it('says when a device is no longer waiting', async () => {
+    const { decision } = await admin();
+    const response = await decision({ decision: 'approve', id: 'gone-id' });
+    expect(response.status).toBe(409);
+    expect(JSON.parse(response.body).error).toContain(
+      'That device is no longer waiting.',
+    );
+  });
+
+  it('reports an unconfirmed decision without retrying it', async () => {
+    const decide = vi.fn(async (): Promise<DecisionResult> => {
+      throw new Error('connection lost');
+    });
+    const { decision } = await admin(undefined, undefined, decide);
+    const response = await decision({ decision: 'approve', id: waiting.id });
+    expect(response.status).toBe(503);
+    expect(JSON.parse(response.body).error).toContain('Nothing was retried');
+    expect(decide).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles each decision ID at most once', async () => {
+    const { decision, decide } = await admin();
+    const body = {
+      decision: 'approve',
+      id: waiting.id,
+      requestId: randomUUID(),
+    };
+    expect((await decision(body)).status).toBe(200);
+    expect((await decision(body)).status).toBe(409);
+    expect(decide).toHaveBeenCalledTimes(1);
+  });
+
+  it('decides while a mint is still printing its slip', async () => {
+    let release!: () => void;
+    const slip = vi.fn(
+      () =>
+        new Promise<string>((resolve) => (release = () => resolve('job-1'))),
+    );
+    const { post, decision } = await admin(undefined, slip);
+    const minting = post({ command: 'mint', confirm: true });
+    await vi.waitFor(() => expect(slip).toHaveBeenCalled());
+    expect((await decision({ decision: 'deny', id: waiting.id })).status).toBe(
+      200,
+    );
+    release();
+    expect((await minting).status).toBe(200);
+  });
 });
 
 describe('listenAdmin', () => {
@@ -386,6 +524,7 @@ describe('listenAdmin', () => {
       origin,
       capability,
       access: vi.fn(),
+      decide: vi.fn(),
       slip: vi.fn(),
     });
 

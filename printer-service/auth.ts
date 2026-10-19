@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { hash, verify } from '@node-rs/argon2';
 import type { Prisma, PrismaClient } from './generated/prisma/client';
@@ -6,7 +6,9 @@ import { newDraft } from '../src/lib/tickets/order';
 import {
   parseAccessCode,
   parseAuthSession,
+  SIGN_IN_REQUEST_MINUTES,
   type AuthSession,
+  type SignInRequest,
 } from '../src/lib/auth/model';
 
 type Transaction = Prisma.TransactionClient;
@@ -28,6 +30,7 @@ export interface AuthContext {
   readonly browser: string;
   readonly token?: string;
   readonly identity?: Identity;
+  readonly userAgent?: string;
 }
 export interface AuthReply {
   readonly body: unknown;
@@ -46,7 +49,7 @@ export interface Authentication {
     context: AuthContext,
   ): Promise<AuthReply>;
 }
-export const publicAuthPosts = new Set(['/api/auth/login']);
+export const publicAuthPosts = new Set(['/api/auth/login', '/api/auth/cancel']);
 export const authPosts = new Set([...publicAuthPosts, '/api/auth/logout']);
 export const secret = () => randomBytes(32).toString('hex');
 export const digest = (value: string) =>
@@ -55,6 +58,8 @@ export const sessionCookie = '__Host-order-pad-session';
 export const browserCookie = '__Host-order-pad-browser';
 /** Cookie lifetime only; every session also ends with its access code. */
 export const sessionSeconds = 8 * 60 * 60;
+/** More waiting devices than this means someone is guessing at the station's patience. */
+export const waitingLimit = 10;
 export function opaque(value: unknown): value is string {
   return (
     typeof value === 'string' && value.length === 64 && !/[^a-f0-9]/.test(value)
@@ -100,6 +105,43 @@ export function parseAuthConfig(env: NodeJS.ProcessEnv) {
   return Object.freeze({ proxy, sitekey, turnstileSecret });
 }
 export type AuthConfig = ReturnType<typeof parseAuthConfig>;
+/** A short browser and platform name for the approval list; it is a hint, never trusted. */
+export function deviceLabel(agent: unknown): string {
+  if (typeof agent !== 'string') return 'Unknown browser';
+  const ua = agent.slice(0, 512);
+  // iPadOS Safari asks for desktop sites, so it reads as a Mac.
+  const platform = /iPad/.test(ua)
+    ? 'iPad'
+    : /iPhone|iPod/.test(ua)
+      ? 'iPhone'
+      : /Android/.test(ua)
+        ? 'Android'
+        : /CrOS/.test(ua)
+          ? 'ChromeOS'
+          : /Windows/.test(ua)
+            ? 'Windows'
+            : /Macintosh|Mac OS X/.test(ua)
+              ? 'Mac'
+              : /Linux/.test(ua)
+                ? 'Linux'
+                : '';
+  const browser = /Edg(?:A|iOS)?\//.test(ua)
+    ? 'Edge'
+    : /OPR\//.test(ua)
+      ? 'Opera'
+      : /SamsungBrowser\//.test(ua)
+        ? 'Samsung Internet'
+        : /Firefox\/|FxiOS\//.test(ua)
+          ? 'Firefox'
+          : /Chrome\/|CriOS\//.test(ua)
+            ? 'Chrome'
+            : /Safari\//.test(ua)
+              ? 'Safari'
+              : '';
+  if (browser && platform) return `${browser} on ${platform}`;
+  if (platform) return `Browser on ${platform}`;
+  return browser || 'Unknown browser';
+}
 const invalid = () =>
   new AuthError(
     401,
@@ -159,7 +201,8 @@ export class PostgresAuth implements Authentication {
     await this.database.$queryRaw`SELECT
       (SELECT id FROM access_codes LIMIT 1), (SELECT token_hash FROM auth_sessions LIMIT 1),
       (SELECT key FROM auth_rates LIMIT 1), (SELECT code_id FROM auth_events LIMIT 1),
-      (SELECT workspace_key FROM access_workspaces LIMIT 1)`;
+      (SELECT workspace_key FROM access_workspaces LIMIT 1),
+      (SELECT token_hash FROM sign_in_requests LIMIT 1)`;
   }
   private valid(
     row: {
@@ -219,6 +262,30 @@ export class PostgresAuth implements Authentication {
       await tx.accessWorkspace.create({ data: { browserHash, workspaceKey } });
       return workspaceKey;
     });
+  }
+  /** What the station decided about this token's sign-in request; reading never changes it. */
+  async request(token?: string): Promise<SignInRequest> {
+    if (!opaque(token)) return { status: 'none' };
+    const row = await this.database.signInRequest.findUnique({
+      where: { tokenHash: digest(token) },
+      include: { code: true },
+    });
+    const now = this.now();
+    if (!row) return { status: 'none' };
+    if (row.status === 'denied') return { status: 'denied' };
+    if (row.status === 'approved') {
+      const identity = await this.session(token);
+      return identity
+        ? { status: 'approved', expiresAt: identity.expiresAt }
+        : { status: 'none' };
+    }
+    if (row.expiresAt <= now || row.code.revokedAt || row.code.expiresAt <= now)
+      return { status: 'expired' };
+    return {
+      status: 'pending',
+      match: row.matchNumber,
+      expiresAt: row.expiresAt.toISOString(),
+    };
   }
   private async audit(
     tx: Transaction | PrismaClient,
@@ -305,6 +372,8 @@ export class PostgresAuth implements Authentication {
       if (!context.identity) throw new AuthError(401, 'Sign in to continue.');
       return { body: parseAuthSession(context.identity) };
     }
+    if (method === 'GET' && path === '/api/auth/request')
+      return { body: await this.request(context.token) };
     if (method !== 'POST' || !authPosts.has(path))
       throw new AuthError(404, 'Not found.');
     const body = object(input);
@@ -314,6 +383,9 @@ export class PostgresAuth implements Authentication {
         await tx.authSession.deleteMany({
           where: { tokenHash: context.identity!.sessionHash },
         });
+        await tx.signInRequest.deleteMany({
+          where: { tokenHash: context.identity!.sessionHash },
+        });
         await this.audit(
           tx,
           'signed-out',
@@ -321,6 +393,21 @@ export class PostgresAuth implements Authentication {
           context.ip,
         );
       });
+      return { body: { ok: true }, clearSession: true };
+    }
+    if (path === '/api/auth/cancel') {
+      // Abandons this token whatever the station decided meanwhile.
+      if (opaque(context.token)) {
+        const tokenHash = digest(context.token);
+        await this.database.$transaction(async (tx) => {
+          const { count } = await tx.signInRequest.deleteMany({
+            where: { tokenHash },
+          });
+          await tx.authSession.deleteMany({ where: { tokenHash } });
+          if (count)
+            await this.audit(tx, 'sign-in-cancelled', undefined, context.ip);
+        });
+      }
       return { body: { ok: true }, clearSession: true };
     }
     await this.rate('operation:' + context.ip, 10, 60);
@@ -347,22 +434,61 @@ export class PostgresAuth implements Authentication {
       const now = this.now();
       if (current.revokedAt || current.expiresAt <= now) throw invalid();
       await this.clearFailureReservations(tx, keys);
-      if (opaque(context.token))
-        await tx.authSession.deleteMany({
-          where: { tokenHash: digest(context.token) },
-        });
+      if (opaque(context.token)) {
+        const previous = digest(context.token);
+        await tx.authSession.deleteMany({ where: { tokenHash: previous } });
+        await tx.signInRequest.deleteMany({ where: { tokenHash: previous } });
+      }
+      const browserHash = digest(context.browser);
+      await tx.signInRequest.deleteMany({
+        where: { browserHash, status: 'pending' },
+      });
+      const waiting = await tx.signInRequest.findMany({
+        where: { status: 'pending' },
+        select: { matchNumber: true, codeId: true, expiresAt: true },
+      });
+      if (
+        waiting.filter((r) => r.codeId === current.id && r.expiresAt > now)
+          .length >= waitingLimit
+      )
+        throw new AuthError(
+          429,
+          'Too many devices are waiting for approval. Ask the station to review them first.',
+          60,
+        );
+      // Logins serialize on the code row, so this number stays unique among waiting devices.
+      const taken = new Set(waiting.map((r) => r.matchNumber));
+      let matchNumber;
+      do matchNumber = String(randomInt(10000)).padStart(4, '0');
+      while (taken.has(matchNumber));
       const token = secret();
-      await tx.authSession.create({
+      const expiresAt = new Date(
+        Math.min(
+          now.getTime() + SIGN_IN_REQUEST_MINUTES * 60000,
+          current.expiresAt.getTime(),
+        ),
+      );
+      // Only approval creates the session row, so this token opens nothing yet.
+      await tx.signInRequest.create({
         data: {
           tokenHash: digest(token),
+          id: randomUUID(),
           codeId: current.id,
-          authenticatedAt: now,
-          expiresAt: current.expiresAt,
+          browserHash,
+          matchNumber,
+          device: deviceLabel(context.userAgent),
+          ipHash: digest(context.ip),
+          createdAt: now,
+          expiresAt,
         },
       });
-      await this.audit(tx, 'signed-in', current.id, context.ip);
+      await this.audit(tx, 'sign-in-requested', current.id, context.ip);
       return {
-        body: { ok: true, expiresAt: current.expiresAt.toISOString() },
+        body: {
+          status: 'pending',
+          match: matchNumber,
+          expiresAt: expiresAt.toISOString(),
+        },
         token,
       };
     });
@@ -373,6 +499,7 @@ export class PostgresAuth implements Authentication {
     for (const [table, column] of [
       ['auth_sessions', 'token_hash'],
       ['auth_rates', 'key'],
+      ['sign_in_requests', 'token_hash'],
     ] as const) {
       const { Prisma } = await import('./generated/prisma/client');
       await this.database

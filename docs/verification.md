@@ -2,6 +2,19 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Device approval after access-code sign-in — 2026-10-18
+
+A correct access code no longer signs a device in by itself. Login now records a pending `sign_in_requests` row (new migration `20261019000000_sign_in_requests`) with a 4-digit number, and sets a session cookie whose `auth_sessions` row exists only once the station approves it. The device shows **Waiting for approval** with the number and checks `GET /api/auth/request` every 3 seconds. It can **Cancel**, and a reload resumes the wait. A denial returns it to the sign-in form with “The request to sign in was denied.” The tailnet admin page lists **Devices waiting**, checks for new ones every 3 seconds, and approves (after confirming the number) or denies through `POST /api/admin/requests`. The station terminal can do the same with `npm run access -- requests | approve <number> | deny <number>`. Approval serializes with mint and revoke, so a replaced code never gains a session. Each browser keeps one waiting request, numbers are unique among waiting devices, at most 10 can wait, and requests end after 10 minutes.
+
+All required checks passed in order:
+
+- 32 integration tests on a disposable `order_pad_test` database in the local PostgreSQL 18 container, including new approval, denial, expiry, cancellation, replacement, per-browser, cap, cleanup and approve-versus-mint race tests. Volume recreation also passed.
+- Type checks with zero errors and warnings, and formatting.
+- 320 unit/HTTP tests.
+- Both builds, and 167 Chromium tests, including the waiting screen, denial toast, cancel, expiry, reload, layout and admin approve/deny/polling checks.
+
+The bundled CLI also ran against the disposable database: it listed two waiting devices, approved one (creating one session), refused a repeat with exit code 1, denied the other and rejected malformed numbers. No station data was touched and no slip was printed. Approving a real phone through the tunnel and the tailnet admin page remains an owner check.
+
 ## Sign-in and access-code admin redesign — 2026-10-18
 
 The sign-in screen and the tailnet admin page now follow the Order Builder & Ticket design canvas.

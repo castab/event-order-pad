@@ -74,6 +74,7 @@ model AccessCode {
   expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
   revokedAt DateTime? @db.Timestamptz(3) @map("revoked_at")
   sessions AuthSession[]
+  requests SignInRequest[]
   @@index([expiresAt])
   @@map("access_codes")
 }
@@ -86,6 +87,24 @@ model AuthSession {
   @@index([codeId])
   @@index([expiresAt])
   @@map("auth_sessions")
+}
+model SignInRequest {
+  tokenHash String @id @map("token_hash")
+  id String @unique
+  codeId String @map("code_id")
+  browserHash String @map("browser_hash")
+  matchNumber String @map("match_number")
+  device String
+  ipHash String? @map("ip_hash")
+  status String @default("pending")
+  createdAt DateTime @db.Timestamptz(3) @map("created_at")
+  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  decidedAt DateTime? @db.Timestamptz(3) @map("decided_at")
+  code AccessCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+  @@index([codeId])
+  @@index([browserHash])
+  @@index([expiresAt])
+  @@map("sign_in_requests")
 }
 model AuthRate {
   key String @id

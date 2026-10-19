@@ -1,4 +1,9 @@
-import { parseAuthSession, type AuthSession } from './model';
+import {
+  parseAuthSession,
+  parseSignInRequest,
+  type AuthSession,
+  type SignInRequest,
+} from './model';
 import { holdActivity } from './activity';
 
 export function authenticationRequired() {
@@ -61,4 +66,12 @@ export async function authRequest(
 }
 export async function currentSession(): Promise<AuthSession> {
   return parseAuthSession(await authRequest('session'));
+}
+/** Where this device's sign-in request stands; reading it never changes it. */
+export async function signInStatus(): Promise<SignInRequest> {
+  return parseSignInRequest(await authRequest('request'));
+}
+/** Abandons this device's sign-in request, whatever the station decided. */
+export async function cancelSignIn(): Promise<void> {
+  await authRequest('cancel', {});
 }

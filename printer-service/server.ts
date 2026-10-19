@@ -8,7 +8,7 @@ import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
 import { PostgresAuth, parseAuthConfig } from './auth';
-import { manageAccess, printAccessSlip } from './access-admin';
+import { decideSignIn, manageAccess, printAccessSlip } from './access-admin';
 import { createAdminApp, listenAdmin } from './admin-http';
 import {
   parseTrackingEnabled,
@@ -91,6 +91,7 @@ const admin = adminConfig
       origin: adminConfig.origin,
       capability: adminConfig.capability,
       access: (command) => manageAccess(database, command),
+      decide: (id, decision) => decideSignIn(database, { id }, decision),
       slip: (code, expiresAt) => printAccessSlip(output, code, expiresAt, font),
       slipMode: printMode,
       assets: root,

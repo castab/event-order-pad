@@ -836,6 +836,48 @@ form.auth-stack {
   color: var(--olive-900);
   font-size: 15px;
 }
+/* The denial toast floats over the sign-in page like the builder's print toast. */
+.auth-toast {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  max-width: 440px;
+  margin: 0 auto;
+}
+.auth-waiting {
+  padding: 20px;
+  border-radius: var(--radius-card);
+  background: var(--cream-100);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+.auth-waiting h2 {
+  margin: 0;
+  color: var(--olive-900);
+  font-size: 20px;
+  line-height: 1.3;
+}
+.auth-waiting p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.auth-waiting .match-number {
+  padding: 14px 12px;
+  border-radius: 10px;
+  border: 2px dashed var(--olive-300);
+  background: var(--cream-200);
+  color: var(--olive-900);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0.16em;
+}
 /* Interaction-only Turnstile is invisible unless Cloudflare needs a tap; keep room for
    it so the button does not jump when it appears. */
 .turnstile-slot {

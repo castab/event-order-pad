@@ -1,6 +1,10 @@
 import { test as base, expect, type Page } from '@playwright/test';
 import { createAdminApp } from '../printer-service/admin-http';
-import type { AccessResult } from '../printer-service/access-admin';
+import type {
+  AccessResult,
+  DecisionResult,
+  WaitingDevice,
+} from '../printer-service/access-admin';
 
 const capability = 'fionasicecream.com/cap/order-pad-admin';
 const granted = JSON.stringify({ [capability]: [{}] });
@@ -13,6 +17,12 @@ type Admin = {
   hold: () => () => void;
   failSlip: () => void;
   dropReplies: (count: number) => void;
+  activate: () => void;
+  /** A device entered the code and waits for approval. */
+  request: (match: string, device?: string) => void;
+  /** The device gave up before anyone decided. */
+  cancel: (match: string) => void;
+  decisions: string[];
 };
 // The production listener is a Unix socket behind Tailscale Serve; the browser
 // test serves the same app on loopback TCP and supplies Serve's capability header.
@@ -25,6 +35,8 @@ const test = base.extend<{ admin: Admin }>({
     let slipFails = false;
     let dropReplies = 0;
     let active = false;
+    let requests: WaitingDevice[] = [];
+    const decisions: string[] = [];
     const server = createAdminApp({
       origin,
       capability,
@@ -33,8 +45,8 @@ const test = base.extend<{ admin: Admin }>({
         commands.push(command);
         if (command === 'status')
           return active
-            ? { kind: 'status', expiresAt, sessions: 3 }
-            : { kind: 'status', sessions: 0 };
+            ? { kind: 'status', expiresAt, sessions: 3, requests }
+            : { kind: 'status', sessions: 0, requests: [] };
         await gate;
         if (command === 'revoke') {
           const revoked = active;
@@ -43,7 +55,20 @@ const test = base.extend<{ admin: Admin }>({
         }
         const signedOut = active ? 3 : 0;
         active = true;
+        requests = [];
         return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt, signedOut };
+      },
+      decide: async (id, decision): Promise<DecisionResult> => {
+        decisions.push(`${decision} ${id}`);
+        const request = requests.find((r) => r.id === id);
+        if (!request) return { kind: 'gone' };
+        requests = requests.filter((r) => r !== request);
+        return {
+          kind: decision === 'approve' ? 'approved' : 'denied',
+          id,
+          match: request.match,
+          device: request.device,
+        };
       },
       slip: async () => {
         if (slipFails) throw new Error('Queue paused.');
@@ -77,6 +102,17 @@ const test = base.extend<{ admin: Admin }>({
       },
       failSlip: () => (slipFails = true),
       dropReplies: (count) => (dropReplies = count),
+      activate: () => (active = true),
+      request: (match, device = 'Safari on iPhone') =>
+        requests.push({
+          id: 'request-' + match,
+          match,
+          device,
+          requestedAt: new Date(),
+          expiresAt: new Date(Date.now() + 600000),
+        }),
+      cancel: (match) => (requests = requests.filter((r) => r.match !== match)),
+      decisions,
     });
     await new Promise((resolve) => server.close(resolve));
   },
@@ -260,4 +296,82 @@ test('refuses devices the tailnet policy has not granted', async ({
   const response = await page.goto(admin.url);
   expect(response?.status()).toBe(403);
   await expect(page.getByText('Mint a code')).toHaveCount(0);
+});
+
+test('approves a waiting device only after confirming its number, once', async ({
+  page,
+  admin,
+}) => {
+  admin.activate();
+  admin.request('4821');
+  await page.goto(admin.url);
+  const waiting = page.getByRole('region', { name: 'Devices waiting' });
+  await expect(waiting).toContainText('Safari on iPhone');
+  await expect(waiting.locator('.match')).toHaveText('4821');
+  await expect(page).toHaveTitle('(1) Access codes · Order Pad');
+  const approve = page.getByRole('button', { name: 'Approve device 4821' });
+  expect((await approve.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await approve.click();
+  const dialog = page.getByRole('dialog', { name: 'Approve this device?' });
+  await expect(dialog).toContainText(
+    'Approve only if the device asking to sign in shows this number.',
+  );
+  await expect(dialog).toContainText('4821');
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  expect(admin.posts()).toBe(0);
+  await approve.click();
+  await dialog.getByRole('button', { name: 'Approve device' }).click();
+  await expect(
+    page.getByText('Approved 4821. That device opens the order pad now.'),
+  ).toBeVisible();
+  await expect(waiting).toContainText('No devices are waiting.');
+  await expect(page).toHaveTitle('Access codes · Order Pad');
+  expect(admin.decisions).toEqual(['approve request-4821']);
+  expect(admin.posts()).toBe(1);
+});
+
+test('shows new requests without a tap and denies at once', async ({
+  page,
+  admin,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  admin.activate();
+  await page.goto(admin.url);
+  const waiting = page.getByRole('region', { name: 'Devices waiting' });
+  await expect(waiting).toContainText('No devices are waiting.');
+  admin.request('0457', 'Chrome on Android');
+  admin.request('9310');
+  await expect(waiting.getByRole('listitem')).toHaveCount(2, {
+    timeout: 8000,
+  });
+  await expect(page.locator('#waiting-count')).toHaveText('2 devices');
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  await page.getByRole('button', { name: 'Deny device 0457' }).click();
+  await expect(
+    page.getByText(
+      'Denied 0457. That device is back at the sign-in screen. Didn’t expect it? Replace the code too.',
+    ),
+  ).toBeVisible();
+  await expect(waiting.getByRole('listitem')).toHaveCount(1);
+  expect(admin.decisions).toEqual(['deny request-0457']);
+});
+
+test('says when a device is no longer waiting', async ({ page, admin }) => {
+  // A frozen clock keeps polling from removing the stale row first.
+  await page.clock.install();
+  admin.activate();
+  admin.request('4821');
+  await page.goto(admin.url);
+  const deny = page.getByRole('button', { name: 'Deny device 4821' });
+  await deny.waitFor();
+  admin.cancel('4821');
+  await deny.click();
+  await expect(page.getByRole('alert')).toContainText(
+    'That device is no longer waiting.',
+  );
+  expect(admin.decisions).toEqual(['deny request-4821']);
 });
