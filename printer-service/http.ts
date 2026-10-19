@@ -222,6 +222,7 @@ export function createApp({
             browser: browser!,
             token,
             identity,
+            userAgent: req.headers['user-agent'],
           },
         );
         if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);

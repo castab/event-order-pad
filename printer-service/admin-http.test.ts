@@ -6,14 +6,50 @@ import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { adminAccessPath, createAdminApp, listenAdmin } from './admin-http';
-import type { AccessResult } from './access-admin';
+import { AccessRefused, type MintedCode } from './access-admin';
 
 const origin = new URL('https://station.example.ts.net:8443');
 const host = origin.host;
 const capability = 'fionasicecream.com/cap/order-pad-admin';
 const granted = JSON.stringify({ [capability]: [{}] });
 const phone = '100.101.102.104';
-const expiresAt = new Date('2026-10-18T23:00:00.000Z');
+const redeemBy = new Date('2026-10-18T16:00:00.000Z');
+const minted = (count: number): MintedCode[] =>
+  ['K7QM4XTD9A', 'B3NR8PWX2C', 'HJ5TZ7Q9MV', 'D2F4G6H8JK', 'M3P5R7T9VX']
+    .slice(0, count)
+    .map((code, index) => ({ id: `code-${index}`, code, redeemBy }));
+function fakeAccess() {
+  return {
+    status: vi.fn(async () => ({
+      unused: [
+        {
+          id: 'code-1',
+          createdAt: new Date('2026-10-18T15:00:00.000Z'),
+          redeemBy,
+        },
+      ],
+      devices: [
+        {
+          id: 'code-0',
+          device: 'Safari on iPad',
+          signedInAt: new Date('2026-10-18T15:05:00.000Z'),
+          expiresAt: new Date('2026-10-18T23:05:00.000Z'),
+        },
+      ],
+    })),
+    mint: vi.fn(async (count: number) => minted(count)),
+    revoke: vi.fn(
+      async (): Promise<
+        | { kind: 'revoked'; voided: number; signedOut: number }
+        | { kind: 'gone' }
+      > => ({ kind: 'revoked', voided: 1, signedOut: 1 }),
+    ),
+  };
+}
+const calls = (access: ReturnType<typeof fakeAccess>) =>
+  access.status.mock.calls.length +
+  access.mint.mock.calls.length +
+  access.revoke.mock.calls.length;
 const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
@@ -27,13 +63,8 @@ async function directory() {
 }
 
 async function admin(
-  access = vi.fn(async (command: string): Promise<AccessResult> => {
-    if (command === 'status') return { kind: 'status', expiresAt, sessions: 2 };
-    if (command === 'revoke')
-      return { kind: 'revoked', revoked: true, signedOut: 3 };
-    return { kind: 'minted', code: 'K7QM4XTD9A', expiresAt, signedOut: 2 };
-  }),
-  slip = vi.fn(async () => 'Star_TSP143-9'),
+  access = fakeAccess(),
+  slip = vi.fn(async (code: string, _redeemBy: Date) => `Star_TSP143-${code}`),
 ) {
   const socket = join(await directory(), 'admin.sock');
   const log = vi.fn();
@@ -135,7 +166,9 @@ describe('tailnet admin listener', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
     expect(page.body).toContain(`<script nonce="${nonce}">`);
-    expect(page.body).toContain('Mint a code');
+    expect(page.body).toContain(
+      'How many access codes would you like to mint?',
+    );
     expect(page.body).toContain(
       '<span class="host">station.example.ts.net:8443</span>',
     );
@@ -170,10 +203,10 @@ describe('tailnet admin listener', () => {
       for (const response of [
         await send('/', { headers }),
         await send(adminAccessPath, { headers }),
-        await post({ command: 'mint', confirm: true }, headers),
+        await post({ command: 'mint', count: 1 }, headers),
       ])
         expect(response.status).toBe(403);
-      expect(access).not.toHaveBeenCalled();
+      expect(calls(access)).toBe(0);
     },
   );
 
@@ -212,7 +245,7 @@ describe('tailnet admin listener', () => {
       const headers = { host: wrongHost, 'x-forwarded-host': forwarded };
       expect((await send('/', { headers })).status).toBe(403);
       expect((await send(adminAccessPath, { headers })).status).toBe(403);
-      expect(access).not.toHaveBeenCalled();
+      expect(calls(access)).toBe(0);
     },
   );
 
@@ -224,23 +257,33 @@ describe('tailnet admin listener', () => {
     expect(response.status).toBe(200);
   });
 
-  it('reports status without the code', async () => {
+  it('reports unused codes and signed-in devices, never a code', async () => {
     const { send } = await admin();
     const response = await send(adminAccessPath);
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({
-      active: true,
-      expiresAt: expiresAt.toISOString(),
-      sessions: 2,
+      unused: [
+        {
+          id: 'code-1',
+          createdAt: '2026-10-18T15:00:00.000Z',
+          redeemBy: redeemBy.toISOString(),
+        },
+      ],
+      devices: [
+        {
+          id: 'code-0',
+          device: 'Safari on iPad',
+          signedInAt: '2026-10-18T15:05:00.000Z',
+          expiresAt: '2026-10-18T23:05:00.000Z',
+        },
+      ],
     });
   });
 
   it('reports an unavailable database for status', async () => {
-    const { send } = await admin(
-      vi.fn(async () => {
-        throw new Error('down');
-      }),
-    );
+    const access = fakeAccess();
+    access.status.mockRejectedValue(new Error('down'));
+    const { send } = await admin(access);
     expect((await send(adminAccessPath)).status).toBe(503);
   });
 
@@ -251,29 +294,32 @@ describe('tailnet admin listener', () => {
     ['a form body', { 'content-type': 'application/x-www-form-urlencoded' }],
   ])('refuses a change from %s', async (_, headers) => {
     const { post, access } = await admin();
-    expect(
-      (await post({ command: 'mint', confirm: true }, headers)).status,
-    ).toBe(403);
-    expect(access).not.toHaveBeenCalled();
+    expect((await post({ command: 'mint', count: 1 }, headers)).status).toBe(
+      403,
+    );
+    expect(calls(access)).toBe(0);
   });
 
   it.each([
     { command: 'mint' },
-    { command: 'mint', confirm: 'yes' },
+    { command: 'mint', count: 0 },
+    { command: 'mint', count: 6 },
+    { command: 'mint', count: 2.5 },
+    { command: 'mint', count: '3' },
+    { command: 'revoke', target: 'all' },
+    { command: 'revoke', target: 'all', confirm: 'yes' },
+    { command: 'revoke', confirm: true },
+    { command: 'revoke', target: 'not an id!', confirm: true },
     { command: 'status', confirm: true },
     { command: 'reset', confirm: true },
-    { command: 'mint', confirm: true, requestId: undefined },
-    { command: 'mint', confirm: true, requestId: 'short' },
-    {
-      command: 'mint',
-      confirm: true,
-      requestId: 'has spaces in it, too long?',
-    },
+    { command: 'mint', count: 1, requestId: undefined },
+    { command: 'mint', count: 1, requestId: 'short' },
+    { command: 'mint', count: 1, requestId: 'has spaces in it, too long?' },
     null,
-  ])('rejects unconfirmed or unknown change %j', async (body) => {
+  ])('rejects an unknown or unconfirmed change %j', async (body) => {
     const { post, access } = await admin();
     expect((await post(body)).status).toBe(400);
-    expect(access).not.toHaveBeenCalled();
+    expect(calls(access)).toBe(0);
   });
 
   it('rejects oversize bodies and unknown routes', async () => {
@@ -283,99 +329,165 @@ describe('tailnet admin listener', () => {
     ).toBe(413);
     expect((await send('/api/station')).status).toBe(404);
     expect((await send('/api/admin/access/mint')).status).toBe(404);
-    expect(access).not.toHaveBeenCalled();
+    expect(calls(access)).toBe(0);
   });
 
-  it('mints once, prints one slip and logs the login but never the code', async () => {
+  it('mints the count asked for, prints one slip per code and never logs a code', async () => {
     const { post, access, slip, log } = await admin();
-    const response = await post({ command: 'mint', confirm: true });
+    const response = await post({ command: 'mint', count: 3 });
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({
       kind: 'minted',
-      code: 'K7QM4-XTD9A',
-      expiresAt: expiresAt.toISOString(),
-      signedOut: 2,
-      slip: {
-        printed: true,
-        job: 'Star_TSP143-9',
-        message: 'Slip submitted to the printer (Star_TSP143-9).',
-      },
+      codes: ['K7QM4-XTD9A', 'B3NR8-PWX2C', 'HJ5TZ-7Q9MV'].map((code) => ({
+        code,
+        redeemBy: redeemBy.toISOString(),
+        slip: {
+          printed: true,
+          job: `Star_TSP143-${code.replace('-', '')}`,
+          message: `Slip submitted to the printer (Star_TSP143-${code.replace('-', '')}).`,
+        },
+      })),
     });
-    expect(access).toHaveBeenCalledTimes(1);
-    expect(access).toHaveBeenCalledWith('mint');
-    expect(slip).toHaveBeenCalledExactlyOnceWith('K7QM4XTD9A', expiresAt);
-    expect(log).toHaveBeenCalledWith(`Access mint from tailnet by ${phone}.`);
+    expect(access.mint).toHaveBeenCalledExactlyOnceWith(3);
+    expect(slip.mock.calls).toEqual([
+      ['K7QM4XTD9A', redeemBy],
+      ['B3NR8PWX2C', redeemBy],
+      ['HJ5TZ7Q9MV', redeemBy],
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      `Access mint of 3 from tailnet by ${phone}.`,
+    );
     expect(JSON.stringify(log.mock.calls)).not.toContain('K7QM4');
   });
 
-  it('returns the valid code when the slip fails', async () => {
-    const { post } = await admin(
-      undefined,
-      vi.fn(async () => {
-        throw new Error('Queue paused.');
-      }),
-    );
-    const body = JSON.parse(
-      (await post({ command: 'mint', confirm: true })).body,
-    );
-    expect(body.code).toBe('K7QM4-XTD9A');
-    expect(body.slip).toEqual({
-      printed: false,
-      message:
-        'The slip didn’t print: Queue paused. The code above still works, so write it down for staff.',
-    });
+  it('returns every valid code when a slip fails, and stops printing after it', async () => {
+    const slip = vi
+      .fn(async (code: string, _redeemBy: Date) => `job-${code}`)
+      .mockResolvedValueOnce('job-1')
+      .mockRejectedValueOnce(new Error('Queue paused.'));
+    const { post } = await admin(undefined, slip);
+    const body = JSON.parse((await post({ command: 'mint', count: 3 })).body);
+    expect(body.codes.map((c: { code: string }) => c.code)).toEqual([
+      'K7QM4-XTD9A',
+      'B3NR8-PWX2C',
+      'HJ5TZ-7Q9MV',
+    ]);
+    expect(body.codes.map((c: { slip: unknown }) => c.slip)).toEqual([
+      {
+        printed: true,
+        job: 'job-1',
+        message: 'Slip submitted to the printer (job-1).',
+      },
+      {
+        printed: false,
+        message:
+          'The slip didn’t print: Queue paused. This code still works, so write it down for staff.',
+      },
+      {
+        printed: false,
+        message:
+          'Not printed, because an earlier slip failed. This code still works, so write it down for staff.',
+      },
+    ]);
+    expect(slip).toHaveBeenCalledTimes(2);
   });
 
-  it('never prints a slip when the mint is unconfirmed', async () => {
-    const access = vi.fn(async () => {
-      throw new Error('connection lost');
-    });
+  it('passes on a refusal that minted nothing', async () => {
+    const access = fakeAccess();
+    access.mint.mockRejectedValue(
+      new AccessRefused('9 unused codes are still out. Nothing was minted.'),
+    );
     const { post, slip } = await admin(access);
-    const response = await post({ command: 'mint', confirm: true });
-    expect(response.status).toBe(503);
-    expect(JSON.parse(response.body).error).toContain('Nothing was retried');
-    expect(access).toHaveBeenCalledTimes(1);
+    const response = await post({ command: 'mint', count: 2 });
+    expect(response.status).toBe(409);
+    expect(JSON.parse(response.body).error).toBe(
+      '9 unused codes are still out. Nothing was minted.',
+    );
     expect(slip).not.toHaveBeenCalled();
   });
 
-  it('refuses a concurrent change until the first finishes, including its slip', async () => {
+  it('never prints a slip when the mint is unconfirmed', async () => {
+    const access = fakeAccess();
+    access.mint.mockRejectedValue(new Error('connection lost'));
+    const { post, slip } = await admin(access);
+    const response = await post({ command: 'mint', count: 1 });
+    expect(response.status).toBe(503);
+    expect(JSON.parse(response.body).error).toContain('Nothing was retried');
+    expect(access.mint).toHaveBeenCalledTimes(1);
+    expect(slip).not.toHaveBeenCalled();
+  });
+
+  it('refuses a concurrent change until the first finishes, including its slips', async () => {
     let release!: () => void;
     const slip = vi.fn(
       () =>
         new Promise<string>((resolve) => (release = () => resolve('job-1'))),
     );
     const { post, access } = await admin(undefined, slip);
-    const first = post({ command: 'mint', confirm: true });
+    const first = post({ command: 'mint', count: 1 });
     await vi.waitFor(() => expect(slip).toHaveBeenCalled());
-    const second = await post({ command: 'revoke', confirm: true });
+    const second = await post({
+      command: 'revoke',
+      target: 'all',
+      confirm: true,
+    });
     expect(second.status).toBe(409);
     release();
     expect((await first).status).toBe(200);
-    expect(access).toHaveBeenCalledTimes(1);
-    expect((await post({ command: 'revoke', confirm: true })).status).toBe(200);
+    expect(access.revoke).not.toHaveBeenCalled();
+    expect(
+      (await post({ command: 'revoke', target: 'all', confirm: true })).status,
+    ).toBe(200);
   });
 
-  it('handles each confirmation ID at most once, even after it finishes', async () => {
+  it('handles each request ID at most once, even after it finishes', async () => {
     const { post, access, slip } = await admin();
-    const body = { command: 'mint', confirm: true, requestId: randomUUID() };
+    const body = { command: 'mint', count: 1, requestId: randomUUID() };
     expect((await post(body)).status).toBe(200);
     const resend = await post(body);
     expect(resend.status).toBe(409);
     expect(JSON.parse(resend.body).error).toContain('wasn’t repeated');
-    expect((await post({ ...body, command: 'revoke' })).status).toBe(409);
-    expect(access).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await post({
+          command: 'revoke',
+          target: 'all',
+          confirm: true,
+          requestId: body.requestId,
+        })
+      ).status,
+    ).toBe(409);
+    expect(access.mint).toHaveBeenCalledTimes(1);
+    expect(access.revoke).not.toHaveBeenCalled();
     expect(slip).toHaveBeenCalledTimes(1);
   });
 
-  it('revokes', async () => {
-    const { post, access, slip } = await admin();
-    const response = await post({ command: 'revoke', confirm: true });
-    expect(JSON.parse(response.body)).toEqual({
-      kind: 'revoked',
-      revoked: true,
-      signedOut: 3,
+  it('voids one code or signs out everyone, and reports a code that is gone', async () => {
+    const { post, access, slip, log } = await admin();
+    const one = await post({
+      command: 'revoke',
+      target: 'code-1',
+      confirm: true,
     });
-    expect(access).toHaveBeenCalledWith('revoke');
+    expect(JSON.parse(one.body)).toEqual({
+      kind: 'revoked',
+      voided: 1,
+      signedOut: 1,
+    });
+    expect(access.revoke).toHaveBeenLastCalledWith({ id: 'code-1' });
+    expect(log).toHaveBeenCalledWith(
+      `Access revoke of one code from tailnet by ${phone}.`,
+    );
+    await post({ command: 'revoke', target: 'all', confirm: true });
+    expect(access.revoke).toHaveBeenLastCalledWith('all');
+    access.revoke.mockResolvedValueOnce({ kind: 'gone' });
+    const gone = await post({
+      command: 'revoke',
+      target: 'code-9',
+      confirm: true,
+    });
+    expect(gone.status).toBe(409);
+    expect(JSON.parse(gone.body).error).toContain('Nothing changed');
     expect(slip).not.toHaveBeenCalled();
   });
 });
@@ -385,7 +497,7 @@ describe('listenAdmin', () => {
     createAdminApp({
       origin,
       capability,
-      access: vi.fn(),
+      access: fakeAccess(),
       slip: vi.fn(),
     });
 

@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { createOrderDatabase } from './order-database';
 import { PostgresAuth, digest, secret, type AuthContext } from './auth';
-import { manageAccess } from './access-admin';
+import {
+  AccessRefused,
+  accessStatus,
+  mintCodes,
+  revokeAccess,
+} from './access-admin';
 import { PostgresStationRepository } from './station-database';
 
 const url = process.env.TEST_DATABASE_URL!;
@@ -37,10 +42,10 @@ beforeEach(async () => {
   context = { ip: '192.0.2.1', browser: secret() };
 });
 afterAll(() => database.$disconnect());
-async function mint() {
-  const result = await manageAccess(database, 'mint', now);
-  if (result.kind !== 'minted') throw new Error('Expected a minted code.');
-  return result;
+const ipad =
+  'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+async function mint(count = 1) {
+  return mintCodes(database, count, now);
 }
 function login(code: string, ctx = context) {
   return auth.handle(
@@ -55,96 +60,135 @@ async function signedIn(code: string, ctx = context) {
   const identity = (await auth.session(reply.token))!;
   return { ...ctx, token: reply.token, identity };
 }
+const elsewhere = () => ({ ...context, browser: secret() });
+const used = {
+  status: 401,
+  message:
+    'That code isn’t valid. Each code works once, within an hour of printing. Ask for a new slip.',
+};
 
-it('stores only hashes and ends every session when the code’s 8 hours run out', async () => {
-  const { code, expiresAt } = await mint();
-  expect(expiresAt.getTime() - now.getTime()).toBe(8 * 3600000);
-  const stored = await database.accessCode.findFirstOrThrow();
-  expect(stored.codeHash).toMatch(/^\$argon2id\$/);
-  expect(stored.codeHash).not.toContain(code);
+it('stores only hashes; each code signs in one device for 8 hours from when it is used', async () => {
+  const minted = await mint(3);
+  expect(minted).toHaveLength(3);
+  expect(new Set(minted.map((m) => m.code)).size).toBe(3);
+  for (const m of minted)
+    expect(m.redeemBy.getTime() - now.getTime()).toBe(60 * 60000);
+  for (const stored of await database.accessCode.findMany()) {
+    expect(stored.codeHash).toMatch(/^\$argon2id\$/);
+    for (const m of minted) expect(stored.codeHash).not.toContain(m.code);
+  }
+  now = new Date(now.getTime() + 30 * 60000);
+  const code = minted[0].code;
   // Lowercase with a hyphen, as staff might type it.
-  const early = await login(
+  const reply = await login(
     `${code.slice(0, 5)}-${code.slice(5)}`.toLowerCase(),
+    { ...context, userAgent: ipad },
   );
+  const until = new Date(now.getTime() + 8 * 3600000);
+  expect(reply.body).toEqual({ ok: true, expiresAt: until.toISOString() });
   const row = await database.authSession.findFirstOrThrow();
-  expect(row.tokenHash).toBe(digest(early.token!));
-  now = new Date(now.getTime() + 7 * 3600000);
-  const late = await login(code, { ...context, browser: secret() });
-  for (const token of [early.token, late.token])
-    expect((await auth.session(token))?.expiresAt).toBe(
-      expiresAt.toISOString(),
-    );
-  now = new Date(expiresAt);
-  expect(await auth.session(early.token)).toBeUndefined();
-  expect(await auth.session(late.token)).toBeUndefined();
-  await expect(login(code)).rejects.toMatchObject({ status: 401 });
+  expect(row.tokenHash).toBe(digest(reply.token!));
+  expect(row.device).toBe('Safari on iPad');
+  await expect(login(code, elsewhere())).rejects.toMatchObject(used);
+  expect((await login(minted[1].code, elsewhere())).token).toBeTruthy();
+  // An unused code lapses an hour after it was minted.
+  now = new Date(minted[2].redeemBy);
+  await expect(login(minted[2].code, elsewhere())).rejects.toMatchObject(used);
+  now = new Date(until.getTime() - 1);
+  expect((await auth.session(reply.token))?.expiresAt).toBe(
+    until.toISOString(),
+  );
+  now = until;
+  expect(await auth.session(reply.token)).toBeUndefined();
 });
 
-it('minting voids the previous code and signs out every device that used it', async () => {
-  const first = await mint();
-  const a = await signedIn(first.code);
-  const b = await signedIn(first.code, { ...context, browser: secret() });
-  const second = await mint();
-  expect(second.code).not.toBe(first.code);
-  expect(second.signedOut).toBe(2);
-  expect(await auth.session(a.token)).toBeUndefined();
-  expect(await auth.session(b.token)).toBeUndefined();
-  expect(await database.authSession.count()).toBe(0);
-  await expect(login(first.code)).rejects.toMatchObject({
-    status: 401,
-    message:
-      'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
-  });
-  expect((await login(second.code)).token).toBeTruthy();
-  expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
-    1,
-  );
-});
-
-it('keeps at most one active code under concurrent minting', async () => {
-  // The service allows two Argon2 hashes at once; the CLI is one process.
-  const results = await Promise.all([mint(), mint()]);
-  expect(await database.accessCode.count()).toBe(2);
-  expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
-    1,
-  );
-  const accepted = await Promise.allSettled(
-    results.map((result) => login(result.code)),
-  );
-  expect(accepted.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+it('lets only one of two devices racing with the same code in', async () => {
+  const [{ code, id }] = await mint();
+  const results = await Promise.allSettled([
+    login(code, elsewhere()),
+    login(code, elsewhere()),
+  ]);
+  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+  expect(await database.authSession.count()).toBe(1);
   await expect(
-    database.$executeRaw`INSERT INTO access_codes (id, code_hash, created_at, expires_at) VALUES ('extra', 'x', ${now}, ${new Date(now.getTime() + 1000)})`,
+    database.$executeRaw`INSERT INTO auth_sessions (token_hash, code_id, device, authenticated_at, expires_at) VALUES ('extra', ${id}, 'x', ${now}, ${new Date(now.getTime() + 1000)})`,
   ).rejects.toThrow();
 });
 
-it('revoke ends access without minting and status never reveals the code', async () => {
-  expect(await manageAccess(database, 'status', now)).toEqual({
-    kind: 'status',
-    expiresAt: undefined,
-    sessions: 0,
+it('mints 1 to 5 at a time with at most 10 unused, and mints nothing when refused', async () => {
+  for (const count of [0, 6, 2.5, '3', undefined])
+    await expect(mintCodes(database, count, now)).rejects.toThrow(
+      AccessRefused,
+    );
+  await mint(5);
+  await mint(4);
+  await expect(mint(2)).rejects.toThrow(
+    '9 unused codes are still out, and at most 10 can be. Void some or let them expire first. Nothing was minted.',
+  );
+  // Concurrent mints serialize, so the limit holds for both.
+  const results = await Promise.allSettled([mint(1), mint(1)]);
+  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+  expect(await database.accessCode.count()).toBe(10);
+  now = new Date(now.getTime() + 60 * 60000);
+  expect(await mint(5)).toHaveLength(5);
+});
+
+it('voids one code or every code, signing out only the devices they opened', async () => {
+  const [a, b, c] = await mint(3);
+  const first = await signedIn(a.code, { ...elsewhere(), userAgent: ipad });
+  const second = await signedIn(b.code, elsewhere());
+  const status = await accessStatus(database, now);
+  expect(status).toEqual({
+    unused: [{ id: c.id, createdAt: now, redeemBy: c.redeemBy }],
+    devices: expect.arrayContaining([
+      {
+        id: a.id,
+        device: 'Safari on iPad',
+        signedInAt: now,
+        expiresAt: new Date(now.getTime() + 8 * 3600000),
+      },
+      expect.objectContaining({ id: b.id, device: 'Unknown browser' }),
+    ]),
   });
-  const { code, expiresAt } = await mint();
-  const ctx = await signedIn(code);
-  const status = await manageAccess(database, 'status', now);
-  expect(status).toEqual({ kind: 'status', expiresAt, sessions: 1 });
-  expect(JSON.stringify(status)).not.toContain(code);
-  expect(await manageAccess(database, 'revoke', now)).toEqual({
+  for (const m of [a, b, c])
+    expect(JSON.stringify(status)).not.toContain(m.code);
+  expect(await revokeAccess(database, { id: a.id }, now)).toEqual({
     kind: 'revoked',
-    revoked: true,
+    voided: 0,
     signedOut: 1,
   });
-  expect(await auth.session(ctx.token)).toBeUndefined();
-  await expect(login(code)).rejects.toMatchObject({ status: 401 });
-  expect(await manageAccess(database, 'revoke', now)).toEqual({
+  expect(await auth.session(first.token)).toBeUndefined();
+  expect(await auth.session(second.token)).toBeTruthy();
+  expect(await revokeAccess(database, { id: a.id }, now)).toEqual({
+    kind: 'gone',
+  });
+  expect(await revokeAccess(database, { id: c.id }, now)).toEqual({
     kind: 'revoked',
-    revoked: false,
+    voided: 1,
     signedOut: 0,
   });
-  await expect(manageAccess(database, 'invite', now)).rejects.toThrow();
+  await expect(login(c.code, elsewhere())).rejects.toMatchObject(used);
+  const [d] = await mint();
+  expect(await revokeAccess(database, 'all', now)).toEqual({
+    kind: 'revoked',
+    voided: 1,
+    signedOut: 1,
+  });
+  expect(await auth.session(second.token)).toBeUndefined();
+  await expect(login(d.code, elsewhere())).rejects.toMatchObject(used);
+  expect(await accessStatus(database, now)).toEqual({
+    unused: [],
+    devices: [],
+  });
+  expect(await revokeAccess(database, 'all', now)).toEqual({
+    kind: 'revoked',
+    voided: 0,
+    signedOut: 0,
+  });
 });
 
 it('requires correct Turnstile hostname/action and rejects outages and malformed codes', async () => {
-  const { code } = await mint();
+  const [{ code }] = await mint();
   for (const result of [
     { success: false },
     { success: true, hostname: 'attacker.test', action: 'login' },
@@ -173,7 +217,8 @@ it('requires correct Turnstile hostname/action and rejects outages and malformed
 });
 
 it('limits wrong codes per address and across all addresses, persistently', async () => {
-  const { code } = await mint();
+  // One code out keeps each wrong guess to a single Argon2 check.
+  const [{ code }] = await mint();
   const wrong = code.startsWith('2')
     ? '3' + code.slice(1)
     : '2' + code.slice(1);
@@ -202,9 +247,10 @@ it('limits wrong codes per address and across all addresses, persistently', asyn
   ).rejects.toMatchObject({ status: 429 });
   now = new Date(now.getTime() + 900001);
   // Successful sign-ins return their reservations.
-  for (let n = 0; n < 8; n++)
+  const codes = [...(await mint(5)), ...(await mint(3))].map((m) => m.code);
+  for (const each of codes)
     expect(
-      (await login(code, { ...context, ip: '203.0.113.10' })).token,
+      (await login(each, { ...elsewhere(), ip: '203.0.113.10' })).token,
     ).toBeTruthy();
   const pages = await Promise.allSettled(
     Array.from({ length: 125 }, () => auth.ratePage('198.51.100.1')),
@@ -212,7 +258,7 @@ it('limits wrong codes per address and across all addresses, persistently', asyn
   expect(pages.filter((r) => r.status === 'fulfilled')).toHaveLength(120);
 });
 
-it('keeps each browser’s workspace across code rotations and never adopts anonymous data', async () => {
+it('keeps each browser’s workspace across its codes and never adopts anonymous data', async () => {
   const station = new PostgresStationRepository(
     database,
     '2026-10-01T00:00:00.000Z',
@@ -226,7 +272,8 @@ it('keeps each browser’s workspace across code rotations and never adopts anon
     },
     'old-anonymous',
   );
-  const first = await signedIn((await mint()).code);
+  const [a, b, c] = await mint(3);
+  const first = await signedIn(a.code);
   const [key, again] = await Promise.all([
     auth.workspace(first.identity, first.browser),
     auth.workspace(first.identity, first.browser),
@@ -242,28 +289,28 @@ it('keeps each browser’s workspace across code rotations and never adopts anon
     },
     key,
   );
-  const second = await mint();
+  await revokeAccess(database, { id: a.id }, now);
   await expect(
     auth.workspace(first.identity, first.browser),
   ).rejects.toMatchObject({ status: 401 });
-  const other = await signedIn(second.code, { ...context, browser: secret() });
+  const other = await signedIn(b.code, elsewhere());
   expect(await auth.workspace(other.identity, other.browser)).not.toBe(key);
-  const rotated = await signedIn(second.code, first);
+  const rotated = await signedIn(c.code, first);
   expect(await auth.workspace(rotated.identity, first.browser)).toBe(key);
   expect((await station.load(key)).draft.name).toBe('Saved draft');
   expect((await station.load('old-anonymous')).draft.name).toBe('Anonymous');
 });
 
-it('logs out only this device and cleans up expired rows in small batches', async () => {
-  const { code } = await mint();
-  const a = await signedIn(code);
-  const b = await signedIn(code, { ...context, browser: secret() });
+it('logs out only this device, leaves its code used up and cleans up in small batches', async () => {
+  const [one, two, spare] = await mint(3);
+  const a = await signedIn(one.code);
+  const b = await signedIn(two.code, elsewhere());
   expect(await auth.handle('/api/auth/logout', 'POST', {}, a)).toMatchObject({
     clearSession: true,
   });
   expect(await auth.session(a.token)).toBeUndefined();
   expect(await auth.session(b.token)).toBeTruthy();
-  await mint();
+  await expect(login(one.code, a)).rejects.toMatchObject(used);
   await database.authRate.createMany({
     data: Array.from({ length: 150 }, (_, n) => ({
       key: 'old-' + n,
@@ -275,11 +322,53 @@ it('logs out only this device and cleans up expired rows in small batches', asyn
   expect(
     await database.authRate.count({ where: { key: { startsWith: 'old-' } } }),
   ).toBe(50);
-  // The revoked code has no sessions left; the active one stays.
+  // The signed-out code goes; the one in use and the unused one stay.
+  expect(
+    (await database.accessCode.findMany({ orderBy: { id: 'asc' } })).map(
+      (c) => c.id,
+    ),
+  ).toEqual([two.id, spare.id].sort());
+  now = new Date(spare.redeemBy);
+  await auth.cleanup();
   expect(await database.accessCode.count()).toBe(1);
   now = new Date(now.getTime() + 8 * 3600000);
   await auth.cleanup();
   expect(await database.accessCode.count()).toBe(0);
+  expect(await database.authSession.count()).toBe(0);
+});
+
+it('the per-device migration voids shared codes and ends their sessions', async () => {
+  const sql = readFileSync(
+    new URL(
+      '../prisma/migrations/20261020000000_device_access_codes/migration.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const voiding = sql
+    .slice(0, sql.indexOf('DROP INDEX'))
+    .replace(/^\s*--.*$/gm, '')
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  expect(voiding).toHaveLength(2);
+  const [used, unused] = await mint(2);
+  await signedIn(used.code);
+  const rows = await database
+    .$transaction(async (tx) => {
+      for (const statement of voiding) await tx.$executeRawUnsafe(statement);
+      const result = {
+        active: await tx.accessCode.count({ where: { revokedAt: null } }),
+        sessions: await tx.authSession.count(),
+      };
+      throw Object.assign(new Error('rollback'), { result });
+    })
+    .catch((error) => (error as { result: unknown }).result);
+  expect(rows).toEqual({ active: 0, sessions: 0 });
+  expect(await database.accessCode.count({ where: { revokedAt: null } })).toBe(
+    2,
+  );
+  expect(unused.id).not.toBe(used.id);
 });
 
 it('the migration reattaches a browser’s workspace only when it had one account', async () => {

@@ -8,7 +8,12 @@ import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
 import { PostgresAuth, parseAuthConfig } from './auth';
-import { manageAccess, printAccessSlip } from './access-admin';
+import {
+  accessStatus,
+  mintCodes,
+  printAccessSlip,
+  revokeAccess,
+} from './access-admin';
 import { createAdminApp, listenAdmin } from './admin-http';
 import {
   parseTrackingEnabled,
@@ -90,8 +95,12 @@ const admin = adminConfig
   ? createAdminApp({
       origin: adminConfig.origin,
       capability: adminConfig.capability,
-      access: (command) => manageAccess(database, command),
-      slip: (code, expiresAt) => printAccessSlip(output, code, expiresAt, font),
+      access: {
+        status: () => accessStatus(database),
+        mint: (count) => mintCodes(database, count),
+        revoke: (target) => revokeAccess(database, target),
+      },
+      slip: (code, redeemBy) => printAccessSlip(output, code, redeemBy, font),
       slipMode: printMode,
       assets: root,
     })

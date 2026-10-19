@@ -92,7 +92,8 @@
       onkeydown={navigate}
     >
       <p class="access-menu-note">
-        This device is signed in until {until}, when the access code ends.
+        This device is signed in until {until}. Signing out uses up its code, so
+        you’ll need a new one to sign back in.
       </p>
       <button
         type="button"

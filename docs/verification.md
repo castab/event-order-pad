@@ -2,6 +2,20 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## One-time access codes, one per device — 2026-10-19
+
+The shared shift code is replaced by one-time codes. A mint makes 1 to 5 codes, with at most 10 unused at once. Each code must be used within 60 minutes, works once, and opens one 8-hour session. A unique `auth_sessions.code_id` enforces the single use. Minting no longer signs anyone out. The tailnet admin page asks how many codes to mint in a field capped at 5. It lists unused codes (**Void**) and signed-in devices (**Sign out**), and has **Sign out everyone**. Each code prints its own slip, and printing stops after the first failed slip without voiding any code. The `device_access_codes` migration voids existing codes and sessions. The unmerged station-approval branch was not used.
+
+All required checks passed in order:
+
+- 28 integration tests and volume recreation on a disposable PostgreSQL 18 database. The local `order_pad_test` database was recreated because it held the unmerged approval migration.
+- Type checks with zero errors and warnings, and formatting.
+- 311 unit/HTTP tests.
+- Both builds, and 159 Chromium tests, including the capped count field, per-code slips, voiding, signing out and lost replies.
+- `access-cli.mjs` in PDF mode against the test database: `mint 3` saved three slip PDFs, `mint 6` and an 11th unused code were refused with nothing minted, and `revoke` voided all unused codes.
+
+No station data was touched and no physical slip was printed. Slip cutting and sign-in on real devices remain owner checks.
+
 ## Sign-in and access-code admin redesign — 2026-10-18
 
 The sign-in screen and the tailnet admin page now follow the Order Builder & Ticket design canvas.

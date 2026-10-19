@@ -5,7 +5,7 @@ import {
   pixelsPerMm,
 } from '../src/lib/tickets/format';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
-import { formatAccessCode } from '../src/lib/auth/model';
+import { formatAccessCode, SESSION_HOURS } from '../src/lib/auth/model';
 
 const mm = 72 / 25.4;
 const px = mm / pixelsPerMm;
@@ -95,10 +95,10 @@ export const accessExpiry = (expiresAt: Date) =>
     hour: 'numeric',
     minute: '2-digit',
   });
-/** A short slip staff can post at the counter; it is not an order ticket. */
+/** One device's one-time code; it is not an order ticket. */
 export async function accessCodePdf(
   code: string,
-  expiresAt: Date,
+  redeemBy: Date,
   font: string,
   heightMm = accessSlipHeightMm,
 ): Promise<Buffer> {
@@ -126,8 +126,8 @@ export async function accessCodePdf(
   };
   line('ORDER PAD ACCESS CODE', 6, 11);
   line(formatAccessCode(code), 18, 30);
-  line(`Valid until ${accessExpiry(expiresAt)}`, 36, 11);
-  line('Minting a new code ends this one.', 46, 9);
+  line(`Use by ${accessExpiry(redeemBy)}`, 36, 11);
+  line(`Works once, on one device, for ${SESSION_HOURS} hours.`, 46, 9);
   doc.end();
   return finished;
 }

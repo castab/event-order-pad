@@ -71,19 +71,20 @@ model AccessCode {
   id String @id
   codeHash String @map("code_hash")
   createdAt DateTime @db.Timestamptz(3) @map("created_at")
-  expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
+  redeemBy DateTime @db.Timestamptz(3) @map("redeem_by")
+  redeemedAt DateTime? @db.Timestamptz(3) @map("redeemed_at")
   revokedAt DateTime? @db.Timestamptz(3) @map("revoked_at")
-  sessions AuthSession[]
-  @@index([expiresAt])
+  session AuthSession?
+  @@index([redeemBy])
   @@map("access_codes")
 }
 model AuthSession {
   tokenHash String @id @map("token_hash")
-  codeId String @map("code_id")
+  codeId String @unique @map("code_id")
+  device String
   authenticatedAt DateTime @db.Timestamptz(3) @map("authenticated_at")
   expiresAt DateTime @db.Timestamptz(3) @map("expires_at")
   code AccessCode @relation(fields: [codeId], references: [id])
-  @@index([codeId])
   @@index([expiresAt])
   @@map("auth_sessions")
 }

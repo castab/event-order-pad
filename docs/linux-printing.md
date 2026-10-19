@@ -35,7 +35,7 @@ npm ci
 npm run db:deploy
 npm run build
 npm run build:printer
-npm run access -- mint
+npm run access -- mint 2   # one code per device you sign in now
 ```
 
 Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https://orders.example.com`, the real CUPS queue, local database URL, fixed capture cutoff, `ORDER_PAD_PROXY=cloudflare` and both Turnstile keys. Keep the secret key out of Git and browser builds. The widget must allow the exact final hostname. `npm run start:printer` loads `.env`; exported shell variables override it. Start the app from the repository root.
@@ -62,7 +62,7 @@ Configure `.env` using [.env.example](../.env.example): `ORDER_PAD_ORIGIN=https:
    ```
 
 6. Once validated, install the connector as a system service using Cloudflare’s [Linux service instructions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/as-a-service/linux/). Use the explicit configuration path; the credentials/configuration must be readable by the service identity. Keep the Node service managed separately by systemd.
-7. Test the public URL from a device with Tailscale disabled. Unauthenticated `/` and `/queue/` redirect to login; `/api/printer`, `/api/station`, `/api/orders/events` and all operational POSTs require a session. Sign in with the current access code and Turnstile, and keep the queue open through several heartbeat intervals.
+7. Test the public URL from a device with Tailscale disabled. Unauthenticated `/` and `/queue/` redirect to login; `/api/printer`, `/api/station`, `/api/orders/events` and all operational POSTs require a session. Sign in with a fresh access code and Turnstile, and keep the queue open through several heartbeat intervals.
 
 `ORDER_PAD_PROXY=cloudflare` trusts a valid `CF-Connecting-IP` only from the loopback connector. Arbitrary `X-Forwarded-For` values are ignored. Missing or malformed Cloudflare client-IP headers reject public authentication requests. Local processes and connector configuration are trusted host administration; do not bind the app to a public interface. No inbound router port forwarding is required. Never expose Postgres 5432 or CUPS 631 through a tunnel.
 
@@ -70,17 +70,17 @@ For an alternative trusted local HTTPS proxy, including Tailscale Serve, use `OR
 
 ### Access codes and upgrading
 
-There are no personal accounts. At the start of each shift, run `npm run access -- mint` on the station. It shows a code such as `K7QM4-XTD9A` in the terminal and prints it on a slip from the receipt printer; post it where staff can see it. The code works on any staff device for 8 hours, and every session ends when it does. Minting again voids the old code and signs out every device that used it, so do that whenever a code may have been seen by someone outside the staff. `npm run access -- revoke` ends access without a new code (for example at closing), and `npm run access -- status` shows whether a code is active without revealing it. If the slip doesn’t print, the terminal says so and the code is still valid. Nobody can mint codes through the public website; the owner can also use the tailnet admin page below. See [README access codes](../README.md#access-codes-and-sign-in).
+There are no personal accounts. Each device signs in with its own one-time code. At the start of a shift, run `npm run access -- mint <count>` on the station with one code per device (1 to 5 at a time, at most 10 unused at once). It shows codes such as `K7QM4-XTD9A` in the terminal and prints one slip per code; hand one slip to each device. A code must be used within 60 minutes, works once, and signs that device in for 8 hours. After signing out or when the 8 hours end, the device needs a new code. Minting never signs anyone out. `npm run access -- revoke` voids every unused code and signs every device out (for example at closing, or if a slip went missing and you can’t tell which), and `npm run access -- status` lists unused codes and signed-in devices without revealing any code. If a slip doesn’t print, the terminal says so and the code is still valid. Nobody can mint codes through the public website; the owner can also use the tailnet admin page below. See [README access codes](../README.md#access-codes-and-sign-in).
 
-Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, mint an access code, and restart the managed service. Preserve the capture cutoff. Upgrading from personal accounts deletes accounts, passwords and passkeys; browsers that only one account used keep that account’s workspace, and other workspaces stay in the database untouched. The new domain receives new browser cookies and empty workspaces. Existing-domain cookies never transfer automatically.
+Before upgrading or switching from the old Tailscale hostname: finish/reconcile every draft and pending/unknown print, back up PostgreSQL, close old tabs and stop the old Node process. Run `npm run db:deploy` explicitly, rebuild both targets, configure the final origin/Turnstile/tunnel, mint access codes, and restart the managed service. Preserve the capture cutoff. Upgrading from personal accounts deletes accounts, passwords and passkeys; browsers that only one account used keep that account’s workspace, and other workspaces stay in the database untouched. The new domain receives new browser cookies and empty workspaces. Existing-domain cookies never transfer automatically.
 
 On the S10e, open the configured public HTTPS URL and sign in. The builder checks the server’s USB queue automatically on load. Use +/− to choose 1–5 scoops across any flavors for one serving, choose its container, optionally select toppings/name, then tap **Print order**. It adds or saves the complete current serving before submitting. Use **Add serving** for earlier servings in a multi-serving order. After queue acceptance, a fresh order opens automatically; **Reprint last order** keeps the original ticket, even while another draft is being built. **Order tools → Printer settings** shows the queue, its readiness message, setup notes and **Check printer**. No printer selection or recurring setup acknowledgment is needed.
 
-Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each browser profile has its own workspace, resolved by a persistent opaque browser cookie. Signing in, including with a newer access code, restores that browser’s draft, latest receipt and recovery state. Separate profiles/devices edit independently; stale tabs within the same profile are blocked by revision checks. The header displays “New order” until the service allocates a number while committing print intent. Clearing cookies starts a new workspace without deleting old records.
+Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each browser profile has its own workspace, resolved by a persistent opaque browser cookie. Signing in, including with a later access code, restores that browser’s draft, latest receipt and recovery state. Separate profiles/devices edit independently; stale tabs within the same profile are blocked by revision checks. The header displays “New order” until the service allocates a number while committing print intent. Clearing cookies starts a new workspace without deleting old records.
 
 ### Tailnet admin page
 
-This lets chosen devices mint, check and revoke codes from a browser on the station’s tailnet, without a terminal. Staff use the public Cloudflare hostname and are not on the tailnet. The page is served on a private Unix socket that cloudflared never forwards to. Tailscale Serve publishes it on a separate HTTPS port.
+This lets chosen devices mint codes, see unused codes and signed-in devices, void codes and sign devices out from a browser on the station’s tailnet, without a terminal. Staff use the public Cloudflare hostname and are not on the tailnet. The page is served on a private Unix socket that cloudflared never forwards to. Tailscale Serve publishes it on a separate HTTPS port.
 
 Which devices may use the page is decided by the **tailnet policy**, not by the service. The policy grants a Tailscale app capability to devices with a tag. Serve forwards the requesting device’s capabilities to the service and deletes any copy a client sends. The service refuses every request without the configured capability, including requests from devices signed in as the owner. To grant the ability, tag the device; to take it away, remove the tag. Neither removes the device from the tailnet.
 
@@ -109,7 +109,7 @@ Which devices may use the page is decided by the **tailnet policy**, not by the 
 
    Merge these keys into the existing file rather than replacing it. The `ip` entry keeps HTTPS on the station reachable for tagged devices even if other rules are tightened later.
 
-2. Tag each device that may mint: **Machines → ⋯ → Edit ACL tags → `tag:order-pad-admin`**. A tagged device is owned by the tag instead of a user, and its key expiry is disabled by default. Rules that grant access by user no longer apply to it, so make sure the policy still gives it whatever else it needs. To revoke the ability, remove the tag the same way, or delete the grant to revoke it for every device. See Tailscale’s [tags](https://tailscale.com/kb/1068/tags) and [grants](https://tailscale.com/kb/1324/grants) documentation.
+2. Tag each device that may manage access: **Machines → ⋯ → Edit ACL tags → `tag:order-pad-admin`**. A tagged device is owned by the tag instead of a user, and its key expiry is disabled by default. Rules that grant access by user no longer apply to it, so make sure the policy still gives it whatever else it needs. To revoke the ability, remove the tag the same way, or delete the grant to revoke it for every device. See Tailscale’s [tags](https://tailscale.com/kb/1068/tags) and [grants](https://tailscale.com/kb/1324/grants) documentation.
 3. Add to `.env`. Use the station’s full tailnet name, which `tailscale status --json` shows under `Self.DNSName` without the trailing dot:
 
    ```sh
@@ -145,15 +145,15 @@ Which devices may use the page is decided by the **tailnet policy**, not by the 
    Without `--accept-app-caps`, Serve forwards no capabilities and every device is refused. Never add the socket to the cloudflared ingress. This takes the station’s tailnet port 443, so do not also proxy the staff app there; staff use the public hostname. Serve sends `Host: localhost` to socket backends, so the service checks Serve’s `X-Forwarded-Host` against `ORDER_PAD_ADMIN_ORIGIN`.
 
 6. Acceptance:
-   - On a tagged device, `https://station.example.ts.net/` shows the status line without minting anything.
+   - On a tagged device, `https://station.example.ts.net/` shows the mint form, unused codes and signed-in devices without minting anything.
    - On an untagged tailnet device, the same address returns “This device can’t manage access codes.”
    - On a station terminal, `curl --unix-socket /run/order-pad/admin.sock -H 'X-Forwarded-Host: station.example.ts.net' http://localhost/api/admin/access` returns 403 because no capability header is present.
    - With Tailscale disabled, the tailnet address is unreachable and the public hostname’s `/api/admin/access` returns 401 or 404.
-   - When signing staff out is safe, tap **Mint new code** on a tagged device and confirm. The page shows the code and expiry, one slip prints, the new code signs in on a staff device, and the old code is refused. **Revoke code** signs every device out.
+   - Enter 2 for **How many access codes would you like to mint?** and tap **Mint 2 codes**. The page shows both codes with their use-by times, two separate slips print, each code signs in one staff device, and a code that was already used is refused on a third device. Typing 9 in the field leaves 5. Both devices appear under **Signed-in devices**; **Sign out** on one returns only that device to sign-in. When signing everyone out is safe, **Sign out everyone** does that and empties **Unused codes**.
    - Remove the tag from that device and reload the page: it is refused, and the device stays on the tailnet.
-   - `journalctl -u order-pad.service` shows the tailnet address of the device that minted, and never the code.
+   - `journalctl -u order-pad.service` shows the tailnet address of the device that made each change, and never a code.
 
-To turn the page off, run `sudo tailscale serve --https=443 off`, remove the three `ORDER_PAD_ADMIN_*` variables and restart the service; the policy grant can stay or go. Codes already minted stay valid until they expire or are revoked.
+To turn the page off, run `sudo tailscale serve --https=443 off`, remove the three `ORDER_PAD_ADMIN_*` variables and restart the service; the policy grant can stay or go. Codes already minted stay valid until they are used, lapse or are voided with `npm run access -- revoke`, and signed-in devices stay signed in until their 8 hours end.
 
 ## Behavior and limits
 
@@ -238,10 +238,10 @@ These remain deployment/device checks; automated fixtures do not establish them.
 
 1. With Tailscale disabled, verify public HTTPS, HTTP-to-HTTPS redirect, correct Host forwarding and working Turnstile for access-code sign-in.
 2. Before login and after logout, check protected pages, printer/backend APIs and SSE deny access. Confirm no protected HTML/API data is returned from browser or Cloudflare caches, including offline navigation and browser Back.
-3. Sign in on two devices with the same access code and confirm they have independent drafts/recovery. Mint a new code and confirm both devices return to sign-in, the old code is refused and the new code restores each device’s own draft.
-4. Check 8-hour code expiry and `npm run access -- revoke`, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
-5. Run `npm run access -- mint` with the printer ready and confirm the slip prints once, cuts cleanly and the code, expiry time and note are legible; then confirm a mint with the printer unplugged reports the failure and the terminal code still signs in. Verify wrong-code rate-limit feedback and recovery after cooldown. Keep station data backed up.
-6. If the tailnet admin page is configured, complete its acceptance steps under [Tailnet admin page](#tailnet-admin-page), including a mint from the page with the printer unplugged: the page must keep showing the valid code and report the slip failure.
+3. Mint two codes and sign in on two devices, one code each, and confirm they have independent drafts/recovery and a used code is refused on a third device. Run `npm run access -- revoke` and confirm both devices return to sign-in; fresh codes restore each device’s own draft.
+4. Check that an unused code lapses after 60 minutes, that a session ends 8 hours after sign-in, and `npm run access -- revoke`, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
+5. Run `npm run access -- mint 3` with the printer ready and confirm three separate slips print, each cut cleanly, and the code, use-by time and “Works once, on one device, for 8 hours.” are legible on each; then confirm a mint with the printer unplugged reports the failure and the terminal code still signs in. Verify wrong-code rate-limit feedback and recovery after cooldown. Keep station data backed up.
+6. If the tailnet admin page is configured, complete its acceptance steps under [Tailnet admin page](#tailnet-admin-page), including a mint of 2 from the page with the printer unplugged: the page must keep showing both valid codes, report the failed slip and mark the other as not printed.
 
 ## Still to test
 
