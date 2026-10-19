@@ -97,7 +97,7 @@
     {@render children()}
   </div>
   {#if lost}<div class="auth-overlay" role="status">
-      Access code expired or replaced. Waiting for current work to finish
+      Signed out or the session ended. Waiting for current work to finish
       safely…
     </div>{/if}
 {:else}

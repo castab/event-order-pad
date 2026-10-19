@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clientIp, codeHash, parseAuthConfig } from './auth';
+import { clientIp, codeHash, deviceLabel, parseAuthConfig } from './auth';
 import { resolve } from 'node:path';
 import { verify } from '@node-rs/argon2';
 import { newAccessCode, printAccessSlip } from './access-admin';
@@ -9,6 +9,7 @@ import {
   formatAccessCode,
   parseAccessCode,
   parseAuthSession,
+  parseMintCount,
 } from '../src/lib/auth/model';
 
 describe('authentication input and trust boundaries', () => {
@@ -38,6 +39,45 @@ describe('authentication input and trust boundaries', () => {
       authenticatedAt: '2026-10-16T00:00:00.000Z',
     });
     expect(Object.isFrozen(session)).toBe(true);
+  });
+  it('names a signed-in device plainly and never fails on odd agents', () => {
+    for (const [agent, label] of [
+      [
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+        'Safari on iPhone',
+      ],
+      [
+        'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36',
+        'Chrome on Android',
+      ],
+      [
+        'Mozilla/5.0 (Linux; Android 15; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/28.0 Chrome/130.0.0.0 Mobile Safari/537.36',
+        'Samsung Internet on Android',
+      ],
+      [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0',
+        'Edge on Windows',
+      ],
+      [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0',
+        'Firefox on Mac',
+      ],
+      [
+        'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0 Mobile/15E148 Safari/604.1',
+        'Chrome on iPad',
+      ],
+      ['curl/8.5.0', 'Unknown browser'],
+      ['', 'Unknown browser'],
+      [undefined, 'Unknown browser'],
+    ] as const)
+      expect(deviceLabel(agent)).toBe(label);
+  });
+  it('mints only a whole number of codes from 1 to 5', () => {
+    for (const count of [1, 3, 5]) expect(parseMintCount(count)).toBe(count);
+    for (const bad of [0, 6, -1, 2.5, NaN, Infinity, '3', null, undefined])
+      expect(() => parseMintCount(bad)).toThrow(
+        'Mint from 1 to 5 codes at a time. Nothing was minted.',
+      );
   });
   it('mints codes uniformly from the unambiguous alphabet', () => {
     let next = 0;

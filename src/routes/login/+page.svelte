@@ -16,7 +16,7 @@
     <div class="auth-column auth-stack">
       <div class="auth-heading">
         <h1>Sign in</h1>
-        <p>For Fiona’s staff. Enter this shift’s access code.</p>
+        <p>For Fiona’s staff. Enter this device’s access code.</p>
       </div>
       <LoginForm />
       <section class="code-help" aria-labelledby="code-help-title">
@@ -24,12 +24,12 @@
         <div>
           <h2 id="code-help-title">Where’s the code?</h2>
           <p>
-            It’s on the slip printed at the station. A new code ends the old
-            one.
+            It’s on a slip printed at the station. Each code works once, on one
+            device, within an hour of printing.
           </p>
           <p class="muted">
-            No code, or it stopped working? Whoever runs the station computer
-            can mint a new one.
+            No code, or it stopped working? Whoever runs the station can mint
+            you a new one.
           </p>
         </div>
       </section>

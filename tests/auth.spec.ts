@@ -28,6 +28,7 @@ async function setup(
   let signedIn = initial;
   let limited = false;
   let current = code;
+  const used = new Set<string>();
   await widget(page, automaticTurnstile);
   await page.route('**/api/auth/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -53,17 +54,16 @@ async function setup(
     if (path.endsWith('/login')) {
       if (limited)
         return reply({ error: 'Too many attempts. Try again later.' }, 429);
-      if (
-        String(body.code).replace(/[\s-]/g, '').toUpperCase() !== current ||
-        !body.turnstile
-      )
+      const typed = String(body.code).replace(/[\s-]/g, '').toUpperCase();
+      if (typed !== current || used.has(typed) || !body.turnstile)
         return reply(
           {
             error:
-              'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
+              'That code isn’t valid. Each code works once, within an hour of printing. Ask for a new slip.',
           },
           401,
         );
+      used.add(typed);
       signedIn = true;
       return reply({ ok: true });
     }
@@ -77,7 +77,7 @@ async function setup(
   );
   return {
     ...station,
-    /** The station minted a new code: every session using the old one ends. */
+    /** The station signed this device out and handed it a fresh code. */
     rotate: (next: string) => {
       current = next;
       signedIn = false;
@@ -168,7 +168,7 @@ test('an access code signs in, the access menu signs out, and back navigation st
   expect(loginRequests).toHaveLength(0);
   await start.click();
   await expect(page.getByRole('alert')).toHaveText(
-    'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
+    'That code isn’t valid. Each code works once, within an hour of printing. Ask for a new slip.',
   );
   await expect(field).toHaveAttribute('aria-invalid', 'true');
   // Typed the way it might be read off the slip: lowercase, with the hyphen.
@@ -313,7 +313,7 @@ test('a new code during a print waits for it, then recovers its durable result w
   // The session poll must not navigate while the print request remains pending.
   await expect(
     page.getByText(
-      'Access code expired or replaced. Waiting for current work to finish safely…',
+      'Signed out or the session ended. Waiting for current work to finish safely…',
     ),
   ).toBeVisible({ timeout: 20000 });
   await expect(page).toHaveURL('http://localhost:4175/');
@@ -322,7 +322,7 @@ test('a new code during a print waits for it, then recovers its durable result w
   expired = false;
   await enterCode(page, code);
   await expect(page.getByRole('alert')).toHaveText(
-    'That code isn’t active. It may have been replaced by a newer one. Check the latest slip at the station.',
+    'That code isn’t valid. Each code works once, within an hour of printing. Ask for a new slip.',
   );
   await enterCode(page, 'ZYXWV98765');
   await expect(page.getByLabel('Customer name (optional)')).toBeEnabled();

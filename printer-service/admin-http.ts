@@ -3,12 +3,23 @@ import { createServer, type Server } from 'node:http';
 import { chmod, lstat, readFile, stat, unlink } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { dirname, join } from 'node:path';
-import { formatAccessCode } from '../src/lib/auth/model';
-import type { AccessResult } from './access-admin';
+import {
+  CODE_REDEEM_MINUTES,
+  formatAccessCode,
+  MINT_LIMIT,
+  OUTSTANDING_CODE_LIMIT,
+  parseMintCount,
+  SESSION_HOURS,
+} from '../src/lib/auth/model';
+import {
+  AccessRefused,
+  type AccessStatus,
+  type MintedCode,
+  type RevokeResult,
+} from './access-admin';
 import { BadRequest, readJson } from './http';
 
 export const adminAccessPath = '/api/admin/access';
-type AccessCommand = 'mint' | 'status' | 'revoke';
 // The page shares the app's self-hosted logo and font, read from the static build.
 const pageAssets: Record<string, string> = {
   '/logo.svg': 'image/svg+xml',
@@ -37,6 +48,12 @@ export function hasCapability(value: unknown, capability: string): boolean {
   }
 }
 
+export interface AdminAccess {
+  status(): Promise<AccessStatus>;
+  mint(count: number): Promise<readonly MintedCode[]>;
+  revoke(target: { readonly id: string } | 'all'): Promise<RevokeResult>;
+}
+
 /**
  * Tailnet-only access-code administration. Tailscale Serve forwards the
  * device's granted app capabilities and strips client copies; only devices the
@@ -55,14 +72,14 @@ export function createAdminApp({
   origin: URL;
   capability: string;
   assets?: string;
-  access: (command: AccessCommand) => Promise<AccessResult>;
-  slip: (code: string, expiresAt: Date) => Promise<string>;
+  access: AdminAccess;
+  slip: (code: string, redeemBy: Date) => Promise<string>;
   slipMode?: 'cups' | 'pdf';
   log?: (message: string) => void;
 }): Server {
   let changing = false;
   // Browsers can resend a POST whose connection closed before any reply bytes,
-  // so each confirmation carries an ID that is handled at most once.
+  // so each change carries an ID that is handled at most once.
   const handled = new Set<string>();
   return createServer(async (req, res) => {
     const nonce = randomBytes(18).toString('base64');
@@ -131,18 +148,25 @@ export function createAdminApp({
       if (req.method === 'GET' && path === adminAccessPath) {
         let result;
         try {
-          result = await access('status');
+          result = await access.status();
         } catch {
           json(503, {
             error: 'Database unavailable. Check Postgres on the station.',
           });
           return;
         }
-        if (result.kind !== 'status') throw new Error('Unexpected result.');
         json(200, {
-          active: !!result.expiresAt,
-          expiresAt: result.expiresAt?.toISOString(),
-          sessions: result.sessions,
+          unused: result.unused.map((c) => ({
+            id: c.id,
+            createdAt: c.createdAt.toISOString(),
+            redeemBy: c.redeemBy.toISOString(),
+          })),
+          devices: result.devices.map((d) => ({
+            id: d.id,
+            device: d.device,
+            signedInAt: d.signedInAt.toISOString(),
+            expiresAt: d.expiresAt.toISOString(),
+          })),
         });
         return;
       }
@@ -156,22 +180,44 @@ export function createAdminApp({
         }
         const body = (await readJson(req, 1024)) as {
           command?: unknown;
+          count?: unknown;
+          target?: unknown;
           confirm?: unknown;
           requestId?: unknown;
         } | null;
         const command = body?.command;
+        const target = body?.target;
         const requestId = body?.requestId;
         if (
-          (command !== 'mint' && command !== 'revoke') ||
-          body?.confirm !== true ||
           typeof requestId !== 'string' ||
           !/^[A-Za-z0-9_-]{16,100}$/.test(requestId)
         )
-          throw new BadRequest(400, 'Confirm mint or revoke. Nothing changed.');
+          throw new BadRequest(
+            400,
+            'Use the admin page’s buttons. Nothing changed.',
+          );
+        let count = 0;
+        if (command === 'mint')
+          try {
+            count = parseMintCount(body?.count);
+          } catch (error) {
+            throw new BadRequest(400, (error as Error).message);
+          }
+        else if (
+          command !== 'revoke' ||
+          body?.confirm !== true ||
+          (target !== 'all' &&
+            (typeof target !== 'string' ||
+              !/^[A-Za-z0-9-]{1,100}$/.test(target)))
+        )
+          throw new BadRequest(
+            400,
+            'Confirm which code to void or device to sign out. Nothing changed.',
+          );
         if (handled.has(requestId)) {
           json(409, {
             error:
-              'The station already received this request, so it wasn’t repeated. A new code may already be valid; check the slip or reload status before trying again.',
+              'The station already received this request, so it wasn’t repeated. Check the printer and the lists before trying again.',
           });
           return;
         }
@@ -185,54 +231,96 @@ export function createAdminApp({
         changing = true;
         handled.add(requestId);
         if (handled.size > 200) handled.delete(handled.values().next().value!);
+        const action =
+          command === 'mint'
+            ? `mint of ${count}`
+            : target === 'all'
+              ? 'revoke of everything'
+              : 'revoke of one code';
         try {
-          let result;
+          if (command === 'revoke') {
+            let result;
+            try {
+              result = await access.revoke(
+                target === 'all' ? 'all' : { id: target as string },
+              );
+            } catch {
+              log(
+                `Access ${action} from tailnet by ${device} was not confirmed.`,
+              );
+              json(503, {
+                error:
+                  'The station couldn’t confirm the change. Check the lists before trying again. Nothing was retried.',
+              });
+              return;
+            }
+            if (result.kind === 'gone') {
+              json(409, {
+                error:
+                  'That code is no longer active. It may have been used up, expired or voided already. Nothing changed.',
+              });
+              return;
+            }
+            log(`Access ${action} from tailnet by ${device}.`);
+            json(200, result);
+            return;
+          }
+          let codes;
           try {
-            result = await access(command);
-          } catch {
+            codes = await access.mint(count);
+          } catch (error) {
+            if (error instanceof AccessRefused) {
+              json(409, { error: error.message });
+              return;
+            }
             log(
-              `Access ${command} from tailnet by ${device} was not confirmed.`,
+              `Access ${action} from tailnet by ${device} was not confirmed.`,
             );
             json(503, {
               error:
-                'The station couldn’t confirm the change. Check status before trying again. Nothing was retried.',
+                'The station couldn’t confirm the change. Some codes may already be valid. Check the unused codes before trying again. Nothing was retried.',
             });
             return;
           }
-          log(`Access ${command} from tailnet by ${device}.`);
-          if (result.kind === 'revoked') {
-            json(200, {
-              kind: 'revoked',
-              revoked: result.revoked,
-              signedOut: result.signedOut,
-            });
-            return;
-          }
-          if (result.kind !== 'minted') throw new Error('Unexpected result.');
-          let printed;
-          // The code is already valid; a slip failure only means staff copy it by hand.
-          try {
-            const job = await slip(result.code, result.expiresAt);
-            printed = {
-              printed: true,
-              job,
-              message:
-                slipMode === 'pdf'
-                  ? `Slip saved as ${job}.`
-                  : `Slip submitted to the printer (${job}).`,
-            };
-          } catch (error) {
-            printed = {
-              printed: false,
-              message: `The slip didn’t print: ${(error as Error).message} The code above still works, so write it down for staff.`,
-            };
+          log(`Access ${action} from tailnet by ${device}.`);
+          // The codes are already valid; a slip failure only means staff copy one by hand.
+          const printed: { printed: boolean; job?: string; message: string }[] =
+            [];
+          let failed = false;
+          for (const { code, redeemBy } of codes) {
+            if (failed) {
+              printed.push({
+                printed: false,
+                message:
+                  'Not printed, because an earlier slip failed. This code still works, so write it down for staff.',
+              });
+              continue;
+            }
+            try {
+              const job = await slip(code, redeemBy);
+              printed.push({
+                printed: true,
+                job,
+                message:
+                  slipMode === 'pdf'
+                    ? `Slip saved as ${job}.`
+                    : `Slip submitted to the printer (${job}).`,
+              });
+            } catch (error) {
+              failed = true;
+              printed.push({
+                printed: false,
+                message: `The slip didn’t print: ${(error as Error).message} This code still works, so write it down for staff.`,
+              });
+            }
           }
           json(200, {
             kind: 'minted',
-            code: formatAccessCode(result.code),
-            expiresAt: result.expiresAt.toISOString(),
-            signedOut: result.signedOut,
-            slip: printed,
+            codes: codes.map((c, index) => ({
+              code: formatAccessCode(c.code),
+              redeemBy: c.redeemBy.toISOString(),
+              slip: printed[index],
+            })),
           });
         } finally {
           changing = false;
@@ -316,10 +404,6 @@ h2{margin:0;color:var(--olive-900)}
 p{margin:0}
 .detail{font:400 15px/1.55 var(--font-sans)}
 .small{font:400 13px/1.5 var(--font-sans);color:var(--ink-500)}
-.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.stat{padding:12px 14px;border-radius:var(--radius-input);background:var(--cream-200);display:flex;flex-direction:column;gap:4px}
-.stat span:first-child{font:600 11px/1.3 var(--font-sans);letter-spacing:.2em;text-transform:uppercase;color:var(--ink-500)}
-.stat span:last-child{font:700 22px/1.2 var(--font-sans);color:var(--olive-900)}
 .actions{display:flex;flex-wrap:wrap;gap:10px}
 .actions>*{flex:1 1 220px;min-width:0}
 .row{display:flex;flex-wrap:wrap;gap:8px}
@@ -334,7 +418,7 @@ button.danger{border-color:var(--rust-600);color:var(--rust-600)}
 button.danger-solid{background:var(--rust-600);color:var(--cream-100)}
 button.large{min-height:52px;font-size:14px}
 button.link{padding:0 10px;font-size:13px;letter-spacing:0;text-transform:none}
-.code-card h2,.eyebrow{font:600 12px/1.4 var(--font-sans);letter-spacing:.26em;text-transform:uppercase;color:var(--ink-500)}
+.eyebrow{font:600 12px/1.4 var(--font-sans);letter-spacing:.26em;text-transform:uppercase;color:var(--ink-500)}
 .code-box{padding:18px 12px;border-radius:var(--radius-input);border:2px dashed var(--olive-300);background:var(--cream-200);display:flex;justify-content:center}
 .code{font:700 34px/1.1 var(--font-mono);letter-spacing:.12em;color:var(--olive-900);overflow-wrap:anywhere;text-align:center}
 .code .dash{color:var(--olive-300);padding:0 4px}
@@ -358,6 +442,20 @@ dialog form{display:flex;flex-direction:column;gap:14px}
 dialog .detail{margin:0}
 .devices{padding:10px 12px;border-radius:var(--radius-input);background:var(--paper-100);font:600 14px/1.45 var(--font-sans)}
 dialog .row{justify-content:flex-end;margin-top:4px}
+.mint{display:flex;flex-direction:column;gap:10px}
+.mint label{font:600 15px/1.45 var(--font-sans);color:var(--olive-900)}
+.mint-row{display:flex;gap:10px;align-items:stretch}
+.count{width:88px;min-height:52px;flex-shrink:0;border:2px solid var(--olive-300);border-radius:var(--radius-input);background:var(--cream-200);color:var(--olive-900);text-align:center;font:700 26px/1 var(--font-sans)}
+.count:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px;border-color:var(--olive-700)}
+.mint-row button{flex:1 1 auto;min-width:0}
+.codes,.items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.minted{display:flex;flex-direction:column;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--cream-300)}
+.minted:last-child{padding-bottom:0;border-bottom:0}
+.minted-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.item{padding:12px 14px;border-radius:var(--radius-input);background:var(--cream-200);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.who{display:flex;flex-direction:column;gap:2px;min-width:0}
+.who .name{font:600 15px/1.4 var(--font-sans);color:var(--olive-900);overflow-wrap:anywhere}
+#everyone{align-self:flex-start}
 [hidden]{display:none!important}
 @media (min-width:640px){.host{display:inline}}
 </style>
@@ -369,36 +467,30 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 </header>
 <main>
 <div class="column">
-<section class="card" aria-labelledby="status-title">
+<section class="card" aria-labelledby="mint-title">
 <div class="top">
 <span id="badge" class="badge">Checking</span>
 <button type="button" class="link" id="refresh"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Check again</button>
 </div>
 <div class="status" role="status">
-<h2 id="status-title">Checking status…</h2>
-<p class="detail" id="detail"></p>
+<h2 id="mint-title">Mint access codes</h2>
+<p class="detail" id="detail">Each code signs in one device for ${SESSION_HOURS} hours. It works once and must be used within ${CODE_REDEEM_MINUTES} minutes.</p>
 <p class="small" id="checked"></p>
 </div>
-<div class="stats" id="stats" hidden>
-<div class="stat"><span>Time left</span><span id="time-left"></span></div>
-<div class="stat"><span>Signed in</span><span id="devices"></span></div>
+<form class="mint" id="mint-form" novalidate>
+<label for="count">How many access codes would you like to mint?</label>
+<div class="mint-row">
+<input id="count" class="count" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" value="1" aria-describedby="count-hint">
+<button type="submit" class="primary large" id="mint" disabled>Mint 1 code</button>
 </div>
-<div class="actions">
-<button type="button" class="primary large" id="mint" disabled>Mint a code</button>
-<button type="button" class="danger large" id="revoke" hidden>Revoke code</button>
-<button type="button" class="primary large" id="retry" hidden>Try again</button>
-</div>
+<p class="small" id="count-hint">From 1 to ${MINT_LIMIT} at a time, with up to ${OUTSTANDING_CODE_LIMIT} unused at once. Each prints its own slip.</p>
+</form>
+<div class="actions"><button type="button" class="primary large" id="retry" hidden>Try again</button></div>
 </section>
-<section class="card code-card" id="code-card" aria-labelledby="code-title" hidden>
-<h2 id="code-title">New access code</h2>
-<div class="code-box"><span class="code" id="code"></span></div>
-<p class="expiry" id="expiry"></p>
-<p class="body" id="replaced"></p>
-<p class="note" id="slip"></p>
-<div class="row">
-<button type="button" class="secondary" id="copy">Copy code</button>
-<button type="button" class="ghost" id="hide">Hide code</button>
-</div>
+<section class="card" id="codes-card" aria-labelledby="codes-title" hidden>
+<h2 class="eyebrow" id="codes-title">New access codes</h2>
+<ul class="codes" id="codes"></ul>
+<div class="row"><button type="button" class="ghost" id="hide">Hide codes</button></div>
 </section>
 <p class="note notice" id="notice" hidden></p>
 <section class="alert" id="alert" role="alert" hidden>
@@ -406,7 +498,24 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 <p class="body" id="alert-text"></p>
 <button type="button" class="danger-solid" id="check-status">Check status</button>
 </section>
-<p class="footnote"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>Only admin-tagged devices on the station’s tailnet can open this page. Each change asks first, runs once and is never retried.</p>
+<section class="card" id="unused-card" aria-labelledby="unused-title" hidden>
+<div class="top">
+<h2 class="eyebrow" id="unused-title">Unused codes</h2>
+<span id="unused-count" class="badge">None</span>
+</div>
+<ul class="items" id="unused"></ul>
+<p class="small" id="no-unused">No unused codes. Mint one for each device that needs to sign in.</p>
+</section>
+<section class="card" id="devices-card" aria-labelledby="devices-title" hidden>
+<div class="top">
+<h2 class="eyebrow" id="devices-title">Signed-in devices</h2>
+<span id="devices-count" class="badge">None</span>
+</div>
+<ul class="items" id="devices"></ul>
+<p class="small" id="no-devices">No devices are signed in.</p>
+<button type="button" class="danger" id="everyone" hidden>Sign out everyone</button>
+</section>
+<p class="footnote"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>Only admin-tagged devices on the station’s tailnet can open this page. Each change runs once and is never retried. Voiding a code or signing a device out asks first.</p>
 </div>
 </main>
 <dialog id="confirm" aria-labelledby="confirm-title">
@@ -416,7 +525,7 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 <p class="devices" id="confirm-devices" hidden></p>
 <div class="row">
 <button type="button" class="ghost" id="cancel">Cancel</button>
-<button type="button" id="go"></button>
+<button type="button" class="danger-solid" id="go"></button>
 </div>
 </form>
 </dialog>
@@ -427,7 +536,7 @@ const icons = {
   alert: '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>',
   check: '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
 };
-const buttons = ['refresh', 'mint', 'revoke', 'retry', 'check-status'].map($);
+const limit = ${MINT_LIMIT};
 const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 const clock = (date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const time = (iso) => {
@@ -436,39 +545,68 @@ const time = (iso) => {
 };
 const left = (iso) => {
   const minutes = Math.floor((Date.parse(iso) - Date.now()) / 60000);
-  if (minutes < 1) return 'Under 1 min';
+  if (minutes < 1) return 'under 1 min';
   return minutes < 60 ? minutes + ' min' : Math.floor(minutes / 60) + ' h' + (minutes % 60 ? ' ' + (minutes % 60) + ' min' : '');
 };
 const withIcon = (element, icon, text) => { element.innerHTML = icons[icon]; const span = document.createElement('span'); span.textContent = text; element.append(span); };
+const element = (tag, className, text) => { const e = document.createElement(tag); if (className) e.className = className; if (text !== undefined) e.textContent = text; return e; };
 const lost = {
-  mint: 'A new code may already be valid. Nothing was retried. Check the printer for a slip and check status before minting again.',
-  revoke: 'The code may already be revoked. Nothing was retried. Check status before trying again.',
+  mint: 'Some codes may already be valid. Nothing was retried. Check the printer and the unused codes before minting again.',
+  revoke: 'The change may already have happened. Nothing was retried. Check the lists before trying again.',
 };
 let state = { kind: 'loading' };
 let busy;
 let pending;
-let shownCode = '';
+function count() {
+  const n = Number($('count').value);
+  return Number.isInteger(n) && n >= 1 && n <= limit ? n : 0;
+}
 function render() {
   const s = state;
-  const active = s.kind === 'active';
+  const ready = s.kind === 'ready';
   const badge = $('badge');
-  badge.className = 'badge' + (busy ? ' busy' : active ? ' active' : s.kind === 'unavailable' ? ' unavailable' : '');
-  badge.textContent = busy === 'mint' ? 'Minting' : busy === 'revoke' ? 'Revoking' : active ? 'Active' : s.kind === 'none' ? 'No code' : s.kind === 'unavailable' ? 'Can’t reach the station' : 'Checking';
-  $('status-title').textContent = busy === 'mint' ? 'Minting a new code…' : busy === 'revoke' ? 'Revoking the code…'
-    : active ? 'Code works until ' + time(s.expiresAt) : s.kind === 'none' ? 'No code is active' : s.kind === 'unavailable' ? 'Couldn’t read the status' : 'Checking status…';
-  $('detail').textContent = busy ? 'Wait for the result. Don’t close this page.'
-    : active ? 'Staff sign in with it on any order pad. It ends on its own after 8 hours.'
-    : s.kind === 'none' ? 'Nobody can sign in until you mint a code.'
-    : s.kind === 'unavailable' ? s.error : '';
-  $('checked').textContent = s.checkedAt ? 'Status checked ' + clock(s.checkedAt) + '.' : '';
-  $('stats').hidden = !active || !!busy;
-  if (active) { $('time-left').textContent = left(s.expiresAt); $('devices').textContent = plural(s.sessions, 'device'); }
-  $('mint').hidden = s.kind === 'unavailable';
-  $('mint').textContent = active ? 'Replace code' : 'Mint a code';
-  $('revoke').hidden = !active;
+  badge.className = 'badge' + (busy ? ' busy' : ready ? ' active' : s.kind === 'unavailable' ? ' unavailable' : '');
+  badge.textContent = busy === 'mint' ? 'Minting' : busy === 'revoke' ? 'Signing out' : ready ? plural(s.devices.length, 'device') + ' signed in' : s.kind === 'unavailable' ? 'Can’t reach the station' : 'Checking';
+  $('checked').textContent = busy ? 'Wait for the result. Don’t close this page.'
+    : s.kind === 'unavailable' ? s.error
+    : s.checkedAt ? 'Checked ' + clock(s.checkedAt) + '.' : '';
+  $('mint-form').hidden = s.kind === 'unavailable';
   $('retry').hidden = s.kind !== 'unavailable';
-  for (const button of buttons) button.disabled = !!busy;
-  $('mint').disabled = !!busy || s.kind === 'loading';
+  const n = count();
+  $('mint').textContent = busy === 'mint' ? 'Minting…' : n ? 'Mint ' + plural(n, 'code') : 'Mint codes';
+  $('mint').disabled = !!busy || !ready || !n;
+  $('count').disabled = !!busy;
+  for (const id of ['refresh', 'retry', 'check-status', 'everyone']) $(id).disabled = !!busy;
+  $('unused-card').hidden = $('devices-card').hidden = !ready;
+  if (!ready) return;
+  list($('unused'), s.unused, (code) => [
+    'Minted ' + clock(new Date(code.createdAt)),
+    'Use by ' + time(code.redeemBy) + ' · ' + left(code.redeemBy) + ' left',
+  ], 'Void', (code) => ask({ id: code.id, kind: 'code', when: clock(new Date(code.createdAt)) }));
+  $('no-unused').hidden = s.unused.length > 0;
+  $('unused-count').textContent = s.unused.length ? String(s.unused.length) : 'None';
+  list($('devices'), s.devices, (device) => [
+    device.device,
+    'Signed in ' + clock(new Date(device.signedInAt)) + ' · until ' + time(device.expiresAt),
+  ], 'Sign out', (device) => ask({ id: device.id, kind: 'device', name: device.device }));
+  $('no-devices').hidden = s.devices.length > 0;
+  $('devices-count').textContent = s.devices.length ? String(s.devices.length) : 'None';
+  $('everyone').hidden = !s.unused.length && !s.devices.length;
+}
+function list(container, items, lines, label, action) {
+  container.replaceChildren(...items.map((item) => {
+    const row = element('li', 'item');
+    const [name, detail] = lines(item);
+    const who = element('span', 'who');
+    who.append(element('span', 'name', name), element('span', 'small', detail));
+    const button = element('button', 'danger', label);
+    button.type = 'button';
+    button.setAttribute('aria-label', label + ': ' + name);
+    button.disabled = !!busy;
+    button.addEventListener('click', () => action(item));
+    row.append(who, button);
+    return row;
+  }));
 }
 async function refresh() {
   if (busy) return;
@@ -476,76 +614,68 @@ async function refresh() {
     const response = await fetch('/api/admin/access', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
     const body = await response.json();
     if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : '');
-    state = body.active ? { kind: 'active', expiresAt: body.expiresAt, sessions: body.sessions } : { kind: 'none' };
+    state = { kind: 'ready', unused: Array.isArray(body.unused) ? body.unused : [], devices: Array.isArray(body.devices) ? body.devices : [] };
   } catch (error) {
     state = { kind: 'unavailable', error: error.message || 'Check that the station and its database are running, then check again.' };
   }
   state.checkedAt = new Date();
   render();
 }
-function hideCode() {
-  shownCode = '';
-  $('code').textContent = '';
-  $('code-card').hidden = true;
+function hideCodes() {
+  $('codes').replaceChildren();
+  $('codes-card').hidden = true;
 }
-function showCode(body) {
-  shownCode = body.code;
-  const [first, second] = body.code.split('-');
-  const dash = document.createElement('span');
-  dash.className = 'dash';
-  dash.textContent = '-';
-  $('code').replaceChildren(first, dash, second);
-  $('expiry').textContent = 'Works until ' + time(body.expiresAt) + ' (8 hours).';
-  $('replaced').textContent = body.signedOut > 0
-    ? 'The old code stopped working and ' + plural(body.signedOut, 'device') + ' signed in with it ' + (body.signedOut === 1 ? 'was' : 'were') + ' signed out.'
-    : 'Any previous code stopped working. Hand this one to staff or let them read it off the slip.';
-  $('slip').className = 'note' + (body.slip.printed ? '' : ' failed');
-  $('slip').setAttribute('role', body.slip.printed ? 'status' : 'alert');
-  withIcon($('slip'), body.slip.printed ? 'printer' : 'alert', body.slip.message);
-  $('copy').textContent = 'Copy code';
-  $('code-card').hidden = false;
+function showCodes(codes) {
+  $('codes').replaceChildren(...codes.map((minted) => {
+    const row = element('li', 'minted');
+    const box = element('div', 'code-box');
+    const code = element('span', 'code');
+    const [first, second] = minted.code.split('-');
+    code.append(first, element('span', 'dash', '-'), second);
+    box.append(code);
+    const slip = element('p', 'note' + (minted.slip.printed ? '' : ' failed'));
+    slip.setAttribute('role', minted.slip.printed ? 'status' : 'alert');
+    withIcon(slip, minted.slip.printed ? 'printer' : 'alert', minted.slip.message);
+    const copy = element('button', 'secondary', 'Copy code');
+    copy.type = 'button';
+    copy.setAttribute('aria-label', 'Copy code ' + minted.code);
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(minted.code);
+        copy.textContent = 'Copied';
+      } catch {
+        copy.textContent = 'Couldn’t copy';
+      }
+    });
+    const footer = element('div', 'minted-footer');
+    footer.append(element('span', 'expiry', 'Use by ' + time(minted.redeemBy)), copy);
+    row.append(box, footer, slip);
+    return row;
+  }));
+  $('codes-card').hidden = false;
 }
 function showAlert(title, text) {
   $('alert-title').textContent = title;
   $('alert-text').textContent = text;
   $('alert').hidden = false;
 }
-function ask(command) {
-  if (busy) return;
-  pending = command;
-  const active = state.kind === 'active';
-  const revoke = command === 'revoke';
-  $('confirm-title').textContent = revoke ? 'Revoke the access code?' : active ? 'Replace the access code?' : 'Mint an access code?';
-  $('confirm-text').textContent = revoke ? 'Nobody can sign in until you mint a new code.'
-    : active ? 'A new code works for 8 hours and prints a slip. The current code stops working right away.'
-    : 'It works for 8 hours and prints a slip for staff.';
-  $('confirm-devices').hidden = !active || !state.sessions;
-  $('confirm-devices').textContent = active ? plural(state.sessions, 'device') + ' signed in now will be signed out.' : '';
-  $('go').className = revoke ? 'danger-solid' : 'primary';
-  $('go').textContent = revoke ? 'Revoke and sign out' : active ? 'Replace code' : 'Mint code';
+function ask(target) {
+  if (busy || state.kind !== 'ready') return;
+  pending = target;
+  const everyone = target === 'all';
+  $('confirm-title').textContent = everyone ? 'Sign out everyone?' : target.kind === 'device' ? 'Sign out this device?' : 'Void this code?';
+  $('confirm-text').textContent = everyone ? 'Nobody can sign in again until you mint new codes.'
+    : target.kind === 'device' ? 'It goes back to the sign-in screen and needs a new code to return. Anything it was saving or printing finishes first.'
+    : 'The code minted at ' + target.when + ' stops working. Throw its slip away.';
+  $('confirm-devices').hidden = !everyone && target.kind !== 'device';
+  $('confirm-devices').textContent = everyone
+    ? plural(state.unused.length, 'unused code') + ' will be voided and ' + plural(state.devices.length, 'device') + ' signed out.'
+    : target.name || '';
+  $('go').textContent = everyone ? 'Sign out everyone' : target.kind === 'device' ? 'Sign out' : 'Void code';
   $('confirm').showModal();
 }
-$('mint').addEventListener('click', () => ask('mint'));
-$('revoke').addEventListener('click', () => ask('revoke'));
-$('cancel').addEventListener('click', () => $('confirm').close());
-for (const id of ['refresh', 'retry', 'check-status'])
-  $(id).addEventListener('click', () => { $('alert').hidden = true; refresh(); });
-$('hide').addEventListener('click', hideCode);
-$('copy').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(shownCode);
-    $('copy').textContent = 'Copied';
-  } catch {
-    $('copy').textContent = 'Couldn’t copy';
-  }
-});
-$('go').addEventListener('click', async () => {
-  $('confirm').close();
-  if (busy || !pending) return;
-  const command = pending;
-  pending = undefined;
+async function change(command, payload) {
   busy = command;
-  hideCode();
   $('notice').hidden = true;
   $('alert').hidden = true;
   render();
@@ -554,18 +684,20 @@ $('go').addEventListener('click', async () => {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, confirm: true, requestId: crypto.randomUUID() }),
-      signal: AbortSignal.timeout(90000),
+      body: JSON.stringify({ command, ...payload, requestId: crypto.randomUUID() }),
+      // Up to ${MINT_LIMIT} slips may each wait for the printer.
+      signal: AbortSignal.timeout(command === 'mint' ? 240000 : 30000),
     });
     let body;
     try { body = await response.json(); } catch { body = undefined; }
     if (!body || (!response.ok && typeof body.error !== 'string')) showAlert('The station didn’t answer', lost[command]);
     else if (!response.ok) showAlert('Check before trying again', body.error);
-    else if (body.kind === 'minted') showCode(body);
+    else if (body.kind === 'minted') showCodes(body.codes);
     else {
-      withIcon($('notice'), 'check', body.revoked
-        ? 'Code revoked. ' + plural(body.signedOut, 'device') + ' signed out. Nobody can sign in until you mint a new code.'
-        : 'No access code was active, so nothing changed.');
+      withIcon($('notice'), 'check', [
+        body.voided ? 'Voided ' + plural(body.voided, 'unused code') + '.' : '',
+        body.signedOut ? 'Signed out ' + plural(body.signedOut, 'device') + '.' : '',
+      ].filter(Boolean).join(' ') || 'Done.');
       $('notice').hidden = false;
     }
   } catch {
@@ -574,9 +706,38 @@ $('go').addEventListener('click', async () => {
   busy = undefined;
   render();
   refresh();
+}
+$('count').addEventListener('input', () => {
+  const digits = $('count').value.replace(/[^0-9]/g, '');
+  $('count').value = digits ? String(Math.min(limit, Math.max(1, Number(digits)))) : '';
+  render();
+});
+$('mint-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const n = count();
+  if (!busy && n && state.kind === 'ready') {
+    hideCodes();
+    change('mint', { count: n });
+  }
+});
+$('everyone').addEventListener('click', () => ask('all'));
+$('cancel').addEventListener('click', () => $('confirm').close());
+for (const id of ['refresh', 'retry', 'check-status'])
+  $(id).addEventListener('click', () => { $('alert').hidden = true; refresh(); });
+$('hide').addEventListener('click', hideCodes);
+$('go').addEventListener('click', () => {
+  $('confirm').close();
+  if (busy || !pending) return;
+  const target = pending === 'all' ? 'all' : pending.id;
+  pending = undefined;
+  change('revoke', { target, confirm: true });
 });
 render();
 refresh();
+// Sign-ins on other devices show up without a tap while the page is open.
+setInterval(() => {
+  if (document.visibilityState === 'visible' && !busy && !$('confirm').open) refresh();
+}, 10000);
 </script>
 </body>
 </html>
