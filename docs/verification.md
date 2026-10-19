@@ -2,6 +2,19 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Random blank-name labels — 2026-10-19
+
+Blank-name labels now come from an FNV-1a hash of the random ticket ID instead of the order number. The old formula could produce only 12 labels and always gave #0001 “Bouncy Sundae”. Now 144,000 random 32-hex IDs reach all 144 adjective and noun pairs, 898–1079 times each. Stored tickets keep their saved `displayName`, and a locked draft’s placeholder uses its ticket ID.
+
+All required checks passed in order:
+
+- 28 integration tests on a disposable PostgreSQL 18 container, and volume recreation.
+- Type checks with zero errors and warnings, and formatting.
+- 312 unit/HTTP tests.
+- Both builds, and 159 Chromium tests. The blank-name test now checks that a reprint keeps the printed label.
+
+No station data was touched and nothing was printed.
+
 ## One-time access codes, one per device — 2026-10-19
 
 The shared shift code is replaced by one-time codes. A mint makes 1 to 5 codes, with at most 10 unused at once. Each code must be used within 60 minutes, works once, and opens one 8-hour session. A unique `auth_sessions.code_id` enforces the single use. Minting no longer signs anyone out. The tailnet admin page asks how many codes to mint in a field capped at 5. It lists unused codes (**Void**) and signed-in devices (**Sign out**), and has **Sign out everyone**. Each code prints its own slip, and printing stops after the first failed slip without voiding any code. The `device_access_codes` migration voids existing codes and sessions. The unmerged station-approval branch was not used.

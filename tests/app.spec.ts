@@ -1,5 +1,5 @@
 import { expect, test, type Page, type BrowserContext } from '@playwright/test';
-import { type OrderTicket } from '../src/lib/tickets/ticket';
+import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
 import { mockStationApi } from './helpers/station-api';
 import type { OrderDraft } from '../src/lib/tickets/order';
 
@@ -589,6 +589,10 @@ test('incomplete drafts reload, and blank-name fallback stays stable through sub
   );
   expect(submitted[0].ticket.reference).toBe(reference);
   expect(submitted[1].ticket.reference).toBe(reference);
+  expect(submitted[0].ticket.displayName).toBe(
+    blankNameLabel(submitted[0].ticket.id),
+  );
+  expect(submitted[1].ticket.displayName).toBe(submitted[0].ticket.displayName);
 });
 
 test('unavailable USB service blocks printing and manual check restores readiness without setup confirmation', async ({
@@ -792,7 +796,9 @@ test('older accepted locked drafts advance on reload without resubmission', asyn
   await expect(page.getByLabel('Print notification')).toHaveCount(0);
   await openTools(page);
   await expect(
-    page.getByText('Order submitted — Bouncy Sundae', { exact: true }),
+    page.getByText(`Order submitted — ${submitted[0].ticket.displayName}`, {
+      exact: true,
+    }),
   ).toBeVisible();
   expect(submitted).toHaveLength(1);
 });

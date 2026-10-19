@@ -85,14 +85,15 @@ Soft serve is not offered for now.
 
 ### Blank-name label
 
-Friendly adjective + ice-cream noun, derived from the order reference number `n` so it is
-stable across reprints and reloads:
+Friendly adjective + ice-cream noun, derived from a hash of the ticket's random ID so each
+order gets an unpredictable label that is still stable across reprints and reloads:
 
 ```ts
 const ADJ = ['Happy','Sunny','Jolly','Cheery','Lucky','Cozy','Breezy','Bouncy','Friendly','Merry','Peppy','Snazzy'];
 const NOUN = ['Sprinkle','Waffle','Cherry','Scoop','Sundae','Cone','Swirl','Fudge','Gumdrop','Almond','Caramel','Gummy Bear'];
-const label = (n: number) => `${ADJ[(n * 7) % ADJ.length]} ${NOUN[(n * 3 + 1) % NOUN.length]}`;
-// #43 → "Sunny Caramel", #44 → "Friendly Waffle"
+// FNV-1a 32-bit hash of the ticket ID, spread over all 144 pairs
+const pick = fnv1a(ticketId) % (ADJ.length * NOUN.length);
+const label = `${ADJ[Math.floor(pick / NOUN.length)]} ${NOUN[pick % NOUN.length]}`;
 ```
 
 Store the resolved display name on the ticket at creation so it never depends on recomputing.

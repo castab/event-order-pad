@@ -197,7 +197,7 @@ describe('structured immutable tickets', () => {
       expect(() => parseTicket({ ...input(), customerName })).toThrow('Name');
     for (const customerName of [undefined, '', '  \n\x00 '])
       expect(parseTicket({ ...input(), customerName }).displayName).toBe(
-        'Sunny Caramel',
+        'Friendly Sprinkle',
       );
     expect(
       parseTicket({ ...input(), displayName: 'Stored friendly label' })
@@ -210,10 +210,22 @@ describe('structured immutable tickets', () => {
     for (const displayName of ['', 'A'.repeat(81), 'cut\x1b'])
       expect(() => parseTicket({ ...input(), displayName })).toThrow();
   });
-  it('uses the documented labels and safe numeric references', () => {
-    expect(blankNameLabel(43)).toBe('Sunny Caramel');
-    expect(blankNameLabel(44)).toBe('Friendly Waffle');
-    expect(blankNameLabel(Number.MAX_SAFE_INTEGER)).toBe('Sunny Caramel');
+  it('derives labels from ticket IDs, not references', () => {
+    expect(blankNameLabel('id')).toBe('Friendly Sprinkle');
+    expect(blankNameLabel('id')).toBe(blankNameLabel('id'));
+    expect(parseTicket({ ...input(), reference: '0001' }).displayName).toBe(
+      parseTicket({ ...input(), reference: '0002' }).displayName,
+    );
+    const labels = new Set(
+      Array.from({ length: 2000 }, (_, i) =>
+        blankNameLabel(i.toString(16).padStart(32, '0')),
+      ),
+    );
+    expect(labels.size).toBe(144);
+    for (const id of ['', 43, undefined])
+      expect(() => blankNameLabel(id as string)).toThrow('ticket ID');
+  });
+  it('uses safe numeric references', () => {
     expect(parseReference('43')).toBe('0043');
     expect(parseReference('10000')).toBe('10000');
     expect(parseTicket({ ...input(), reference: '43' }).reference).toBe('0043');
@@ -228,8 +240,6 @@ describe('structured immutable tickets', () => {
       '',
     ])
       expect(() => parseTicket({ ...input(), reference })).toThrow('reference');
-    for (const n of [-1, 1.5, NaN, Infinity])
-      expect(() => blankNameLabel(n)).toThrow();
   });
 });
 

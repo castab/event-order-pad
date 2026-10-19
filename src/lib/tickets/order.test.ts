@@ -96,7 +96,7 @@ describe('ice cream orders with flavor scoops', () => {
     expect(
       draftTicket(draft({ reference: '0043', name: '  ' }), 'id', time)
         .displayName,
-    ).toBe('Sunny Caramel');
+    ).toBe('Friendly Sprinkle');
     expect(newDraft().reference).toBeUndefined();
     expect(() => draftTicket(draft(), 'id', time)).toThrow('reference');
   });

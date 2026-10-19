@@ -100,10 +100,16 @@ export function parseReference(value: unknown): string {
     throw new Error('Order reference must be a positive safe integer.');
   return String(Number(value)).padStart(4, '0');
 }
-export function blankNameLabel(n: number): string {
-  if (!Number.isSafeInteger(n) || n < 0)
-    throw new Error('Invalid label reference.');
-  return `${ADJ[((n % ADJ.length) * 7) % ADJ.length]} ${NOUN[((n % NOUN.length) * 3 + 1) % NOUN.length]}`;
+/** Derives the label from the random ticket ID, so it is unpredictable per order yet stable for that ticket. */
+export function blankNameLabel(ticketId: string): string {
+  if (typeof ticketId !== 'string' || !ticketId)
+    throw new Error('Invalid label ticket ID.');
+  // FNV-1a spreads every ID across all adjective and noun pairs.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < ticketId.length; i++)
+    hash = Math.imul(hash ^ ticketId.charCodeAt(i), 0x01000193);
+  const pick = (hash >>> 0) % (ADJ.length * NOUN.length);
+  return `${ADJ[Math.floor(pick / NOUN.length)]} ${NOUN[pick % NOUN.length]}`;
 }
 export function totalScoops(serving: Pick<ServingEditor, 'flavors'>): number {
   return serving.flavors.reduce((total, portion) => total + portion.count, 0);
@@ -187,7 +193,7 @@ export function parseTicket(value: unknown): OrderTicket {
       : cleanCustomerName(v.customerName) || undefined;
   const displayName =
     v.displayName === undefined
-      ? (customerName ?? blankNameLabel(Number(reference)))
+      ? (customerName ?? blankNameLabel(id))
       : text(v.displayName, 'Display name', 80);
   if (customerName && displayName !== customerName)
     throw new Error('Display name must match the customer name.');
