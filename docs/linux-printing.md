@@ -6,6 +6,8 @@ The service hosts the static app and accepts same-origin print requests. The pho
 
 ## Start on Mint
 
+Stations now install verified releases with `install-station.sh`, which brings its own Node runtime and updates itself inside a maintenance window. Follow [Station releases and automatic updates](../README.md#station-releases-and-automatic-updates) for a new station or to move this one over; the queue, Cloudflare Tunnel, Turnstile and admin-page steps below still apply. On a release-installed station, use `sudo order-pad-access …` wherever this guide says `npm run access -- …`, and keep settings in `/etc/order-pad/order-pad.env` instead of `.env`. The checkout steps below remain for development.
+
 Prerequisites: a working local USB CUPS queue with **Star TSP100 Cutter (en)**, Node **22.17+ or 24**, Git, PostgreSQL 18 running on this same machine, a Cloudflare-managed domain, a named Cloudflare Tunnel, and Turnstile keys for the final hostname. Check `node --version`; distribution Node packages may be older. Use the [official Node installation guide](https://nodejs.org/en/download) if needed. Run the app as your normal user. Use the existing queue's exact name; creating or renaming a queue is unnecessary.
 
 Confirm the queue and options:
@@ -173,7 +175,7 @@ Required: `DATABASE_URL` (loopback Postgres connection URL; remote hosts/host ov
 
 Start the service **from the repository root**: it serves `./build`, checks the migrated database before listening, and exits if either is unavailable.
 
-The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`. Its `WorkingDirectory` is the repository root and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. The cloudflared system service persists the tunnel, not Node. Disable host sleep for event use.
+The npm launcher runs in the foreground. A release-installed station uses the shipped `order-pad.service` (user `order-pad`, `WorkingDirectory=/opt/order-pad/current`, `EnvironmentFile=/etc/order-pad/order-pad.env`); `order-pad-update.timer` installs new releases and restarts it. Before the move to releases, the verified Mint station's `order-pad.service` used the repository root as `WorkingDirectory` and its environment-file drop-in loads `.env`; restart the managed process after every service rebuild with `sudo systemctl restart order-pad.service`. After changing the unit or its drop-ins, run `sudo systemctl daemon-reload` first. Configure new systemd stations with the actual Node path, the repository working directory, and `EnvironmentFile` pointing to `.env`. The cloudflared system service persists the tunnel, not Node. Disable host sleep for event use.
 
 ## Verified Mint setup — 2026-10-11
 
@@ -191,6 +193,8 @@ This section is a dated record of the first station check, not current instructi
 The Galaxy S10e was online in Tailscale. The owner opened the Mint HTTPS URL, selected Linux USB / CUPS, acknowledged the successful CUPS test and tapped **Print Test Ticket** once. The service journal recorded accepted job **Star_TSP143-2**, attempt `7eacfd18e1a08b9c25f127bb6399a479`, ticket `8c9d32b614dc5f886fc5cee9b7c3f95b`. CUPS independently reported **completed**, **one sheet**, with the queue idle and no pending jobs afterward. Asked about the browser result, readable output, end marker and partial cut, the owner confirmed: “Yeah, it all worked.” This establishes the first phone-to-USB smoke test; reprint, interruption and recovery behavior remain untested on hardware.
 
 ## Update and test the order builder
+
+A release-installed station updates itself (see [Station releases and automatic updates](../README.md#station-releases-and-automatic-updates)); `sudo order-pad-ops status` shows what is installed and `journalctl -u order-pad-update` what the updater did. The rest of this paragraph is the checkout procedure.
 
 Follow README’s [Postgres setup and upgrade steps](../README.md#set-up-postgres-and-upgrade-the-station): configure `.env`, start PostgreSQL 18, apply committed migrations with `npm run db:deploy`, then rebuild both outputs. When no print attempt or CUPS job is pending, stop the old service and restart with `npm run start:printer`. A direct launcher such as `./start-printer.local` must load `.env` with Node’s `--env-file=.env` or export `DATABASE_URL` and `ORDER_PAD_CAPTURE_FROM` itself. Reload browser tabs together. Keep the cutoff fixed across restarts.
 
@@ -242,6 +246,17 @@ These remain deployment/device checks; automated fixtures do not establish them.
 4. Check that an unused code lapses after 60 minutes, that a session ends 8 hours after sign-in, and `npm run access -- revoke`, including an already-open queue. During a controlled print, session loss must wait for the send to settle; subsequent login must recover durable state without resending. Inspect physical output before acknowledging unknown results.
 5. Run `npm run access -- mint 3` with the printer ready and confirm three separate slips print, each cut cleanly, and the code, use-by time and “Works once, on one device, for 8 hours.” are legible on each; then confirm a mint with the printer unplugged reports the failure and the terminal code still signs in. Verify wrong-code rate-limit feedback and recovery after cooldown. Keep station data backed up.
 6. If the tailnet admin page is configured, complete its acceptance steps under [Tailnet admin page](#tailnet-admin-page), including a mint of 2 from the page with the printer unplugged: the page must keep showing both valid codes, report the failed slip and mark the other as not printed.
+
+## Release-installed station acceptance checks
+
+Automated tests stub `systemctl`, CUPS and GitHub; the packaged release is only smoke-tested in PDF mode. After moving a station to releases (or changing `deploy/systemd/`), check on the station:
+
+1. `sudo order-pad-ops status` shows the installed release and an open/closed window that matches local time.
+2. As the `order-pad` user, the service prints an order and a REPRINT on the USB queue with the expected cut, and `sudo order-pad-access mint 1` prints a slip. `systemctl show order-pad -p User` reports `order-pad`.
+3. The tailnet admin page still loads through `tailscale serve` (`unix:/run/order-pad/admin.sock`) and mints a code; the Cloudflare hostname still signs in.
+4. `sudo systemctl stop order-pad` during no print finishes within a few seconds; a print sent just before the stop finishes and is recorded, and a print attempted while stopping reports that no job was submitted.
+5. With a prerelease on `CHANNEL=prerelease` (or `PIN`), the timer stages and installs it inside the window only after `QUIET_MINUTES` without activity, writes a backup to `/var/backups/order-pad/`, and does nothing while a draft is being edited.
+6. A deliberately broken prerelease (for example one that exits at startup) is rolled back to the previous release, logged, and not retried.
 
 ## Still to test
 

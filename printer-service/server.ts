@@ -119,5 +119,9 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     server.close(() => {
       void database.$disconnect();
     });
+    // A job already handed to lp records its outcome first; open keep-alive sockets must not hold the exit.
+    void printing.close().then(() => {
+      setTimeout(() => server.closeAllConnections(), 1000).unref();
+    });
   });
 }

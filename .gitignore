@@ -9,3 +9,4 @@ playwright-report/
 *.local
 .env
 printer-service/generated/
+dist/

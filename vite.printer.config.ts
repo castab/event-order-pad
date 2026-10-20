@@ -10,6 +10,7 @@ export default defineConfig({
       input: {
         server: 'printer-service/server.ts',
         'access-cli': 'printer-service/access-cli.ts',
+        ops: 'printer-service/ops-cli.ts',
       },
       output: { entryFileNames: '[name].mjs' },
     },

@@ -1,0 +1,28 @@
+[Unit]
+Description=Fiona's Order Pad print service
+After=network-online.target cups.service tailscaled.service docker.service
+Wants=network-online.target cups.service
+
+[Service]
+Type=simple
+User=order-pad
+Group=order-pad
+# server.mjs serves ./build, so it must start inside the release.
+WorkingDirectory=/opt/order-pad/current
+EnvironmentFile=/etc/order-pad/order-pad.env
+ExecStart=/opt/order-pad/current/node/bin/node build-printer/server.mjs
+# The admin socket lives here; tailscaled (root) connects to it.
+RuntimeDirectory=order-pad
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+# SIGTERM refuses new prints and lets a job already sent to lp record its outcome.
+TimeoutStopSec=60
+KillMode=mixed
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
