@@ -214,7 +214,7 @@ A **serving** is one cup or cone.
 - **Container:** exactly one of Cup, Cake Cone or Sugar Cone. Nothing is preselected.
 - **Toppings (optional):** any combination of Whipped cream, Gummy Bears, Caramel Sauce, Chocolate Sauce, Sliced Almonds, Maraschino Cherries, Rainbow Sprinkles and Chocolate Sprinkles.
 
-An **order** has 1–30 servings, as long as the ticket fits the receipt limits (240 text lines and 2000 mm, with room reserved for a REPRINT banner). An order that is too long blocks printing with a message. The customer name is optional, up to 80 printable characters, with control characters removed. A blank name becomes a stable two-word label derived from the order number, such as **Sunny Caramel** for #0043. The label is resolved once and stored on the ticket.
+An **order** has 1–30 servings, as long as the ticket fits the receipt limits (240 text lines and 2000 mm, with room reserved for a REPRINT banner). An order that is too long blocks printing with a message. The customer name is optional, up to 80 printable characters, with control characters removed. A blank name becomes a two-word label such as **Sunny Caramel**, picked from 1,024 adjective and noun pairs (32 of each) by hashing the order’s random ticket ID, so consecutive orders get unrelated labels. The label is resolved once and stored on the ticket, so reprints and the queue keep it; tickets created earlier keep the label they were stored with. The printability check for a blank-name order uses the widest possible label, so whichever label the ticket gets will fit.
 
 The menu is defined in [src/lib/tickets/ticket.ts](src/lib/tickets/ticket.ts). The design brief in [design/IMPLEMENTATION.md](design/IMPLEMENTATION.md) has the full ordering rules.
 

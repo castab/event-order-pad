@@ -8,6 +8,7 @@ import {
   CONTAINERS as containers,
   TOPPINGS as toppings,
   totalScoops,
+  widestBlankNameLabel,
   type Serving,
   type ServingEditor,
   type OrderTicket,
@@ -139,12 +140,15 @@ export function prepareDraftForPrint(draft: OrderDraft): OrderDraft {
     throw new Error(
       'Add at least one scoop and choose a container to start your order.',
     );
-  draftTicket(
+  const probe = draftTicket(
     prepared,
     'I'.repeat(100),
     '2000-01-01T00:00:00.000Z',
     String(Number.MAX_SAFE_INTEGER),
   );
+  // The real ticket ID picks the blank-name label, so check the widest one.
+  if (!probe.customerName)
+    parseTicket({ ...probe, displayName: widestBlankNameLabel });
   return prepared;
 }
 

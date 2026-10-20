@@ -172,8 +172,8 @@
     editable && editorComplete && !full && !unchangedEdit,
   );
   const fallbackName = $derived(
-    draft?.reference
-      ? blankNameLabel(Number(draft.reference))
+    draft?.submittedTicketId
+      ? blankNameLabel(draft.submittedTicketId)
       : 'Assigned when printed',
   );
   const recoveryNeeded = $derived(
@@ -687,7 +687,7 @@
             oninput={(event) => changeName(event.currentTarget)}
           />
           <p id="name-hint">
-            {draft.reference
+            {draft.submittedTicketId
               ? `Left blank, the ticket says “${fallbackName}”`
               : 'Left blank, a name is assigned when printed.'}
           </p>

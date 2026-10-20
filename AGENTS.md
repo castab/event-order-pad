@@ -140,7 +140,7 @@ interface OrderTicket {
   createdAt: string; // ISO UTC with milliseconds, e.g. 2026-10-11T19:42:00.000Z
   reference: string; // zero-padded order number, e.g. "0043"
   customerName?: string; // ≤ 80 printable chars
-  displayName: string; // customerName or blankNameLabel(reference)
+  displayName: string; // customerName or blankNameLabel(id)
   servings: Serving[]; // 1–30
 }
 interface Serving {
