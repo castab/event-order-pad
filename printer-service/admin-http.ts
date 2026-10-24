@@ -181,6 +181,7 @@ export function createAdminApp({
         const body = (await readJson(req, 1024)) as {
           command?: unknown;
           count?: unknown;
+          print?: unknown;
           target?: unknown;
           confirm?: unknown;
           requestId?: unknown;
@@ -197,13 +198,22 @@ export function createAdminApp({
             'Use the admin page’s buttons. Nothing changed.',
           );
         let count = 0;
-        if (command === 'mint')
+        let print = true;
+        if (command === 'mint') {
           try {
             count = parseMintCount(body?.count);
           } catch (error) {
             throw new BadRequest(400, (error as Error).message);
           }
-        else if (
+          if (body?.print !== undefined) {
+            if (typeof body.print !== 'boolean')
+              throw new BadRequest(
+                400,
+                'Use the admin page’s buttons. Nothing changed.',
+              );
+            print = body.print;
+          }
+        } else if (
           command !== 'revoke' ||
           body?.confirm !== true ||
           (target !== 'all' &&
@@ -233,7 +243,7 @@ export function createAdminApp({
         if (handled.size > 200) handled.delete(handled.values().next().value!);
         const action =
           command === 'mint'
-            ? `mint of ${count}`
+            ? `mint of ${count}${print ? '' : ' without slips'}`
             : target === 'all'
               ? 'revoke of everything'
               : 'revoke of one code';
@@ -287,7 +297,7 @@ export function createAdminApp({
           const printed: { printed: boolean; job?: string; message: string }[] =
             [];
           let failed = false;
-          for (const { code, redeemBy } of codes) {
+          for (const { code, redeemBy } of print ? codes : []) {
             if (failed) {
               printed.push({
                 printed: false,
@@ -319,7 +329,7 @@ export function createAdminApp({
             codes: codes.map((c, index) => ({
               code: formatAccessCode(c.code),
               redeemBy: c.redeemBy.toISOString(),
-              slip: printed[index],
+              ...(print && { slip: printed[index] }),
             })),
           });
         } finally {
@@ -448,6 +458,9 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 .count{width:88px;min-height:52px;flex-shrink:0;border:2px solid var(--olive-300);border-radius:var(--radius-input);background:var(--cream-200);color:var(--olive-900);text-align:center;font:700 26px/1 var(--font-sans)}
 .count:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px;border-color:var(--olive-700)}
 .mint-row button{flex:1 1 auto;min-width:0}
+.print-option{display:flex;align-items:center;gap:12px;min-height:44px;font:600 15px/1.45 var(--font-sans);color:var(--olive-900)}
+.print-option input{width:24px;height:24px;flex-shrink:0;margin:0;accent-color:var(--olive-700)}
+.print-option input:focus-visible{outline:3px solid var(--focus-ring);outline-offset:2px}
 .codes,.items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .minted{display:flex;flex-direction:column;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--cream-300)}
 .minted:last-child{padding-bottom:0;border-bottom:0}
@@ -483,7 +496,8 @@ dialog .row{justify-content:flex-end;margin-top:4px}
 <input id="count" class="count" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" value="1" aria-describedby="count-hint">
 <button type="submit" class="primary large" id="mint" disabled>Mint 1 code</button>
 </div>
-<p class="small" id="count-hint">From 1 to ${MINT_LIMIT} at a time, with up to ${OUTSTANDING_CODE_LIMIT} unused at once. Each prints its own slip.</p>
+<label class="print-option" for="print"><input type="checkbox" id="print" checked>Print a slip for each code</label>
+<p class="small" id="count-hint">From 1 to ${MINT_LIMIT} at a time, with up to ${OUTSTANDING_CODE_LIMIT} unused at once. Slips print unless you turn them off.</p>
 </form>
 <div class="actions"><button type="button" class="primary large" id="retry" hidden>Try again</button></div>
 </section>
@@ -576,6 +590,7 @@ function render() {
   $('mint').textContent = busy === 'mint' ? 'Minting…' : n ? 'Mint ' + plural(n, 'code') : 'Mint codes';
   $('mint').disabled = !!busy || !ready || !n;
   $('count').disabled = !!busy;
+  $('print').disabled = !!busy;
   for (const id of ['refresh', 'retry', 'check-status', 'everyone']) $(id).disabled = !!busy;
   $('unused-card').hidden = $('devices-card').hidden = !ready;
   if (!ready) return;
@@ -633,9 +648,12 @@ function showCodes(codes) {
     const [first, second] = minted.code.split('-');
     code.append(first, element('span', 'dash', '-'), second);
     box.append(code);
-    const slip = element('p', 'note' + (minted.slip.printed ? '' : ' failed'));
-    slip.setAttribute('role', minted.slip.printed ? 'status' : 'alert');
-    withIcon(slip, minted.slip.printed ? 'printer' : 'alert', minted.slip.message);
+    // No slip means staff chose not to print; nothing was sent to the printer.
+    const slip = element('p', 'note' + (!minted.slip || minted.slip.printed ? '' : ' failed'));
+    if (minted.slip) {
+      slip.setAttribute('role', minted.slip.printed ? 'status' : 'alert');
+      withIcon(slip, minted.slip.printed ? 'printer' : 'alert', minted.slip.message);
+    } else slip.textContent = 'No slip printed, as you chose.';
     const copy = element('button', 'secondary', 'Copy code');
     copy.type = 'button';
     copy.setAttribute('aria-label', 'Copy code ' + minted.code);
@@ -717,7 +735,7 @@ $('mint-form').addEventListener('submit', (event) => {
   const n = count();
   if (!busy && n && state.kind === 'ready') {
     hideCodes();
-    change('mint', { count: n });
+    change('mint', { count: n, print: $('print').checked });
   }
 });
 $('everyone').addEventListener('click', () => ask('all'));

@@ -150,6 +150,7 @@ Which devices may use the page is decided by the **tailnet policy**, not by the 
    - On a station terminal, `curl --unix-socket /run/order-pad/admin.sock -H 'X-Forwarded-Host: station.example.ts.net' http://localhost/api/admin/access` returns 403 because no capability header is present.
    - With Tailscale disabled, the tailnet address is unreachable and the public hostname’s `/api/admin/access` returns 401 or 404.
    - Enter 2 for **How many access codes would you like to mint?** and tap **Mint 2 codes**. The page shows both codes with their use-by times, two separate slips print, each code signs in one staff device, and a code that was already used is refused on a third device. Typing 9 in the field leaves 5. Both devices appear under **Signed-in devices**; **Sign out** on one returns only that device to sign-in. When signing everyone out is safe, **Sign out everyone** does that and empties **Unused codes**.
+   - Uncheck **Print a slip for each code**, mint 1 code and confirm the code shows on the page with “No slip printed, as you chose.” and nothing prints. Reload the page and confirm the box is checked again.
    - Remove the tag from that device and reload the page: it is refused, and the device stays on the tailnet.
    - `journalctl -u order-pad.service` shows the tailnet address of the device that made each change, and never a code.
 
