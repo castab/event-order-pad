@@ -540,3 +540,44 @@ it('rechecks attempts finalized during CUPS waiting and never sends them', async
     (await new Printing(cups, journal, 'Courier').print(request)).message,
   ).toBe('Recovered while waiting.');
 });
+
+it('closes by refusing new prints and waiting for the job already sent to lp', async () => {
+  const journal = new MemoryPrintJournal();
+  const cups = new Cups('OrderPad', runner());
+  vi.spyOn(cups, 'waitUntilIdle').mockResolvedValue();
+  vi.spyOn(cups, 'prepare').mockResolvedValue({
+    media: 'test',
+    heightMm: 200,
+    jobOptions: [],
+  });
+  let release!: (job: string) => void;
+  const submit = vi.spyOn(cups, 'submit').mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const printing = new Printing(cups, journal, 'Courier', async () =>
+    Buffer.from('%PDF-test'),
+  );
+  const active = printing.print(request);
+  await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+  const waiting = printing.print({ ...request, attemptId: 'waiting' });
+  let closed = false;
+  const closing = printing.close().then(() => {
+    closed = true;
+  });
+  expect((await waiting).message).toBe(
+    'The service is restarting. No job was submitted.',
+  );
+  expect((await printing.print({ ...request, attemptId: 'late' })).status).toBe(
+    'failed',
+  );
+  expect(closed).toBe(false);
+  release('OrderPad-7');
+  await closing;
+  expect((await active).status).toBe('accepted');
+  expect((await journal.get('attempt-1'))?.result?.status).toBe('accepted');
+  expect(await journal.get('waiting')).toBeUndefined();
+  expect(submit).toHaveBeenCalledTimes(1);
+});

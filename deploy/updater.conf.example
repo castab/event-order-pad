@@ -1,0 +1,19 @@
+# /etc/order-pad/updater.conf: how this station installs releases. Unknown keys stop the updater.
+# Local time when updates may run. The station must also be idle for QUIET_MINUTES first.
+WINDOW=02:00-05:00
+TIME_ZONE=America/Chicago
+# stable ignores prereleases (tags with a hyphen, like v1.4.0-rc.1); prerelease installs them too.
+CHANNEL=stable
+# Hold this station at one release, for example PIN=v1.4.0. Leave unset to follow CHANNEL.
+# PIN=
+# false downloads and verifies releases but waits for `order-pad-ops apply <tag>`.
+AUTO_APPLY=true
+# sigstore checks the checksum and that GitHub Actions built the file from this repository's
+# release workflow at that tag. sha256 checks the checksum only.
+VERIFY=sigstore
+# Must print a pg_dump custom-format (-Fc) archive of the station database to stdout.
+BACKUP_COMMAND=docker exec order-pad-postgres-1 sh -c 'pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"'
+BACKUP_KEEP=10
+QUIET_MINUTES=10
+MIN_WINDOW_LEFT_MINUTES=20
+# REPO=castab/event-order-pad

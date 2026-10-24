@@ -2,6 +2,23 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Station releases and automatic updates — 2026-10-19
+
+Pushing a `v*` tag now runs the full Checks suite and publishes a station release. The release is a self-contained linux-x64 tarball with its Node runtime, production dependencies and migrations, plus build provenance. Each station's `order-pad-update.timer` installs new releases inside its own window, and only after `QUIET_MINUTES` of unchanged database activity with an empty CUPS queue. It backs up first, then migrates, switches and checks health, and returns to the previous release on failure. On SIGTERM the service now refuses new prints and waits for a job already sent to `lp` to record its outcome. `prisma` moved to `dependencies`, and the version is 0.2.0.
+
+All required checks passed in order:
+
+- 30 integration tests on a disposable PostgreSQL 18 container (port 55432, not the station database), including the new activity-fingerprint and applied-migration tests, and volume recreation.
+- Type checks with zero errors and warnings. Formatting is clean for every tracked file; the only warnings are in an untracked `.claude/worktrees/` copy.
+- 331 unit/HTTP tests (after merging the blank-name change from `main`), including the updater state machine (install, busy, outside the window, manual migrations, failed backup, failed migration, health-check rollback, verification and staging) and the real command runner and probe.
+- Both builds, and 159 Chromium tests.
+- `npm run package:release -- v0.2.0` produced a 149 MB tarball. `scripts/smoke-release.mjs` unpacked it, migrated a fresh database with the bundled Prisma, started the packaged server in PDF mode, got 200 from `/api/auth/config`, loaded `ops.mjs` and stopped the server cleanly.
+- cosign v3.1.3 `verify-blob-attestation` accepted a public `actions/attest` bundle (from the GitHub CLI's own v2.102.0 release) with the flags the updater uses. It rejected that bundle under a different workflow identity, and rejected a modified file.
+- actionlint 1.7.12 and shellcheck 0.10.0 reported nothing for the workflows and `deploy/install-station.sh`.
+- A read-only probe of the live station confirmed `/api/auth/config` answers 200 on loopback with `CF-Connecting-IP` and 403 without it.
+
+Not yet run: the Release workflow on GitHub, `install-station.sh`, systemd units, the `order-pad` service user and the timer on a real machine, and the move of this station to releases. No station data was changed.
+
 ## Random blank-name labels — 2026-10-19
 
 Blank-name labels now come from a hash of the random ticket ID (FNV-1a with a Murmur3 finalizer) instead of the order number. The old formula could produce only 12 labels and always gave #0001 “Bouncy Sundae”. The word lists grew to 32 adjectives and 32 nouns, so there are 1,024 labels; a unit test spreads 65,536 sequential IDs across all of them with no label picked more than 96 times. Printability checks for blank-name drafts use the widest label, and an exhaustive test confirms no label prints taller. Stored tickets keep their saved `displayName`, and a locked draft’s placeholder uses its ticket ID.

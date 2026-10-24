@@ -1,0 +1,76 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+  publish:
+    name: Package, attest and publish
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: order_pad
+          POSTGRES_PASSWORD: order_pad
+          POSTGRES_DB: order_pad
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U order_pad -d order_pad"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Require stable releases to come from main
+        run: |
+          case "$TAG" in *-*) exit 0 ;; esac
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$TAG is not on main. Tag a main commit, or use a prerelease tag such as $TAG-rc.1."
+            exit 1
+          }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:printer
+      - run: npm run package:release -- "$TAG"
+      - run: sudo apt-get install -y -qq fonts-dejavu-core
+      - name: Smoke-test the package against a fresh database
+        env:
+          DATABASE_URL: postgresql://order_pad:order_pad@127.0.0.1:5432/order_pad
+        run: >-
+          node scripts/smoke-release.mjs "dist/order-pad-$TAG-linux-x64.tar.gz"
+          /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf
+      - id: attest
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/order-pad-${{ github.ref_name }}-linux-x64.tar.gz
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          name="order-pad-$TAG-linux-x64.tar.gz"
+          cp "$BUNDLE" "dist/$name.sigstore.json"
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}" "dist/$name" \
+            "dist/$name.sigstore.json" dist/SHA256SUMS deploy/install-station.sh

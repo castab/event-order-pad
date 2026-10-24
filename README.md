@@ -134,25 +134,26 @@ Sign-in attempts have persistent per-IP and station-wide limits, with `429`/`Ret
 
 ## Commands
 
-| Command                                          | What it does                                                                                                                                                                                         |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                                    | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                              |
-| `npm run db:generate`                            | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                                   |
-| `npm run db:migrate -- --name NAME`              | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                            |
-| `npm run db:deploy`                              | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                           |
-| `npm run db:studio`                              | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                                      |
-| `npm run test:postgres`                          | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                                       |
-| `npm run test:postgres:volume`                   | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                            |
-| `npm run check`                                  | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                                       |
-| `npm run lint`                                   | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                             |
-| `npm test`                                       | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                             |
-| `npm run build`                                  | Static app and service worker into `build/`.                                                                                                                                                         |
-| `npm run build:printer`                          | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                                      |
-| `npm run access -- <mint [1-5]\|status\|revoke>` | Mints 1–5 one-time access codes (one slip each; `--no-print` skips them), lists unused codes and signed-in devices, or voids every code and signs every device out. Uses `.env` and the bundled CLI. |
-| `npm run start:printer`                          | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)).            |
-| `npm run preview`                                | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                                         |
-| `npx playwright install chromium`                | One-time browser download for the end-to-end tests.                                                                                                                                                  |
-| `npm run test:e2e`                               | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                                      |
+| Command                                          | What it does                                                                                                                                                                                           |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run dev`                                    | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                                |
+| `npm run db:generate`                            | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                                     |
+| `npm run db:migrate -- --name NAME`              | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                              |
+| `npm run db:deploy`                              | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                             |
+| `npm run db:studio`                              | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                                        |
+| `npm run test:postgres`                          | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                                         |
+| `npm run test:postgres:volume`                   | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                              |
+| `npm run check`                                  | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                                         |
+| `npm run lint`                                   | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                               |
+| `npm test`                                       | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                               |
+| `npm run build`                                  | Static app and service worker into `build/`.                                                                                                                                                           |
+| `npm run build:printer`                          | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                                        |
+| `npm run access -- <mint [1-5]\|status\|revoke>` | Mints 1–5 one-time access codes (one slip each; `--no-print` skips them), lists unused codes and signed-in devices, or voids every code and signs every device out. Uses `.env` and the bundled CLI.   |
+| `npm run package:release -- vX.Y.Z`              | After both builds, packages `dist/order-pad-vX.Y.Z-linux-x64.tar.gz` and `SHA256SUMS` for stations. The tag must equal `v` + the `package.json` version; Linux x64 only. The release workflow runs it. |
+| `npm run start:printer`                          | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)).              |
+| `npm run preview`                                | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                                           |
+| `npx playwright install chromium`                | One-time browser download for the end-to-end tests.                                                                                                                                                    |
+| `npm run test:e2e`                               | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                                        |
 
 To run everything CI runs, in CI's order:
 
@@ -169,7 +170,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these against PostgreSQL 18 on Node 24 for every pull request and every push to `main`, with `--with-deps` on the Playwright install. To check a branch that has no pull request, start the workflow manually from the Actions tab. Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins the SvelteKit 3 toolchain.
+CI ([.github/workflows/checks.yml](.github/workflows/checks.yml)) runs these against PostgreSQL 18 on Node 24 for every pull request and every push to `main`, with `--with-deps` on the Playwright install. To check a branch that has no pull request, start the workflow manually from the Actions tab. Pushing a `v*` tag runs the same checks, then [.github/workflows/release.yml](.github/workflows/release.yml) publishes a station release (see [Station releases and automatic updates](#station-releases-and-automatic-updates)). Browser tests run in desktop Chromium. They do not replace testing on the Android phone and printer. The lockfile pins the SvelteKit 3 toolchain.
 
 ## Project layout
 
@@ -191,11 +192,12 @@ printer-service/      Linux Node service: HTTP API, static hosting, CUPS, PDF, P
                       Its Prisma client is generated into printer-service/generated/ (Git-ignored); `*.postgres.test.ts` need a real database.
 prisma/               Schema and committed PostgreSQL migrations (prisma.config.ts at the root loads .env for the db:* commands)
 compose.yaml          Local PostgreSQL 18 with a persistent named volume, bound to loopback
-deploy/               Cloudflare Tunnel example configuration
+deploy/               Station installer, systemd units, updater settings example, manual-migrations list and the Cloudflare Tunnel example
+printer-service/ops/  Station updater (bundled as build-printer/ops.mjs): release selection, verification, idle check, backup, migrate, switch and rollback
 tests/                Playwright specs: auth.spec.ts (access-code sign-in, session loss during a print, offline protection and layout), app.spec.ts (builder, mocked API), queue.spec.ts (queue, mocked API and EventSource), queue-live.spec.ts and stations-live.spec.ts (real HTTP service with in-memory repositories and stubbed CUPS), admin.spec.ts (tailnet admin page: mint count, codes, voiding and signing out, with stubbed access operations); helpers/ holds the in-memory test doubles
-scripts/              test-postgres.mjs and test-postgres-volume.mjs, the runners behind the two Postgres test commands
+scripts/              test-postgres.mjs and test-postgres-volume.mjs (the Postgres test runners), package-release.mjs and smoke-release.mjs (station release packaging and its smoke test)
 .env.example          Template for the Git-ignored .env (service, Docker Compose and test variables)
-.github/workflows/    CI (checks.yml)
+.github/workflows/    CI (checks.yml) and station releases (release.yml)
 static/               Poppins fonts, logo, icons, web app manifest
 design/               Design handoff (brief, reference screens, tokens). tokens/tokens.css ships in the app.
 docs/                 Station setup, hardware notes, verification log
@@ -342,7 +344,7 @@ The dispatch journal still records intent and outcomes. Lost replies or interrup
 
 ## Configuration
 
-The service reads environment variables once at startup. `npm run start:printer` loads `.env` when it exists (`node --env-file-if-exists=.env`); variables already exported in the shell take precedence over `.env`. Copy [.env.example](.env.example) to start. Every variable is validated, and an invalid or missing required value stops startup:
+The service reads environment variables once at startup. `npm run start:printer` loads `.env` when it exists (`node --env-file-if-exists=.env`); variables already exported in the shell take precedence over `.env`. Copy [.env.example](.env.example) to start. Stations installed from releases keep these variables in `/etc/order-pad/order-pad.env` instead. Every variable is validated, and an invalid or missing required value stops startup:
 
 | Variable                         | Default                                               | Notes                                                                                                                                                                                                                                                                                        |
 | -------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -466,6 +468,8 @@ Database waits are bounded (1 s service-operation queue, 1 s connection/acquisit
 
 ### Set up Postgres and upgrade the station
 
+These steps run the service from a checkout, which is how development works. Stations should install releases instead: see [Station releases and automatic updates](#station-releases-and-automatic-updates), which also covers moving a checkout-based station over.
+
 1. Before switching, finish or reconcile drafts and all pending/ambiguous attempts. Close ordering tabs, stop the old service and back up PostgreSQL and legacy data. Apply the new migrations explicitly with `npm run db:deploy`; startup never migrates. Existing tickets, attempts, events and anonymous workspaces remain intact but are not automatically assigned to a signed-in browser. New authenticated workspaces start empty. Changing domains creates new browser cookies/workspaces; retain the old history and settle pending work before moving. Legacy IndexedDB and `.print-data/` remain untouched archives.
 2. Copy `.env.example` to `.env` (Git-ignored). Choose a local database password and update `DATABASE_URL` with its URL-encoded value. Set the real HTTPS origin and CUPS queue. Set `ORDER_PAD_CAPTURE_FROM` once to the rollout time in UTC; keep device clocks accurate and retain this cutoff across restarts.
 3. Install Docker with Compose, or run PostgreSQL 18 directly on this same app host. Remote database deployment is unsupported. For local Docker, run `docker compose up -d --wait`. Postgres binds only to loopback and uses a named volume mounted at `/var/lib/postgresql`, the PostgreSQL 18 image’s versioned data layout. Container recreation preserves it; `docker compose down --volumes` deletes database history.
@@ -507,6 +511,101 @@ npm run db:studio -- --url="postgresql://order_pad_readonly:choose-a-password@12
 
 Edits in Studio then fail with a permission error. Never use Studio to repair a print record; reconcile paper and CUPS first.
 
+## Station releases and automatic updates
+
+Stations run tested, verified releases instead of building from a checkout. A release carries code only. Each station keeps its own configuration, PostgreSQL database and order history, so stations at different locations share nothing but the code they run.
+
+### Cutting a release
+
+1. In a pull request, set the new version with `npm version minor --no-git-tag-version` (or `patch`, `major`, or an exact version such as `1.4.0-rc.1`). This updates `package.json` and `package-lock.json`. Merge it.
+2. Tag the merged commit and push the tag: `git tag v1.4.0 origin/main && git push origin v1.4.0`.
+3. The **Release** workflow:
+   1. Runs the full Checks suite.
+   2. Packages `order-pad-v1.4.0-linux-x64.tar.gz`. The tarball holds `build/`, `build-printer/`, the migrations, production `node_modules`, the Node runtime named in [.node-version](.node-version), `deploy/` and `release.json`.
+   3. Migrates a fresh PostgreSQL 18 with the package’s own Prisma, then starts the packaged server.
+   4. Records signed build provenance.
+   5. Publishes the GitHub release. Its assets are the tarball, its `.sigstore.json` bundle, `SHA256SUMS` and `install-station.sh`.
+
+A tag that doesn’t match `package.json`, or a stable tag on a commit outside `main`, fails before anything is published. Tags with a hyphen (`v1.4.0-rc.1`) become prereleases, which only stations on `CHANNEL=prerelease` (or pinned to that tag) install. Try every release on such a station first.
+
+### What a station does
+
+`order-pad-update.timer` runs the updater as root every 15 minutes. Outside the update window it does nothing, not even a network request. Inside the window (with at least `QUIET_MINUTES` + `MIN_WINDOW_LEFT_MINUTES` left), the installed release:
+
+1. **Chooses a release.** It asks GitHub for releases (anonymously, with a cached ETag) and picks `PIN`, or else the newest newer release on its channel. It skips any release that already failed on this station.
+2. **Verifies and stages it.** It downloads the tarball and checks it against `SHA256SUMS`. With `VERIFY=sigstore` it also uses `cosign` to confirm that this repository’s release workflow built that file at that tag. Then it unpacks the tarball to `/opt/order-pad/releases/<tag>/`.
+3. **Hands over.** With `AUTO_APPLY=true` it hands over to the new release’s own `apply` step. A fix to installing therefore ships with the release that needs it. With `AUTO_APPLY=false` it stops here and waits for `order-pad-ops apply <tag>`.
+
+The `apply` step then:
+
+1. **Holds manual migrations.** It stops if the release brings a migration listed in [deploy/manual-migrations](deploy/manual-migrations).
+2. **Waits until the station is idle.** It needs no pending CUPS job, and no draft edit, order, print attempt or outcome, Done/Undo or sign-in for `QUIET_MINUTES`. It compares database activity rather than timestamps, because attempt times come from browser clocks. If anything changed, it tries again on the next tick.
+3. **Stops the service.** A job already sent to `lp` records its outcome first. Any new print is refused with “No job was submitted”.
+4. **Backs up the database.** It runs `BACKUP_COMMAND` into `/var/backups/order-pad/` and checks the result is a `pg_dump` archive. If the backup fails, the running release starts again and nothing changes.
+5. **Applies pending migrations** with the release’s Prisma. If a migration fails, updates are **blocked** and the previous release starts again.
+6. **Switches over.** It points `/opt/order-pad/current` at the new release and restarts. The release must answer `/api/auth/config` and stay up without restarting for 30 seconds. If not, the previous release runs again and the new tag is never retried automatically. If the previous release also fails, updates are blocked.
+
+The updater never restores a backup and never resends a print. Returning to the previous release after a migration works only because migrations are expand-only (invariant 15 in [AGENTS.md](AGENTS.md)).
+
+| Path                             | Contents                                                                                                                                                         |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/opt/order-pad/releases/<tag>/` | Unpacked releases, owned by root. `/opt/order-pad/current` points at the running one. The current, previous and newer staged releases are kept.                  |
+| `/etc/order-pad/order-pad.env`   | The service variables from [Configuration](#configuration), mode 0640 `root:order-pad`.                                                                          |
+| `/etc/order-pad/updater.conf`    | Window, time zone, channel, pin, verification and backup command. See [deploy/updater.conf.example](deploy/updater.conf.example). Unknown keys stop the updater. |
+| `/var/lib/order-pad/updater/`    | `state.json` (previous release, releases not retried, GitHub cache) and `BLOCKED` with the reason.                                                               |
+| `/var/backups/order-pad/`        | `pg_dump` archives from before each install, newest `BACKUP_KEEP` kept.                                                                                          |
+
+The service runs as the `order-pad` system user. It cannot change its own code, and it can’t read `/home` (`ProtectHome`), so keep fonts and PDF folders elsewhere. On a station, run these with `sudo`:
+
+| Command                                                         | What it does                                                                                                         |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `order-pad-ops status`                                          | Installed, previous and staged releases, the window, and whether updates are blocked.                                |
+| `order-pad-ops check`                                           | Dry run: which release would be installed, ignoring the window.                                                      |
+| `order-pad-ops idle`                                            | Watches for `QUIET_MINUTES` and reports whether the station is idle.                                                 |
+| `order-pad-ops update --now`                                    | What the timer does, ignoring the window. It still waits for the station to be idle.                                 |
+| `order-pad-ops apply <tag> [--now] [--allow-manual-migrations]` | Installs a staged release, for `AUTO_APPLY=false` or held migrations. Read the release notes first.                  |
+| `order-pad-ops rollback`                                        | Runs the previous release again. The database keeps the newer migrations; that release is not retried automatically. |
+| `order-pad-ops unblock`                                         | Allows updates again after you fix what blocked them.                                                                |
+| `order-pad-access <mint [1-5]\|status\|revoke>`                 | The access-code command (`npm run access` on a checkout), run as the service user with the station’s settings.       |
+| `journalctl -u order-pad-update`                                | The updater’s log.                                                                                                   |
+
+Installing a release never replaces the systemd units. When a release ships different ones, the updater’s log says so; then run `sudo bash /opt/order-pad/current/deploy/install-station.sh --release <installed tag>` to refresh the units.
+
+### Set up a new station
+
+You need:
+
+- An x86-64 machine running Ubuntu 22.04, Mint 21, Debian 12 or later (Prisma’s migration engine needs OpenSSL 3), with systemd.
+- The printer’s local USB CUPS queue.
+- PostgreSQL 18 on the same machine.
+- Cloudflare Tunnel or Tailscale Serve for HTTPS. See [docs/linux-printing.md](docs/linux-printing.md).
+
+Steps:
+
+1. **Start PostgreSQL.** For Docker, put [compose.yaml](compose.yaml) and a `.env` holding only the `POSTGRES_*` variables in a folder such as `/etc/order-pad/postgres/`, then run `docker compose up -d --wait` there. The container is named after the folder, for example `postgres-postgres-1`.
+2. **Write the settings.** Download `install-station.sh` from the release you want and run `sudo bash install-station.sh --release vX.Y.Z`. The first run writes `/etc/order-pad/order-pad.env` (from `.env.example`) and `/etc/order-pad/updater.conf`, then stops.
+3. **Fill them in:** the database URL, capture cutoff, origin, Turnstile keys and CUPS queue, plus `BACKUP_COMMAND` with your container name. Delete the two `.edit-*` marker files in `/etc/order-pad/`.
+4. **Install.** Run the installer again. It migrates the empty database, starts `order-pad.service` from `/opt/order-pad/current` and checks it answers.
+5. **Hand out codes.** Run `sudo order-pad-access mint`, then set up the tunnel or Serve.
+6. **Turn on updates.** When the station works, run the installer once more with `--enable-timer`.
+
+### Move a checkout-based station to releases
+
+1. **Record what the old service actually uses.** Run `sudo cat /proc/$(systemctl show -p MainPID --value order-pad)/environ | tr '\0' '\n'`. The unit’s `Environment=` lines apply only where the environment file doesn’t set a variable.
+2. **Write the settings.** Run `sudo bash install-station.sh --release vX.Y.Z --adopt-env /path/to/checkout/.env`. It copies `.env` without its `POSTGRES_*` and `TEST_DATABASE_URL` lines, writes `updater.conf`, and stops for review.
+3. **Review them.**
+   - Make sure `/etc/order-pad/order-pad.env` has every value from step 1, including `ORDER_PAD_ORIGIN` and `ORDER_PAD_QUEUE`.
+   - Keep `ORDER_PAD_CAPTURE_FROM` exactly as it was.
+   - Keep `ORDER_PAD_ADMIN_SOCKET=/run/order-pad/admin.sock`.
+   - Set `BACKUP_COMMAND` to the running container (`docker ps`).
+   - Set `AUTO_APPLY=false` for the first night.
+   - Delete the `.edit-*` marker files.
+4. **Switch over** at a quiet time with no print pending: `sudo bash install-station.sh --release vX.Y.Z --replace-unit`. It stops the old service, moves its unit and drop-ins to `/etc/order-pad/previous-unit/`, backs up the database and starts the release. The Docker database and the checkout’s `.env` (which Compose still reads) stay as they are.
+5. **Check it.** Confirm `tailscale serve status` still points at the admin socket and cloudflared still reaches `127.0.0.1:4174`. Run the physical acceptance checks and reload every tab.
+6. **Turn on updates.** Run the installer with `--enable-timer`. After a release stages cleanly overnight, set `AUTO_APPLY=true`.
+
+To go back, stop and disable `order-pad.service` and `order-pad-update.timer`, move the files from `previous-unit/` back to `/etc/systemd/system/`, then run `sudo systemctl daemon-reload` and start the old service.
+
 ## Updates and offline use
 
 After one online visit, the service worker caches static assets. HTML navigations always use the network and never fall back to a cached page; activation purges previous page caches. Authentication and operational `/api` requests are never cached. The client checks its session before rendering protected screens, including after browser history restoration. Offline navigation shows a connection error. Drafts, recovery and printing require the app host and its local database.
@@ -521,7 +620,7 @@ The Postgres-backed app never opens `order-pad-v1`. It does not rename, migrate,
 
 - Independent order-taking sessions are supported across browser profiles/devices. Tabs in the same profile share a workspace and stale tabs must reload. One Linux service owns the shared printer and SSE versions. Ticket IDs remain queue identity.
 - `accepted` means queued in CUPS. The app has no live hardware sensors.
-- The npm launcher runs in the foreground. The verified Mint station uses `order-pad.service`; configure its environment file and restart it after service updates. The cloudflared service keeps the tunnel running, not Node. Check host sleep settings before event use (see [docs/linux-printing.md](docs/linux-printing.md)).
+- The npm launcher runs in the foreground. Stations run `order-pad.service` from an installed release (see [Station releases and automatic updates](#station-releases-and-automatic-updates)). The cloudflared service keeps the tunnel running, not Node. Check host sleep settings before event use (see [docs/linux-printing.md](docs/linux-printing.md)).
 - Physical acceptance of the current receipt layout, REPRINT, hardware errors and interruption recovery is still open.
 
 ## Documentation

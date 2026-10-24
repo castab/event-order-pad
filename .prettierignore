@@ -8,3 +8,4 @@ test-results
 playwright-report
 design
 printer-service/generated
+dist

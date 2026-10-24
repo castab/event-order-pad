@@ -1,0 +1,4 @@
+# Migrations the station updater must not apply on its own, one directory name per line.
+# List a migration here when it signs every device out, rewrites data, or would break the
+# previous release (see invariant 15 in AGENTS.md). Stations then wait for
+# `order-pad-ops apply <tag> --allow-manual-migrations`.
