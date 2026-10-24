@@ -23,6 +23,7 @@ type Admin = {
   posts: () => number;
   hold: () => () => void;
   failSlip: () => void;
+  slips: string[];
   refuseMint: (message: string) => void;
   dropReplies: (count: number) => void;
 };
@@ -33,6 +34,7 @@ const test = base.extend<{ admin: Admin }>({
     const origin = new URL('http://127.0.0.1');
     const mints: number[] = [];
     const revokes: unknown[] = [];
+    const slips: string[] = [];
     let posts = 0;
     let gate: Promise<void> | undefined;
     let slipFails = false;
@@ -86,6 +88,7 @@ const test = base.extend<{ admin: Admin }>({
         },
       },
       slip: async (code) => {
+        slips.push(code);
         if (slipFails) throw new Error('Queue paused.');
         return `Star_TSP143-${code}`;
       },
@@ -107,6 +110,7 @@ const test = base.extend<{ admin: Admin }>({
       url: origin.origin + '/',
       mints,
       revokes,
+      slips,
       posts: () => posts,
       hold: () => {
         let release!: () => void;
@@ -188,6 +192,36 @@ test('caps the count at 5, mints that many once and shows every code', async ({
 
   await page.getByRole('button', { name: 'Hide codes' }).click();
   await expect(page.getByText('K7QM4-XTD9A')).toHaveCount(0);
+});
+
+test('shows the codes without printing slips when the option is off', async ({
+  page,
+  admin,
+}) => {
+  await page.goto(admin.url);
+  const option = page.getByRole('checkbox', {
+    name: 'Print a slip for each code',
+  });
+  await expect(option).toBeChecked();
+  await option.uncheck();
+  await mint(page, 2);
+  const shown = newCodes(page);
+  await expect(shown.getByText('K7QM4-XTD9A')).toBeVisible();
+  await expect(shown.getByText('B3NR8-PWX2C')).toBeVisible();
+  await expect(shown.getByText('No slip printed, as you chose.')).toHaveCount(
+    2,
+  );
+  await expect(shown.getByText(/Slip submitted/)).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(admin.mints).toEqual([2]);
+  expect(admin.slips).toEqual([]);
+});
+
+test('prints slips by default', async ({ page, admin }) => {
+  await page.goto(admin.url);
+  await mint(page, 1);
+  await expect(page.getByText('K7QM4-XTD9A')).toBeVisible();
+  expect(admin.slips).toEqual(['K7QM4XTD9A']);
 });
 
 test('keeps every valid code visible when a slip fails', async ({

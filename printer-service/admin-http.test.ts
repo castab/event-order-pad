@@ -360,6 +360,47 @@ describe('tailnet admin listener', () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain('K7QM4');
   });
 
+  it('mints without printing any slip when asked, and still never logs a code', async () => {
+    const { post, access, slip, log } = await admin();
+    const response = await post({ command: 'mint', count: 2, print: false });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      kind: 'minted',
+      codes: ['K7QM4-XTD9A', 'B3NR8-PWX2C'].map((code) => ({
+        code,
+        redeemBy: redeemBy.toISOString(),
+      })),
+    });
+    expect(access.mint).toHaveBeenCalledExactlyOnceWith(2);
+    expect(slip).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      `Access mint of 2 without slips from tailnet by ${phone}.`,
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('K7QM4');
+  });
+
+  it('prints a slip per code when print is true', async () => {
+    const { post, slip } = await admin();
+    const body = JSON.parse(
+      (await post({ command: 'mint', count: 2, print: true })).body,
+    );
+    expect(
+      body.codes.map((c: { slip: { printed: boolean } }) => c.slip.printed),
+    ).toEqual([true, true]);
+    expect(slip).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['no', 0, null, 'false'])(
+    'rejects %j as print before minting anything',
+    async (print) => {
+      const { post, access, slip } = await admin();
+      const response = await post({ command: 'mint', count: 1, print });
+      expect(response.status).toBe(400);
+      expect(access.mint).not.toHaveBeenCalled();
+      expect(slip).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns every valid code when a slip fails, and stops printing after it', async () => {
     const slip = vi
       .fn(async (code: string, _redeemBy: Date) => `job-${code}`)
