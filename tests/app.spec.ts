@@ -1,6 +1,7 @@
 import { expect, test, type Page, type BrowserContext } from '@playwright/test';
 import { blankNameLabel, type OrderTicket } from '../src/lib/tickets/ticket';
 import { mockStationApi } from './helpers/station-api';
+import { defaultChoices } from './helpers/menu';
 import type { OrderDraft } from '../src/lib/tickets/order';
 
 type PrintRequest = {
@@ -102,7 +103,7 @@ async function mockUsb(page: Page | BrowserContext, pdfMode = false) {
       },
     });
   });
-  return { submitted, lockedDrafts, station, fail };
+  return { submitted, lockedDrafts, station, fail, menu: station.menu };
 }
 
 test('USB is automatic, Print includes the current serving, and the next order is immediately ready', async ({
@@ -1635,4 +1636,109 @@ test('PDF mode saves an order, restores viewing after reload, and creates a sepa
   );
   expect(submitted[1].reprint).toBe(true);
   expect(submitted[1].ticket).toEqual(submitted[0].ticket);
+});
+
+test('presents the station’s menu and picks up changes within a few seconds', async ({
+  page,
+}) => {
+  const { menu, submitted } = await mockUsb(page);
+  await page.clock.install();
+  await page.goto('/');
+  await expect(
+    page.getByRole('button', { name: 'Add a Vanilla scoop', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Add a Mint Chip scoop', exact: true }),
+  ).toHaveCount(0);
+  menu.set({
+    ...defaultChoices,
+    flavor: [...defaultChoices.flavor, 'Mint Chip'],
+    container: ['Waffle Cone', ...defaultChoices.container],
+    topping: defaultChoices.topping.filter((t) => t !== 'Gummy Bears'),
+  });
+  await page.clock.runFor(5001);
+  await expect(
+    page.getByRole('button', { name: 'Add a Mint Chip scoop', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Gummy Bears', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('.container-grid button').first(),
+  ).toHaveAccessibleName('Waffle Cone');
+  await chooseServing(page, 'Mint Chip', 'Waffle Cone', ['Rainbow Sprinkles']);
+  await printButton(page).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0].ticket.servings).toEqual([
+    {
+      flavors: [{ flavor: 'Mint Chip', count: 1 }],
+      container: 'Waffle Cone',
+      toppings: ['Rainbow Sprinkles'],
+    },
+  ]);
+});
+
+test('a selection taken off the menu stays removable and still prints', async ({
+  page,
+}) => {
+  const { menu, submitted } = await mockUsb(page);
+  await page.clock.install();
+  await page.goto('/');
+  await chooseServing(page, 'Strawberry', 'Cup', [
+    'Gummy Bears',
+    'Caramel Sauce',
+  ]);
+  await expect
+    .poll(async () => (await readDraft(page)).editor.toppings)
+    .toEqual(['Gummy Bears', 'Caramel Sauce']);
+  menu.set({
+    ...defaultChoices,
+    flavor: defaultChoices.flavor.filter((f) => f !== 'Strawberry'),
+    topping: defaultChoices.topping.filter((t) => t !== 'Gummy Bears'),
+  });
+  await page.clock.runFor(5001);
+  await expect(page.getByText('Strawberry · off menu')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Add a Strawberry scoop', exact: true }),
+  ).toBeDisabled();
+  const retired = page.getByRole('button', {
+    name: 'Gummy Bears · off menu',
+    exact: true,
+  });
+  await expect(retired).toHaveAttribute('aria-pressed', 'true');
+  expect((await retired.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await retired.click();
+  await expect(retired).toHaveCount(0);
+  await expect
+    .poll(async () => (await readDraft(page)).editor.toppings)
+    .toEqual(['Caramel Sauce']);
+  await printButton(page).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0].ticket.servings[0]).toEqual({
+    flavors: [{ flavor: 'Strawberry', count: 1 }],
+    container: 'Cup',
+    toppings: ['Caramel Sauce'],
+  });
+});
+
+test('picks follow menu order whichever is tapped first', async ({ page }) => {
+  const { submitted } = await mockUsb(page);
+  await page.goto('/');
+  await chooseServing(page, 'Chocolate Chip', 'Cup', [
+    'Chocolate Sprinkles',
+    'Whipped cream',
+  ]);
+  await page
+    .getByRole('button', { name: 'Add a Chocolate scoop', exact: true })
+    .click();
+  await printButton(page).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0].ticket.servings[0]).toEqual({
+    flavors: [
+      { flavor: 'Chocolate', count: 1 },
+      { flavor: 'Chocolate Chip', count: 1 },
+    ],
+    container: 'Cup',
+    toppings: ['Whipped cream', 'Chocolate Sprinkles'],
+  });
 });

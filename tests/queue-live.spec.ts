@@ -42,6 +42,7 @@ const test = base.extend<{ service: Service }>({
         orders,
         trackingEnabled,
         station,
+        menu: station.menu,
         printing: {
           print: async (request) => {
             prints.push(request);

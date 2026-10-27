@@ -50,6 +50,9 @@ Soft serve is not offered for now.
 
 **A serving is one cup or cone.**
 
+- **Menu:** flavors, containers and toppings come from the `fionas_choices` table and are edited
+  on the tailnet admin page's **Menu** tab; the builder only presents them, in their saved order.
+  The station was seeded with the values below.
 - **Flavors:** Chocolate, Vanilla, Strawberry, Chocolate Chip. Each flavor has its own − and +
   controls, so flavors can be mixed in one serving.
 - **Scoops:** 1–5 total per serving, counted across all flavors (2 Chocolate Chip + 1 Strawberry
@@ -136,6 +139,8 @@ export interface OrderTicket {
 
 - Validation in `parseTicket`: known values only; scoop totals 1–5; 1–30 servings; flavors and
   toppings normalized to menu order so identical orders always serialize identically.
+  _Superseded: the menu now lives in Postgres (`fionas_choices`). `parseTicket` checks names for
+  shape only and keeps the chosen order; the builder orders picks by the current menu._
 - Tickets already stored in IndexedDB use the old `items` shape. Either version the schema
   (`schema: 2`) and keep a read-only parser for v1 history, or document a one-time reset. Don't
   let old records crash history.

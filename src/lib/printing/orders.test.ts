@@ -57,9 +57,10 @@ describe('successive orders and draft recovery', () => {
     await reload.initialize();
     expect(reload.state.draft).toEqual(session.state.draft);
     expect(reload.state.draft?.editor.container).toBe('');
+    // Drafts keep the order chosen; the builder orders new picks by the menu.
     expect(reload.state.draft?.editor.flavors).toEqual([
-      { flavor: 'Strawberry', count: 1 },
       { flavor: 'Chocolate Chip', count: 2 },
+      { flavor: 'Strawberry', count: 1 },
     ]);
   });
 
@@ -119,8 +120,8 @@ describe('successive orders and draft recovery', () => {
       {
         container: 'Cup',
         flavors: [
-          { flavor: 'Strawberry', count: 1 },
           { flavor: 'Chocolate Chip', count: 2 },
+          { flavor: 'Strawberry', count: 1 },
         ],
         toppings: ['Gummy Bears'],
       },

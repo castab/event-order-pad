@@ -1,4 +1,5 @@
 import {
+  OffMenu,
   StationConflict,
   type StationRepository,
 } from '../../printer-service/station-database';
@@ -7,7 +8,9 @@ import {
   parseStationSnapshot,
   type StationCommand,
 } from '../../src/lib/storage/ticket-store';
-import { newDraft } from '../../src/lib/tickets/order';
+import { newChoices, newDraft } from '../../src/lib/tickets/order';
+import { onMenu } from '../../src/lib/tickets/menu';
+import { MemoryMenu } from './menu';
 import { MemoryTicketStore } from './ticket-store';
 import type { MemoryOrderRepository } from './order-repository';
 import type {
@@ -24,7 +27,10 @@ export class MemoryStationRepository implements StationRepository {
     string,
     { store: MemoryTicketStore; revision: number }
   >();
-  constructor(private orders?: MemoryOrderRepository) {}
+  constructor(
+    private orders?: MemoryOrderRepository,
+    readonly menu = new MemoryMenu(),
+  ) {}
   private workspace(id?: string) {
     if (!id && this.workspaces.size)
       return this.workspaces.values().next().value!;
@@ -59,14 +65,20 @@ export class MemoryStationRepository implements StationRepository {
         'The station changed in another tab. Reload before continuing.',
       );
     switch (cmd.operation) {
-      case 'saveDraft':
-        if (
-          JSON.stringify((await this.load(id)).draft) ===
-          JSON.stringify(cmd.draft)
-        )
+      case 'saveDraft': {
+        const current = (await this.load(id)).draft;
+        if (JSON.stringify(current) === JSON.stringify(cmd.draft))
           return this.load(id);
+        const gone = newChoices(current, cmd.draft).find(
+          (c) => !onMenu(this.menu.menu, c.category, c.name),
+        );
+        if (gone)
+          throw new OffMenu(
+            `“${gone.name}” is no longer on the menu. Reload to get the current menu. Nothing was saved.`,
+          );
         await store.saveDraft(cmd.draft);
         break;
+      }
       case 'saveTicket':
         await store.saveTicket(cmd.ticket);
         break;

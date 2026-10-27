@@ -19,7 +19,13 @@ import { parseRequest, type Printing } from './printing';
 import { parseTicket } from '../src/lib/tickets/ticket';
 import { OrderNotFound, type Orders } from './orders';
 import { OrderStream } from './order-stream';
-import { StationConflict, type StationRepository } from './station-database';
+import {
+  OffMenu,
+  StationConflict,
+  type StationRepository,
+} from './station-database';
+import type { MenuSource } from './menu-database';
+import { menuBody } from '../src/lib/tickets/menu';
 import { parseStationCommand } from '../src/lib/storage/ticket-store';
 import { trackingDisabledCode } from '../src/lib/orders/features';
 
@@ -71,6 +77,7 @@ export function createApp({
   orders,
   trackingEnabled = true,
   station,
+  menu,
   auth,
   proxy = 'direct',
 
@@ -91,6 +98,7 @@ export function createApp({
     | 'stationUncertain'
   >;
   station: StationRepository;
+  menu: MenuSource;
   auth: Authentication;
   proxy?: 'direct' | 'cloudflare';
   trackingEnabled?: boolean;
@@ -267,7 +275,27 @@ export function createApp({
         if (!existingBrowser) setCookie(browserCookie, browser!, 31536000);
       }
       if (req.method === 'GET' && path === '/api/database') {
-        json(200, { ready: true });
+        // Builders poll this every few seconds; the revision tells them to refetch the menu.
+        let menuRevision;
+        try {
+          menuRevision = await menu.revision();
+        } catch {
+          json(503, {
+            error: 'Database unavailable. Restore Postgres and reload.',
+          });
+          return;
+        }
+        json(200, { ready: true, menuRevision });
+        return;
+      }
+      if (req.method === 'GET' && path === '/api/menu') {
+        try {
+          json(200, menuBody(await menu.load()));
+        } catch {
+          json(503, {
+            error: 'Database unavailable. Restore Postgres and reload.',
+          });
+        }
         return;
       }
       if (req.method === 'GET' && path === '/api/station') {
@@ -312,6 +340,7 @@ export function createApp({
               error instanceof StationConflict
                 ? error.message
                 : 'Database write unavailable. Reload to recover committed state; no print will be resent.',
+            ...(error instanceof OffMenu && { code: 'off-menu' }),
           });
         }
         return;

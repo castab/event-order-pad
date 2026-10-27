@@ -2,6 +2,19 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Menu choices in PostgreSQL — 2026-10-26
+
+Flavors, containers and toppings moved from code into the new `fionas_choices` table, seeded with the old menu in the same order, and are edited on the tailnet admin page’s new Menu tab. Ticket validation now checks choice names for shape only and keeps the chosen order, so stored tickets with retired names still parse. Order pads refetch the menu when the revision in their 5-second database check changes.
+
+All required checks passed in order:
+
+- 35 integration tests on a disposable PostgreSQL 18 container, including the migration seed, revision-checked menu changes, concurrent changes and the off-menu draft rule, and volume recreation.
+- Type checks with zero errors and warnings, and formatting.
+- 367 unit/HTTP tests in a Linux Node 24 container. On the Windows development machine the 76 tailnet admin listener tests cannot run, because `listenAdmin` requires POSIX directory modes; the other 291 passed there.
+- Both builds, and 176 Chromium tests, including menu changes reaching the builder, an off-menu selection that still prints, and the admin Menu tab.
+
+No station data was touched and nothing was printed. A menu change reaching real devices, and the printed names, remain owner checks.
+
 ## Random blank-name labels — 2026-10-19
 
 Blank-name labels now come from a hash of the random ticket ID (FNV-1a with a Murmur3 finalizer) instead of the order number. The old formula could produce only 12 labels and always gave #0001 “Bouncy Sundae”. The word lists grew to 32 adjectives and 32 nouns, so there are 1,024 labels; a unit test spreads 65,536 sequential IDs across all of them with no label picked more than 96 times. Printability checks for blank-name drafts use the widest label, and an exhaustive test confirms no label prints taller. Stored tickets keep their saved `displayName`, and a locked draft’s placeholder uses its ticket ID.

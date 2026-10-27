@@ -21,7 +21,19 @@ model OrderEvent {
 model Station {
   id Int @id
   referenceCounter BigInt @default(0) @map("reference_counter")
+  menuRevision BigInt @default(0) @map("menu_revision")
   @@map("station")
+}
+
+/// One flavor, container or topping; data repeats the category so it stands alone.
+model Choice {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  category String
+  position Int
+  data     Json   @db.JsonB
+
+  @@index([category, position], map: "fionas_choices_position_idx")
+  @@map("fionas_choices")
 }
 
 model Workspace {

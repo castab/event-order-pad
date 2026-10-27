@@ -80,7 +80,7 @@ Drafts, tickets, numbers, attempts and dispatches stay in local Postgres. Each b
 
 ### Tailnet admin page
 
-This lets chosen devices mint codes, see unused codes and signed-in devices, void codes and sign devices out from a browser on the station’s tailnet, without a terminal. Staff use the public Cloudflare hostname and are not on the tailnet. The page is served on a private Unix socket that cloudflared never forwards to. Tailscale Serve publishes it on a separate HTTPS port.
+This lets chosen devices mint codes, see unused codes and signed-in devices, void codes and sign devices out, and edit the menu (flavors, containers and toppings) on its **Menu** tab, from a browser on the station’s tailnet, without a terminal. Staff use the public Cloudflare hostname and are not on the tailnet. The page is served on a private Unix socket that cloudflared never forwards to. Tailscale Serve publishes it on a separate HTTPS port.
 
 Which devices may use the page is decided by the **tailnet policy**, not by the service. The policy grants a Tailscale app capability to devices with a tag. Serve forwards the requesting device’s capabilities to the service and deletes any copy a client sends. The service refuses every request without the configured capability, including requests from devices signed in as the owner. To grant the ability, tag the device; to take it away, remove the tag. Neither removes the device from the tailnet.
 
@@ -146,11 +146,12 @@ Which devices may use the page is decided by the **tailnet policy**, not by the 
 
 6. Acceptance:
    - On a tagged device, `https://station.example.ts.net/` shows the mint form, unused codes and signed-in devices without minting anything.
-   - On an untagged tailnet device, the same address returns “This device can’t manage access codes.”
+   - On an untagged tailnet device, the same address and `/menu` return “This device can’t manage the station.”
    - On a station terminal, `curl --unix-socket /run/order-pad/admin.sock -H 'X-Forwarded-Host: station.example.ts.net' http://localhost/api/admin/access` returns 403 because no capability header is present.
    - With Tailscale disabled, the tailnet address is unreachable and the public hostname’s `/api/admin/access` returns 401 or 404.
    - Enter 2 for **How many access codes would you like to mint?** and tap **Mint 2 codes**. The page shows both codes with their use-by times, two separate slips print, each code signs in one staff device, and a code that was already used is refused on a third device. Typing 9 in the field leaves 5. Both devices appear under **Signed-in devices**; **Sign out** on one returns only that device to sign-in. When signing everyone out is safe, **Sign out everyone** does that and empties **Unused codes**.
    - Uncheck **Print a slip for each code**, mint 1 code and confirm the code shows on the page with “No slip printed, as you chose.” and nothing prints. Reload the page and confirm the box is checked again.
+   - Open the **Menu** tab. Add a flavor such as “Mint Chip”, then check that an order pad shows it within about five seconds without reloading, and that a ticket using it prints the name in full. Move it up, edit its name, and confirm the pad follows. Select it in an unprinted order on a pad, remove it on the Menu tab, and confirm the pad marks it “off menu”, can still deselect it, and prints it if left in. Reprint an earlier ticket and confirm its names are unchanged. **Remove** is unavailable for the last flavor and the last container.
    - Remove the tag from that device and reload the page: it is refused, and the device stays on the tailnet.
    - `journalctl -u order-pad.service` shows the tailnet address of the device that made each change, and never a code.
 
@@ -221,7 +222,7 @@ On the phone, reload or reopen the same Mint HTTPS URL. Pages load network-first
 For physical acceptance of the simplified workflow:
 
 1. Choose Vanilla and Cup without pressing Add serving. Tap **Print order** once. Verify one serving with one Vanilla scoop, the generated two-word label, end marker, legibility, and partial cut. Confirm a fresh order opens with all flavor counts at zero and no container selected.
-2. Enter a name and choose 2 Chocolate Chip scoops + 1 Strawberry scoop in a Cup with all eight toppings, then add that serving. Choose 5 Vanilla scoops in a Cake Cone with no toppings and press Print directly. Verify the trimmed name, exactly two serving blocks, total scoop counts of 3 and 5, correct per-flavor counts, full toppings, and the no-toppings line. The mixed flavors must remain together in one serving block.
+2. Enter a name and choose 2 Chocolate Chip scoops + 1 Strawberry scoop in a Cup with all eight seeded toppings, then add that serving. Choose 5 Vanilla scoops in a Cake Cone with no toppings and press Print directly. Verify the trimmed name, exactly two serving blocks, total scoop counts of 3 and 5, correct per-flavor counts, full toppings, and the no-toppings line. The mixed flavors must remain together in one serving block.
 3. Begin another draft with a different name and unfinished selections. Deliberately **Reprint last order**. Verify REPRINT, original label/content/ID/timestamp, and that the new draft is unchanged.
 4. Open **Order tools**, inspect the `Star_TSP143` queue under Printer settings, tap **Check printer**, and close Order tools. Verify the draft survives. Reload and verify the draft and USB destination recover without selection or setup confirmation.
 5. Inspect printer output and pending jobs during a controlled connection interruption. Verify the UI retains an unknown order and requires acknowledgment before continuing, without automatically resending.
