@@ -1,7 +1,9 @@
 import { testAuth } from '../tests/helpers/auth';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { createOrderDatabase, PostgresOrderRepository } from './order-database';
-import { PostgresStationRepository } from './station-database';
+import { PostgresMenu } from './menu-database';
+import { resetMenu } from '../tests/helpers/menu-postgres';
+import { OffMenu, PostgresStationRepository } from './station-database';
 import { Printing } from './printing';
 import { Cups } from './cups';
 import { newDraft, parseDraft } from '../src/lib/tickets/order';
@@ -16,8 +18,12 @@ const cutoff = '2026-10-11T20:00:00.000Z';
 const station = new PostgresStationRepository(database, cutoff, () => cutoff);
 beforeEach(async () => {
   await database.$executeRaw`TRUNCATE workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
+  await resetMenu(database);
 });
-afterAll(() => database.$disconnect());
+afterAll(async () => {
+  await resetMenu(database);
+  await database.$disconnect();
+});
 async function intent(id = 'ticket') {
   let snapshot = await station.load();
   const ticket = {
@@ -240,6 +246,7 @@ it('runs the complete API client/session flow against Postgres and recovers thro
       Buffer.from('%PDF-test'),
     ),
     station,
+    menu: new PostgresMenu(database),
     orders: new Orders(new PostgresOrderRepository(database), cutoff),
     trackingEnabled: false,
   });
@@ -478,4 +485,68 @@ it('atomically attaches legacy recovery state to only the first initializing bro
   expect((await station.load(adopted)).saved?.ticket).toEqual(ticket);
   expect(await database.workspace.count()).toBe(2);
   expect(await database.ticket.count()).toBe(1);
+});
+
+it('refuses newly picked choices that left the menu but keeps and prints retired ones', async () => {
+  const menu = new PostgresMenu(database);
+  let snapshot = await station.load();
+  const strawberry = parseDraft({
+    ...snapshot.draft,
+    editor: {
+      flavors: [{ flavor: 'Strawberry', count: 1 }],
+      container: 'Cup',
+      toppings: [],
+    },
+  });
+  snapshot = await station.mutate({
+    revision: snapshot.revision,
+    operation: 'saveDraft',
+    draft: strawberry,
+  });
+  const current = await menu.load();
+  for (const name of ['Strawberry', 'Gummy Bears'])
+    await menu.change(
+      {
+        command: 'remove',
+        id: [...current.flavor, ...current.topping].find(
+          (c) => c.data.displayName === name,
+        )!.id,
+      },
+      (await menu.load()).revision,
+    );
+  const more = parseDraft({
+    ...strawberry,
+    editor: {
+      ...strawberry.editor,
+      flavors: [{ flavor: 'Strawberry', count: 2 }],
+    },
+  });
+  snapshot = await station.mutate({
+    revision: snapshot.revision,
+    operation: 'saveDraft',
+    draft: more,
+  });
+  await expect(
+    station.mutate({
+      revision: snapshot.revision,
+      operation: 'saveDraft',
+      draft: { ...more, editor: { ...more.editor, toppings: ['Gummy Bears'] } },
+    }),
+  ).rejects.toThrow(OffMenu);
+  expect((await station.load()).draft).toEqual(more);
+  const saved = await station.mutate({
+    revision: snapshot.revision,
+    operation: 'startOrder',
+    attempt: {
+      id: 'attempt-retired',
+      ticketId: 'retired',
+      startedAt: cutoff,
+      reprint: false,
+      mode: 'linux-cups',
+    },
+  });
+  expect(saved.saved?.ticket.servings[0].flavors).toEqual([
+    { flavor: 'Strawberry', count: 2 },
+  ]);
+  expect((await station.load()).saved?.ticket).toEqual(saved.saved?.ticket);
 });

@@ -2,6 +2,19 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Menu choices in PostgreSQL — 2026-10-26
+
+Flavors, containers and toppings moved from code into the new `fionas_choices` table, seeded with the old menu in the same order, and are edited on the tailnet admin page’s new Menu tab. Ticket validation now checks choice names for shape only and keeps the chosen order, so stored tickets with retired names still parse. Order pads refetch the menu when the revision in their 5-second database check changes.
+
+All required checks passed in order:
+
+- 35 integration tests on a disposable PostgreSQL 18 container, including the migration seed, revision-checked menu changes, concurrent changes and the off-menu draft rule, and volume recreation.
+- Type checks with zero errors and warnings, and formatting.
+- 367 unit/HTTP tests in a Linux Node 24 container. On the Windows development machine the 76 tailnet admin listener tests cannot run, because `listenAdmin` requires POSIX directory modes; the other 291 passed there.
+- Both builds, and 176 Chromium tests, including menu changes reaching the builder, an off-menu selection that still prints, and the admin Menu tab.
+
+No station data was touched and nothing was printed. A menu change reaching real devices, and the printed names, remain owner checks.
+
 ## Station releases and automatic updates — 2026-10-19
 
 Pushing a `v*` tag now runs the full Checks suite and publishes a station release. The release is a self-contained linux-x64 tarball with its Node runtime, production dependencies and migrations, plus build provenance. Each station's `order-pad-update.timer` installs new releases inside its own window, and only after `QUIET_MINUTES` of unchanged database activity with an empty CUPS queue. It backs up first, then migrates, switches and checks health, and returns to the previous release on failure. On SIGTERM the service now refuses new prints and waits for a job already sent to `lp` to record its outcome. `prisma` moved to `dependencies`, and the version is 0.2.0.

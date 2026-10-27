@@ -5,7 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { adminAccessPath, createAdminApp, listenAdmin } from './admin-http';
+import {
+  adminAccessPath,
+  adminMenuPath,
+  createAdminApp,
+  listenAdmin,
+} from './admin-http';
+import { MemoryMenu } from '../tests/helpers/menu';
 import { AccessRefused, type MintedCode } from './access-admin';
 
 const origin = new URL('https://station.example.ts.net:8443');
@@ -65,6 +71,7 @@ async function directory() {
 async function admin(
   access = fakeAccess(),
   slip = vi.fn(async (code: string, _redeemBy: Date) => `Star_TSP143-${code}`),
+  menu: Pick<MemoryMenu, 'load' | 'change'> = new MemoryMenu(),
 ) {
   const socket = join(await directory(), 'admin.sock');
   const log = vi.fn();
@@ -72,6 +79,7 @@ async function admin(
     origin,
     capability,
     access,
+    menu,
     slip,
     assets: 'static',
     log,
@@ -132,8 +140,9 @@ async function admin(
   const post = (
     body: unknown,
     headers: Record<string, string | string[] | undefined> = {},
+    path = adminAccessPath,
   ) =>
-    send(adminAccessPath, {
+    send(path, {
       method: 'POST',
       headers: {
         origin: origin.origin,
@@ -150,7 +159,11 @@ async function admin(
                 : body,
             ),
     });
-  return { socket, access, slip, log, send, post };
+  const postMenu = (
+    body: unknown,
+    headers: Record<string, string | string[] | undefined> = {},
+  ) => post(body, headers, adminMenuPath);
+  return { socket, access, menu, slip, log, send, post, postMenu };
 }
 
 describe('tailnet admin listener', () => {
@@ -244,7 +257,9 @@ describe('tailnet admin listener', () => {
       const { send, access } = await admin();
       const headers = { host: wrongHost, 'x-forwarded-host': forwarded };
       expect((await send('/', { headers })).status).toBe(403);
+      expect((await send('/menu', { headers })).status).toBe(403);
       expect((await send(adminAccessPath, { headers })).status).toBe(403);
+      expect((await send(adminMenuPath, { headers })).status).toBe(403);
       expect(calls(access)).toBe(0);
     },
   );
@@ -359,6 +374,47 @@ describe('tailnet admin listener', () => {
     );
     expect(JSON.stringify(log.mock.calls)).not.toContain('K7QM4');
   });
+
+  it('mints without printing any slip when asked, and still never logs a code', async () => {
+    const { post, access, slip, log } = await admin();
+    const response = await post({ command: 'mint', count: 2, print: false });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      kind: 'minted',
+      codes: ['K7QM4-XTD9A', 'B3NR8-PWX2C'].map((code) => ({
+        code,
+        redeemBy: redeemBy.toISOString(),
+      })),
+    });
+    expect(access.mint).toHaveBeenCalledExactlyOnceWith(2);
+    expect(slip).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      `Access mint of 2 without slips from tailnet by ${phone}.`,
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('K7QM4');
+  });
+
+  it('prints a slip per code when print is true', async () => {
+    const { post, slip } = await admin();
+    const body = JSON.parse(
+      (await post({ command: 'mint', count: 2, print: true })).body,
+    );
+    expect(
+      body.codes.map((c: { slip: { printed: boolean } }) => c.slip.printed),
+    ).toEqual([true, true]);
+    expect(slip).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['no', 0, null, 'false'])(
+    'rejects %j as print before minting anything',
+    async (print) => {
+      const { post, access, slip } = await admin();
+      const response = await post({ command: 'mint', count: 1, print });
+      expect(response.status).toBe(400);
+      expect(access.mint).not.toHaveBeenCalled();
+      expect(slip).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns every valid code when a slip fails, and stops printing after it', async () => {
     const slip = vi
@@ -492,12 +548,199 @@ describe('tailnet admin listener', () => {
   });
 });
 
+describe('tailnet menu admin', () => {
+  const add = (extra: Record<string, unknown> = {}) => ({
+    command: 'add',
+    revision: 0,
+    category: 'flavor',
+    displayName: 'Mint Chip',
+    description: 'Cool and green.',
+    ...extra,
+  });
+
+  it('serves the menu page with the shared header and page tabs', async () => {
+    const { send } = await admin();
+    const page = await send('/menu');
+    expect(page.status).toBe(200);
+    expect(page.headers['cache-control']).toBe('no-store');
+    const nonce = /script-src 'nonce-([^']+)'/.exec(
+      String(page.headers['content-security-policy']),
+    )?.[1];
+    expect(page.body).toContain(`<script nonce="${nonce}">`);
+    expect(page.body).toContain('<h1>Menu</h1>');
+    expect(page.body).toContain('<a href="/menu" aria-current="page">Menu</a>');
+    expect(page.body).toContain('<a href="/">Access codes</a>');
+    expect((await send('/')).body).toContain(
+      '<a href="/" aria-current="page">Access codes</a>',
+    );
+  });
+
+  it('refuses a device without the capability before reading the menu', async () => {
+    const menu = new MemoryMenu();
+    const load = vi.spyOn(menu, 'load');
+    const { send, postMenu } = await admin(undefined, undefined, menu);
+    const headers = { 'tailscale-app-capabilities': undefined };
+    expect((await send(adminMenuPath, { headers })).status).toBe(403);
+    expect((await send('/menu', { headers })).status).toBe(403);
+    expect((await postMenu(add(), headers)).status).toBe(403);
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('lists every choice with its id, position and description', async () => {
+    const { send } = await admin();
+    const body = JSON.parse((await send(adminMenuPath)).body);
+    expect(body.revision).toBe(0);
+    expect(body.choices).toHaveLength(15);
+    expect(body.choices[0]).toEqual({
+      id: 'flavor-0',
+      category: 'flavor',
+      position: 0,
+      data: { category: 'flavor', displayName: 'Chocolate' },
+    });
+  });
+
+  it('reports an unavailable database for the menu', async () => {
+    const menu = new MemoryMenu();
+    vi.spyOn(menu, 'load').mockRejectedValue(new Error('down'));
+    const { send } = await admin(undefined, undefined, menu);
+    expect((await send(adminMenuPath)).status).toBe(503);
+  });
+
+  it.each([
+    ['another origin', { origin: 'https://orders.example.com' }],
+    ['no origin', { origin: '' }],
+    ['a form body', { 'content-type': 'application/x-www-form-urlencoded' }],
+  ])('refuses a menu change from %s', async (_, headers) => {
+    const menu = new MemoryMenu();
+    const change = vi.spyOn(menu, 'change');
+    const { postMenu } = await admin(undefined, undefined, menu);
+    expect((await postMenu(add(), headers)).status).toBe(403);
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    add({ requestId: undefined }),
+    add({ requestId: 'short' }),
+    add({ category: 'cone' }),
+    add({ displayName: '' }),
+    add({ displayName: 'x'.repeat(41) }),
+    add({ revision: -1 }),
+    { command: 'move', revision: 0, id: 'flavor-0', direction: 'sideways' },
+    { command: 'drop', revision: 0 },
+  ])('rejects an invalid menu change %j before writing', async (body) => {
+    const menu = new MemoryMenu();
+    const change = vi.spyOn(menu, 'change');
+    const { postMenu } = await admin(undefined, undefined, menu);
+    const reply = await postMenu(body);
+    expect(reply.status).toBe(400);
+    expect(JSON.parse(reply.body).error).toContain('Nothing changed');
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it('applies a change once, returns the new menu and logs it', async () => {
+    const { postMenu, menu, log } = await admin();
+    const requestId = randomUUID();
+    const reply = await postMenu(add({ requestId }));
+    expect(reply.status).toBe(200);
+    const body = JSON.parse(reply.body);
+    expect(body.revision).toBe(1);
+    expect(
+      body.choices.find((c: { id: string }) => c.id === 'added-1'),
+    ).toEqual({
+      id: 'added-1',
+      category: 'flavor',
+      position: 4,
+      data: {
+        category: 'flavor',
+        displayName: 'Mint Chip',
+        description: 'Cool and green.',
+      },
+    });
+    expect(log).toHaveBeenCalledWith(
+      `Menu add of “Mint Chip” (flavor) from tailnet by ${phone}.`,
+    );
+    const again = await postMenu(add({ requestId, revision: 1 }));
+    expect(again.status).toBe(409);
+    expect(JSON.parse(again.body).error).toContain('wasn’t repeated');
+    expect((await (menu as MemoryMenu).load()).flavor).toHaveLength(5);
+  });
+
+  it('refuses a stale revision and a refused change without writing', async () => {
+    const { postMenu, menu } = await admin();
+    expect((await postMenu(add())).status).toBe(200);
+    const stale = await postMenu(add({ displayName: 'Pistachio' }));
+    expect(stale.status).toBe(409);
+    expect(JSON.parse(stale.body).error).toContain('changed on another device');
+    const duplicate = await postMenu(
+      add({ revision: 1, displayName: 'mint chip' }),
+    );
+    expect(duplicate.status).toBe(409);
+    expect(JSON.parse(duplicate.body).error).toContain('already a flavor');
+    expect((await (menu as MemoryMenu).load()).revision).toBe(1);
+  });
+
+  it('refuses removing the last container', async () => {
+    const menu = new MemoryMenu();
+    menu.set({ flavor: ['Vanilla'], container: ['Cup'] });
+    const { postMenu } = await admin(undefined, undefined, menu);
+    const reply = await postMenu({
+      command: 'remove',
+      revision: 1,
+      id: 'container-0',
+    });
+    expect(reply.status).toBe(409);
+    expect(JSON.parse(reply.body).error).toBe(
+      'Keep at least one container so orders can be built. Nothing changed.',
+    );
+  });
+
+  it('reports an unconfirmed write without retrying it', async () => {
+    const menu = new MemoryMenu();
+    const change = vi
+      .spyOn(menu, 'change')
+      .mockRejectedValue(new Error('connection lost'));
+    const { postMenu, log } = await admin(undefined, undefined, menu);
+    const reply = await postMenu({
+      command: 'move',
+      revision: 0,
+      id: 'flavor-1',
+      direction: 'up',
+    });
+    expect(reply.status).toBe(503);
+    expect(JSON.parse(reply.body).error).toContain('Nothing was retried');
+    expect(change).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(
+      `Menu move of flavor-1 up from tailnet by ${phone} was not confirmed.`,
+    );
+  });
+
+  it('runs one menu change at a time', async () => {
+    const menu = new MemoryMenu();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const real = menu.change.bind(menu);
+    vi.spyOn(menu, 'change').mockImplementation(async (...args) => {
+      await gate;
+      return real(...args);
+    });
+    const { postMenu } = await admin(undefined, undefined, menu);
+    const first = postMenu(add());
+    await vi.waitFor(() => expect(menu.change).toHaveBeenCalledTimes(1));
+    const second = await postMenu(add({ displayName: 'Pistachio' }));
+    expect(second.status).toBe(409);
+    expect(JSON.parse(second.body).error).toContain('still running');
+    release();
+    expect((await first).status).toBe(200);
+  });
+});
+
 describe('listenAdmin', () => {
   const server = () =>
     createAdminApp({
       origin,
       capability,
       access: fakeAccess(),
+      menu: new MemoryMenu(),
       slip: vi.fn(),
     });
 

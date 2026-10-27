@@ -8,14 +8,17 @@ import {
   prepareDraftForPrint,
   draftTicket,
   emptyEditor,
-  flavors,
+  newChoices,
   newDraft,
+  orderByMenu,
   parseDraft,
-  toppings,
   type OrderDraft,
   type Flavor,
   type Serving,
 } from './order';
+import { defaultChoices, menuOf } from '../../../tests/helpers/menu';
+
+const { flavor: flavors, topping: toppings } = defaultChoices;
 
 const time = '2026-10-11T20:00:00.000Z';
 const serving = (flavor: Flavor = 'Vanilla', scoops = 1): Serving => ({
@@ -142,7 +145,7 @@ describe('ice cream orders with flavor scoops', () => {
     expect(() =>
       parseDraft({
         ...draft(),
-        editor: { ...emptyEditor(), container: 'Waffle Cone' },
+        editor: { ...emptyEditor(), container: ' \u0007 ' },
       }),
     ).toThrow('container');
   });
@@ -231,7 +234,7 @@ describe('ice cream orders with flavor scoops', () => {
     });
     expect(editServing(locked, 1)).toEqual(locked);
   });
-  it('compares all serving selections after menu normalization', () => {
+  it('compares all serving selections regardless of selection order', () => {
     const mixed: Serving = {
       flavors: [
         { flavor: 'Chocolate', count: 2 },
@@ -262,5 +265,50 @@ describe('ice cream orders with flavor scoops', () => {
       expect(sameServing(mixed, changed)).toBe(false);
     expect(sameServing(emptyEditor(), emptyEditor())).toBe(true);
     expect(sameServing(emptyEditor(), mixed)).toBe(false);
+  });
+  it('orders selections by the current menu and keeps retired names last', () => {
+    const menu = menuOf({
+      flavor: ['Mint', 'Vanilla', 'Chocolate'],
+      container: ['Cup'],
+      topping: ['Sprinkles', 'Fudge'],
+    });
+    const ordered = orderByMenu(
+      {
+        flavors: [
+          { flavor: 'Strawberry', count: 1 },
+          { flavor: 'Chocolate', count: 1 },
+          { flavor: 'Mint', count: 1 },
+        ],
+        container: 'Cup',
+        toppings: ['Gummy Bears', 'Fudge', 'Sprinkles'],
+      },
+      menu,
+    );
+    expect(ordered.flavors.map((p) => p.flavor)).toEqual([
+      'Mint',
+      'Chocolate',
+      'Strawberry',
+    ]);
+    expect(ordered.toppings).toEqual(['Sprinkles', 'Fudge', 'Gummy Bears']);
+  });
+  it('lists only menu names a draft newly uses, across servings and the editor', () => {
+    const before = draft({
+      editor: { ...emptyEditor(), toppings: ['Gummy Bears'] },
+    });
+    const after = draft({
+      servings: [serving('Vanilla'), { ...serving('Mint'), container: 'Cup' }],
+      editor: {
+        flavors: [{ flavor: 'Vanilla', count: 1 }],
+        container: 'Waffle Cone',
+        toppings: ['Gummy Bears', 'Fudge'],
+      },
+    });
+    expect(newChoices(before, after)).toEqual([
+      { category: 'flavor', name: 'Mint' },
+      { category: 'container', name: 'Waffle Cone' },
+      { category: 'topping', name: 'Fudge' },
+    ]);
+    expect(newChoices(after, before)).toEqual([]);
+    expect(newChoices(after, after)).toEqual([]);
   });
 });

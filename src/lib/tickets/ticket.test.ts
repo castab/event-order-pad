@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  FLAVORS,
-  CONTAINERS,
-  TOPPINGS,
   blankNameLabel,
   blankNameLabels,
   parseReference,
@@ -22,6 +19,13 @@ import {
 } from './format';
 import { receiptHtml, passPrntUri } from '../printing/adapters/passprnt';
 import { receiptLayout, receiptPdf } from '../../../printer-service/receipt';
+import { defaultChoices } from '../../../tests/helpers/menu';
+
+const {
+  flavor: FLAVORS,
+  container: CONTAINERS,
+  topping: TOPPINGS,
+} = defaultChoices;
 
 const ticket = sampleTicket('stable-ticket-id', '2026-10-12T02:42:00.000Z');
 const simple = {
@@ -61,7 +65,7 @@ describe('structured immutable tickets', () => {
     ])
       expect(Object.isFrozen(value)).toBe(true);
   });
-  it('supports every flavor/count/container and all 256 topping combinations', () => {
+  it('supports every seeded flavor/count/container and all 256 topping combinations', () => {
     for (const flavor of FLAVORS)
       for (const container of CONTAINERS)
         for (const count of [1, 2, 3, 4, 5])
@@ -126,16 +130,39 @@ describe('structured immutable tickets', () => {
     { flavors: null },
     { flavors: Array(1) },
     { flavors: [null] },
-    { flavors: [{ flavor: 'Soft serve', count: 1 }] },
-    { flavors: [{ flavor: 'Mint', count: 1 }] },
+    { flavors: [{ flavor: '', count: 1 }] },
+    { flavors: [{ flavor: 'x'.repeat(41), count: 1 }] },
+    { flavors: [{ flavor: 'Mint\nChip', count: 1 }] },
+    { flavors: Array(6).fill({ flavor: 'Mint', count: 1 }) },
     { container: '' },
     { container: ['Cup', 'Cake Cone'] },
-    { container: 'Waffle Cone' },
+    { container: '   ' },
     { toppings: null },
     { toppings: Array(1) },
-    { toppings: ['Sprinkles'] },
-  ])('rejects malformed or unknown serving values %j', (extra) => {
+    { toppings: [7] },
+    {
+      toppings: Array(51)
+        .fill(0)
+        .map((_, i) => `Topping ${i}`),
+    },
+  ])('rejects malformed serving values %j', (extra) => {
     expect(() => parseTicket(input([{ ...simple, ...extra }]))).toThrow();
+  });
+  it('accepts names that are not on the seeded menu, so retired and new choices parse', () => {
+    const serving = parseTicket(
+      input([
+        {
+          flavors: [{ flavor: 'Mint Chip', count: 2 }],
+          container: 'Waffle Cone',
+          toppings: ['Sprinkles'],
+        },
+      ]),
+    ).servings[0];
+    expect(serving).toEqual({
+      flavors: [{ flavor: 'Mint Chip', count: 2 }],
+      container: 'Waffle Cone',
+      toppings: ['Sprinkles'],
+    });
   });
   it.each([[], Array(31).fill(simple), Array(1), null, undefined, [null]])(
     'rejects invalid serving lists',
@@ -143,7 +170,7 @@ describe('structured immutable tickets', () => {
       expect(() => parseTicket({ ...input(), servings })).toThrow();
     },
   );
-  it('normalizes menu order and retains identical servings as separate blocks', () => {
+  it('keeps the chosen order and retains identical servings as separate blocks', () => {
     const a = {
       ...simple,
       flavors: [
@@ -152,14 +179,9 @@ describe('structured immutable tickets', () => {
       ],
       toppings: [...TOPPINGS].reverse(),
     };
-    const b = {
-      ...a,
-      flavors: [...a.flavors].reverse(),
-      toppings: [...TOPPINGS],
-    };
-    expect(JSON.stringify(parseTicket(input([a])))).toBe(
-      JSON.stringify(parseTicket(input([b]))),
-    );
+    const parsed = parseTicket(input([a])).servings[0];
+    expect(parsed.flavors).toEqual(a.flavors);
+    expect(parsed.toppings).toEqual(a.toppings);
     expect(parseTicket(input([simple, simple])).servings).toHaveLength(2);
     expect(ticketText(parseTicket(input([simple, simple])))).toContain(
       'SERVING 2 OF 2',

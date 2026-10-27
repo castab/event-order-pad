@@ -4,13 +4,11 @@
   import { formatTicket } from '#lib/tickets/format.js';
   import { blankNameLabel, cleanCustomerName } from '#lib/tickets/ticket.js';
   import {
-    flavors,
     maxScoopsPerServing,
     totalScoops,
     sameServing,
+    orderByMenu,
     type Flavor,
-    containers,
-    toppings,
     cancelServing,
     editServing,
     removeServing as removeDraftServing,
@@ -21,6 +19,13 @@
     type OrderDraft,
     type ServingEditor,
   } from '#lib/tickets/order.js';
+  import {
+    menuNames,
+    onMenu,
+    type ChoiceCategory,
+    type Menu,
+  } from '#lib/tickets/menu.js';
+  import { fetchMenu } from '#lib/menu/client.js';
   import { holdUpdates } from '#lib/app-update.js';
   import AccessMenu from '#lib/auth/AccessMenu.svelte';
   import { sessionExpiry } from '#lib/auth/session-context.js';
@@ -61,6 +66,8 @@
   let connectionCheck: (() => Promise<void>) | undefined;
   let offlineStatus = $state('Checking offline availability…');
   let previewTimestamp = $state(new Date().toISOString());
+  let menu = $state<Menu>();
+  let menuRequest = 0;
   const printer = new LinuxCupsPrinter();
   const draft = $derived(viewState.draft);
   const last = $derived(viewState.attempts.at(-1));
@@ -188,6 +195,32 @@
         : ''
       : '',
   );
+  /** Current menu names, then any still selected in the editor that were taken off the menu. */
+  function choices(category: ChoiceCategory, selected: readonly string[]) {
+    if (!menu) return [];
+    return [
+      ...menuNames(menu, category).map((name) => ({ name, offMenu: false })),
+      ...selected
+        .filter((name) => !onMenu(menu!, category, name))
+        .map((name) => ({ name, offMenu: true })),
+    ];
+  }
+  const flavorChoices = $derived(
+    choices('flavor', draft?.editor.flavors.map((p) => p.flavor) ?? []),
+  );
+  const containerChoices = $derived(
+    choices(
+      'container',
+      draft?.editor.container ? [draft.editor.container] : [],
+    ),
+  );
+  const toppingChoices = $derived(
+    choices('topping', draft?.editor.toppings ?? []),
+  );
+  const menuMissing = (category: string) =>
+    menu
+      ? `No ${category} on the menu. Add some from the admin page.`
+      : 'Loading the menu…';
   const plural = (n: number, word: string) =>
     `${n} ${word}${n === 1 ? '' : 's'}`;
   const mixText = (s: ServingEditor) =>
@@ -215,7 +248,9 @@
       if (viewState.phase !== 'ready' && !recovering) return;
       healthRunning = true;
       try {
-        await store!.check();
+        const menuRevision = await store!.check();
+        if (!cancelled && (!menu || menuRevision !== menu.revision))
+          await refreshMenu();
         if (recovering && !cancelled) {
           await session.recover();
           if (!cancelled && viewState.phase === 'ready') void checkPrinter();
@@ -237,6 +272,8 @@
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('pageshow', onShow);
     void checkPrinter();
+    // A failed first read is retried by the connection check, which blocks when it fails too.
+    void refreshMenu().catch(() => void connectionCheck?.());
     const checkCache = async () => {
       try {
         const names = await caches.keys();
@@ -347,8 +384,19 @@
     }
   }
 
+  /** Only the newest request wins, so a slow reply never replaces a newer menu. */
+  async function refreshMenu() {
+    const request = ++menuRequest;
+    const next = await fetchMenu();
+    if (request === menuRequest) menu = next;
+  }
+
   function changeEditor(editor: ServingEditor) {
-    if (draft) changeDraft({ ...draft, editor });
+    if (draft)
+      changeDraft({
+        ...draft,
+        editor: menu ? orderByMenu(editor, menu) : editor,
+      });
   }
 
   function changeScoops(flavor: Flavor, amount: number) {
@@ -766,12 +814,16 @@
                   </div>
                 </div>
                 <div class="flavor-rows">
-                  {#each flavors as flavor}
+                  {#each flavorChoices as { name: flavor, offMenu } (flavor)}
                     {@const count =
                       draft.editor.flavors.find((p) => p.flavor === flavor)
                         ?.count ?? 0}
                     <div class="flavor-row">
-                      <span>{flavor}</span>
+                      <span
+                        >{flavor}{#if offMenu}<span class="off-menu"
+                            >{' · off menu'}</span
+                          >{/if}</span
+                      >
                       <div
                         class="flavor-counter"
                         role="group"
@@ -792,11 +844,14 @@
                           class="scoop-button plus"
                           aria-label={`Add a ${flavor} scoop`}
                           disabled={!editable ||
+                            offMenu ||
                             totalScoops(draft.editor) >= maxScoopsPerServing}
                           onclick={() => changeScoops(flavor, 1)}>+</button
                         >
                       </div>
                     </div>
+                  {:else}
+                    <p class="no-choices">{menuMissing('flavors')}</p>
                   {/each}
                 </div>
                 {#if totalScoops(draft.editor) >= maxScoopsPerServing}<p
@@ -809,19 +864,23 @@
               <fieldset disabled={!editable}>
                 <legend>Container</legend>
                 <div class="container-grid">
-                  {#each containers as container}<button
+                  {#each containerChoices as { name: container, offMenu } (container)}<button
                       class="toggle"
                       aria-pressed={draft.editor.container === container}
                       onclick={() =>
                         changeEditor({ ...draft!.editor, container })}
-                      >{container}</button
-                    >{/each}
+                      >{container}{#if offMenu}<span class="off-menu"
+                          >{' · off menu'}</span
+                        >{/if}</button
+                    >{:else}<p class="no-choices">
+                      {menuMissing('containers')}
+                    </p>{/each}
                 </div>
               </fieldset>
               <fieldset disabled={!editable}>
                 <legend>Toppings <span>Optional</span></legend>
                 <div class="topping-grid">
-                  {#each toppings as topping}{@const selected =
+                  {#each toppingChoices as { name: topping, offMenu } (topping)}{@const selected =
                       draft.editor.toppings.includes(topping)}<button
                       class="toggle topping"
                       aria-pressed={selected}
@@ -835,8 +894,12 @@
                             : [...draft!.editor.toppings, topping],
                         })}
                       ><span aria-hidden="true">{selected ? '✓' : '+'}</span
-                      >{topping}</button
-                    >{/each}
+                      >{topping}{#if offMenu}<span class="off-menu"
+                          >{' · off menu'}</span
+                        >{/if}</button
+                    >{:else}{#if !menu}<p class="no-choices">
+                        {menuMissing('toppings')}
+                      </p>{/if}{/each}
                 </div>
               </fieldset>
             {:else}

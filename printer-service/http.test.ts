@@ -15,6 +15,7 @@ import { MemoryStationRepository } from '../tests/helpers/station';
 import { createApp } from './http';
 import { adminAccessPath } from './admin-http';
 import { AuthError, authPosts, type Authentication } from './auth';
+import { parseMenu } from '../src/lib/tickets/menu';
 import { newDraft } from '../src/lib/tickets/order';
 import { sampleTicket } from '../src/lib/tickets/ticket';
 
@@ -70,6 +71,7 @@ async function app(
     orders,
     trackingEnabled,
     station,
+    menu: station.menu,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   closers.push(
@@ -465,6 +467,7 @@ it('blocks all API work when the required database is unavailable', async () => 
   for (const path of [
     '/api/database',
     '/api/station',
+    '/api/menu',
     '/api/printer',
     '/api/features',
     '/api/orders',
@@ -723,6 +726,95 @@ it('guards station mutations, validates bodies, and rejects stale revisions with
   expect((await send('/api/station')).cache).toBe('no-store');
 });
 
+it('serves the current menu and its revision, and refuses newly picked choices that left the menu', async () => {
+  const { send, station } = await app();
+  const database = await send('/api/database');
+  expect(JSON.parse(database.body)).toEqual({ ready: true, menuRevision: 0 });
+  const menu = await send('/api/menu');
+  expect(menu.cache).toBe('no-store');
+  expect(
+    parseMenu(JSON.parse(menu.body)).flavor.map((c) => c.data.displayName),
+  ).toEqual(['Chocolate', 'Vanilla', 'Strawberry', 'Chocolate Chip']);
+
+  let state = JSON.parse((await send('/api/station')).body);
+  const save = async (draft: unknown) => {
+    const reply = await send(
+      '/api/station',
+      JSON.stringify({
+        revision: state.revision,
+        operation: 'saveDraft',
+        draft,
+      }),
+      headers,
+    );
+    if (reply.status === 200) state = JSON.parse(reply.body);
+    return reply;
+  };
+  const strawberry = {
+    ...newDraft(),
+    editor: {
+      flavors: [{ flavor: 'Strawberry', count: 1 }],
+      container: 'Cup',
+      toppings: [],
+    },
+  };
+  expect((await save(strawberry)).status).toBe(200);
+  station.menu.set({ flavor: ['Vanilla'], container: ['Cup'] });
+  expect(JSON.parse((await send('/api/database')).body).menuRevision).toBe(1);
+
+  // A retired pick already in the draft stays, and more of it is not new.
+  const more = {
+    ...strawberry,
+    name: 'Pat',
+    editor: {
+      ...strawberry.editor,
+      flavors: [{ flavor: 'Strawberry', count: 2 }],
+    },
+  };
+  expect((await save(more)).status).toBe(200);
+  const refused = await save({
+    ...more,
+    editor: { ...more.editor, toppings: ['Gummy Bears'] },
+  });
+  expect(refused.status).toBe(409);
+  expect(JSON.parse(refused.body)).toEqual({
+    error:
+      '“Gummy Bears” is no longer on the menu. Reload to get the current menu. Nothing was saved.',
+    code: 'off-menu',
+  });
+  expect((await station.load()).draft.editor.toppings).toEqual([]);
+
+  // The retired flavor still prints.
+  const started = await send(
+    '/api/station',
+    JSON.stringify({
+      revision: state.revision,
+      operation: 'startOrder',
+      attempt: {
+        id: 'attempt-menu',
+        ticketId: 'ticket-menu',
+        mode: 'linux-cups',
+        reprint: false,
+        startedAt: '2026-10-12T19:00:00.000Z',
+      },
+    }),
+    headers,
+  );
+  expect(started.status).toBe(200);
+  expect(JSON.parse(started.body).saved.ticket.servings[0].flavors).toEqual([
+    { flavor: 'Strawberry', count: 2 },
+  ]);
+});
+
+it('reports an unavailable menu without blocking the station check', async () => {
+  const { send, station } = await app();
+  vi.spyOn(station.menu, 'revision').mockRejectedValue(new Error('down'));
+  vi.spyOn(station.menu, 'load').mockRejectedValue(new Error('down'));
+  expect((await send('/api/database')).status).toBe(503);
+  expect((await send('/api/menu')).status).toBe(503);
+  expect((await send('/api/station')).status).toBe(200);
+});
+
 it('issues a private workspace cookie and rejects missing-cookie writes without mutations', async () => {
   const { send, station, print } = await app();
   const result = await send(
@@ -775,6 +867,7 @@ it('requires authentication for every operational route and protected page, incl
   for (const path of [
     '/api/station',
     '/api/database',
+    '/api/menu',
     '/api/printer',
     '/api/features',
     '/api/orders',

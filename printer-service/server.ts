@@ -4,6 +4,7 @@ import { Cups } from './cups';
 import { Printing } from './printing';
 import { PdfOutput } from './output';
 import { PostgresStationRepository } from './station-database';
+import { PostgresMenu } from './menu-database';
 import { Orders } from './orders';
 import { PostgresOrderRepository, createOrderDatabase } from './order-database';
 import { createApp } from './http';
@@ -70,6 +71,7 @@ const cleanup = setInterval(() => {
 cleanup.unref();
 const station = new PostgresStationRepository(database, captureFrom);
 await station.check();
+const menu = new PostgresMenu(database);
 const printing = new Printing(output, station, font);
 const orders = new Orders(new PostgresOrderRepository(database), captureFrom);
 const server = createApp({
@@ -81,6 +83,7 @@ const server = createApp({
   orders,
   trackingEnabled,
   station,
+  menu,
   auth,
   proxy: authConfig.proxy,
 
@@ -100,6 +103,7 @@ const admin = adminConfig
         mint: (count) => mintCodes(database, count),
         revoke: (target) => revokeAccess(database, target),
       },
+      menu,
       slip: (code, redeemBy) => printAccessSlip(output, code, redeemBy, font),
       slipMode: printMode,
       assets: root,
@@ -108,7 +112,7 @@ const admin = adminConfig
 if (admin && adminConfig) {
   await listenAdmin(admin, adminConfig.socket);
   console.log(
-    `Tailnet access-code admin listening on ${adminConfig.socket} for ${adminConfig.origin.origin}`,
+    `Tailnet access-code and menu admin listening on ${adminConfig.socket} for ${adminConfig.origin.origin}`,
   );
 }
 

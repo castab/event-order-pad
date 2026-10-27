@@ -49,6 +49,7 @@ test('two authenticated browsers edit independently, serialize prints, and recov
     port: 4174,
     root: await realpath('build'),
     station,
+    menu: station.menu,
     orders: new Orders(repository, testCaptureFrom),
     cups: new Cups('OrderPad', run),
     printing: new Printing(

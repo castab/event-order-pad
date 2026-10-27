@@ -4,16 +4,14 @@ import {
   parseReference,
   cleanCustomerName,
   maxScoopsPerServing,
-  FLAVORS as flavors,
-  CONTAINERS as containers,
-  TOPPINGS as toppings,
   totalScoops,
   widestBlankNameLabel,
   type Serving,
   type ServingEditor,
   type OrderTicket,
 } from './ticket';
-export { flavors, containers, toppings, totalScoops, maxScoopsPerServing };
+import { menuNames, type ChoiceCategory, type Menu } from './menu';
+export { totalScoops, maxScoopsPerServing };
 export type {
   Flavor,
   Container,
@@ -79,11 +77,67 @@ export function editServing(draft: OrderDraft, index: number): OrderDraft {
 
 /** Compare normalized menu selections, independent of selection order. */
 export function sameServing(a: ServingEditor, b: ServingEditor): boolean {
-  return (
-    JSON.stringify(parseServing(a, true)) ===
-    JSON.stringify(parseServing(b, true))
-  );
+  const key = (value: ServingEditor) => {
+    const s = parseServing(value, true);
+    return JSON.stringify([
+      [...s.flavors].sort((x, y) => (x.flavor < y.flavor ? -1 : 1)),
+      s.container,
+      [...s.toppings].sort(),
+    ]);
+  };
+  return key(a) === key(b);
 }
+
+/** Puts selections in current menu order; names no longer on the menu keep their order at the end. */
+export function orderByMenu<T extends ServingEditor>(
+  serving: T,
+  menu: Menu,
+): T {
+  const rank = (category: ChoiceCategory) => {
+    const names = menuNames(menu, category);
+    return (name: string) => {
+      const index = names.indexOf(name);
+      return index < 0 ? names.length : index;
+    };
+  };
+  const flavor = rank('flavor');
+  const topping = rank('topping');
+  return {
+    ...serving,
+    flavors: [...serving.flavors].sort(
+      (a, b) => flavor(a.flavor) - flavor(b.flavor),
+    ),
+    toppings: [...serving.toppings].sort((a, b) => topping(a) - topping(b)),
+  };
+}
+
+function choiceKeys(draft: OrderDraft): Set<string> {
+  const keys = new Set<string>();
+  for (const s of [...draft.servings, draft.editor]) {
+    for (const { flavor } of s.flavors) keys.add(`flavor:${flavor}`);
+    if (s.container) keys.add(`container:${s.container}`);
+    for (const topping of s.toppings) keys.add(`topping:${topping}`);
+  }
+  return keys;
+}
+
+/** Menu names that `after` uses and `before` did not; only these must be on the current menu. */
+export function newChoices(
+  before: OrderDraft,
+  after: OrderDraft,
+): readonly { readonly category: ChoiceCategory; readonly name: string }[] {
+  const old = choiceKeys(before);
+  return [...choiceKeys(after)]
+    .filter((key) => !old.has(key))
+    .map((key) => {
+      const colon = key.indexOf(':');
+      return {
+        category: key.slice(0, colon) as ChoiceCategory,
+        name: key.slice(colon + 1),
+      };
+    });
+}
+
 export function removeServing(draft: OrderDraft, index: number): OrderDraft {
   const valid = parseDraft(draft);
   if (!Number.isInteger(index) || !valid.servings[index])
