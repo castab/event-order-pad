@@ -134,26 +134,26 @@ Sign-in attempts have persistent per-IP and station-wide limits, with `429`/`Ret
 
 ## Commands
 
-| Command                                          | What it does                                                                                                                                                                                           |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `npm run dev`                                    | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                                |
-| `npm run db:generate`                            | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                                     |
-| `npm run db:migrate -- --name NAME`              | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                              |
-| `npm run db:deploy`                              | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                             |
-| `npm run db:studio`                              | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                                        |
-| `npm run test:postgres`                          | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                                         |
-| `npm run test:postgres:volume`                   | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                              |
-| `npm run check`                                  | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                                         |
-| `npm run lint`                                   | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                               |
-| `npm test`                                       | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                               |
-| `npm run build`                                  | Static app and service worker into `build/`.                                                                                                                                                           |
-| `npm run build:printer`                          | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                                        |
-| `npm run access -- <mint [1-5]\|status\|revoke>` | Mints 1–5 one-time access codes (one slip each; `--no-print` skips them), lists unused codes and signed-in devices, or voids every code and signs every device out. Uses `.env` and the bundled CLI.   |
-| `npm run package:release -- vX.Y.Z`              | After both builds, packages `dist/order-pad-vX.Y.Z-linux-x64.tar.gz` and `SHA256SUMS` for stations. The tag must equal `v` + the `package.json` version; Linux x64 only. The release workflow runs it. |
-| `npm run start:printer`                          | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)).              |
-| `npm run preview`                                | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                                           |
-| `npx playwright install chromium`                | One-time browser download for the end-to-end tests.                                                                                                                                                    |
-| `npm run test:e2e`                               | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                                        |
+| Command                                          | What it does                                                                                                                                                                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                                    | Vite dev server for the UI (port 5173, all interfaces).                                                                                                                                                             |
+| `npm run db:generate`                            | Generates the server-only Prisma client into `printer-service/generated/` (Git-ignored). `check` and `build:printer` run it first.                                                                                  |
+| `npm run db:migrate -- --name NAME`              | Creates/applies a development migration; requires a development database and shadow database privileges. All `db:*` commands read `.env`.                                                                           |
+| `npm run db:deploy`                              | Applies committed migrations to the configured database; run explicitly before deployment.                                                                                                                          |
+| `npm run db:studio`                              | Starts Prisma Studio on `http://localhost:5555` for inspecting the database; see [Inspect the database](#inspect-the-database).                                                                                     |
+| `npm run test:postgres`                          | Applies migrations and runs integration tests against a separate `TEST_DATABASE_URL` ending in `_test`. Reads `.env`; never uses station data.                                                                      |
+| `npm run test:postgres:volume`                   | Starts a disposable Docker `postgres:18` container and volume, recreates the container and verifies the data survived. Needs Docker only.                                                                           |
+| `npm run check`                                  | Generates Prisma, then `svelte-kit sync`, `svelte-check` for the app, `tsc -p tsconfig.printer.json` for `printer-service/`, and `tsc` for the service worker.                                                      |
+| `npm run lint`                                   | Prettier check of the whole repository. `npm run format` rewrites files.                                                                                                                                            |
+| `npm test`                                       | Vitest unit and HTTP tests (`*.postgres.test.ts` files are excluded and run by `test:postgres`). `npm run test:watch` re-runs on change.                                                                            |
+| `npm run build`                                  | Static app and service worker into `build/`.                                                                                                                                                                        |
+| `npm run build:printer`                          | Generates Prisma and bundles the Linux service into `build-printer/server.mjs`.                                                                                                                                     |
+| `npm run access -- <mint [1-5]\|status\|revoke>` | Mints 1–5 one-time access codes (one slip each; `--no-print` skips them), lists unused codes and signed-in devices, or voids every code and signs every device out. Uses `.env` and the bundled CLI.                |
+| `npm run package:release -- vX.Y.Z`              | After both builds, packages `dist/order-pad-vX.Y.Z-linux-x64.tar.gz` and `SHA256SUMS` for stations. The tag names the release (`package.json`’s version is not used); Linux x64 only. The release workflow runs it. |
+| `npm run start:printer`                          | Runs the bundled service with `.env` loaded when present. CUPS output is Linux only; PDF output is cross-platform. Run it from the repository root (see [Configuration](#configuration)).                           |
+| `npm run preview`                                | Serves `build/` with Vite on port 4173. Like `dev`, it has no `/api` routes.                                                                                                                                        |
+| `npx playwright install chromium`                | One-time browser download for the end-to-end tests.                                                                                                                                                                 |
+| `npm run test:e2e`                               | Playwright against `vite preview` on port 4175. **Run `npm run build` first**: both the preview server and the live-queue tests serve `build/`.                                                                     |
 
 To run everything CI runs, in CI's order:
 
@@ -530,16 +530,15 @@ Stations run tested, verified releases instead of building from a checkout. A re
 
 ### Cutting a release
 
-1. In a pull request, set the new version with `npm version minor --no-git-tag-version` (or `patch`, `major`, or an exact version such as `1.4.0-rc.1`). This updates `package.json` and `package-lock.json`. Merge it.
-2. Tag the merged commit and push the tag: `git tag v1.4.0 origin/main && git push origin v1.4.0`.
-3. The **Release** workflow:
+1. Tag a commit on `main` and push the tag: `git tag v1.4.0 origin/main && git push origin v1.4.0`. The tag is the release’s version; `package.json`’s `version` is not used, so nothing needs bumping first.
+2. The **Release** workflow:
    1. Runs the full Checks suite.
    2. Packages `order-pad-v1.4.0-linux-x64.tar.gz`. The tarball holds `build/`, `build-printer/`, the migrations, production `node_modules`, the Node runtime named in [.node-version](.node-version), `deploy/` and `release.json`.
    3. Migrates a fresh PostgreSQL 18 with the package’s own Prisma, then starts the packaged server.
    4. Records signed build provenance.
    5. Publishes the GitHub release. Its assets are the tarball, its `.sigstore.json` bundle, `SHA256SUMS` and `install-station.sh`.
 
-A tag that doesn’t match `package.json`, or a stable tag on a commit outside `main`, fails before anything is published. Tags with a hyphen (`v1.4.0-rc.1`) become prereleases, which only stations on `CHANNEL=prerelease` (or pinned to that tag) install. Try every release on such a station first.
+A tag that isn’t `vX.Y.Z` or `vX.Y.Z-pre`, or a stable tag on a commit outside `main`, fails before anything is published. Tags with a hyphen (`v1.4.0-rc.1`) become prereleases, which only stations on `CHANNEL=prerelease` (or pinned to that tag) install. Try every release on such a station first.
 
 ### What a station does
 

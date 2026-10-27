@@ -5,11 +5,11 @@ import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+// The tag is the release's version (release.json); package.json's version is not used.
 const tag = process.argv[2];
-const { version } = JSON.parse(await readFile('package.json', 'utf8'));
-if (tag !== `v${version}`)
+if (!/^v\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.]{1,40})?$/.test(tag ?? ''))
   throw new Error(
-    `Tag ${tag ?? '(none)'} must equal v${version} from package.json.`,
+    `Usage: npm run package:release -- vX.Y.Z (got ${tag ?? 'nothing'}).`,
   );
 if (process.platform !== 'linux' || process.arch !== 'x64')
   throw new Error('Package on linux-x64 so native modules match stations.');

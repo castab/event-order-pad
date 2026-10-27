@@ -4,7 +4,7 @@ A dated log of automated check results and owner-reported hardware evidence, **n
 
 ## Station releases after merging the database menu — 2026-10-26
 
-The release branch now includes the database menu from `main`. Its `fionas_choices` migration only adds a table and a defaulted column, so it is expand-only and is not listed in `deploy/manual-migrations`. The Release workflow now checks the tag against `package.json` and `main` before running the suite.
+The release branch now includes the database menu from `main`. Its `fionas_choices` migration only adds a table and a defaulted column, so it is expand-only and is not listed in `deploy/manual-migrations`. The tag is now the release's only version: `package.json` no longer has to match it, and the Release workflow checks the tag's form and, for stable tags, `main` before running the suite.
 
 All required checks passed:
 

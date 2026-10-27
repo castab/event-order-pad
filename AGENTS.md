@@ -217,10 +217,9 @@ The menu is `fionas_choices` plus `station.menu_revision`. Every change goes thr
 
 ### Cut a release
 
-1. Bump the version in a pull request: `npm version minor --no-git-tag-version` (or `patch`, `major`, `X.Y.Z-rc.N`). Merge it.
-2. Tag the merged commit on `main` and push the tag: `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`. The workflow refuses a tag that differs from `package.json` or a stable tag outside `main`.
-3. Try it first as a prerelease (`vX.Y.Z-rc.1`) on a station with `CHANNEL=prerelease` or `PIN`, and run the "Release-installed station acceptance checks" in `docs/linux-printing.md` when installing, the units or the service user changed.
-4. If a migration is not expand-only (invariant 15), list it in `deploy/manual-migrations` before tagging and explain the manual step in the release notes.
+1. Tag a commit on `main` and push the tag: `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`. The tag is the release's only version (stations read it from `release.json`); `package.json`'s `version` is not used and need not change. The workflow refuses a tag that is not `vX.Y.Z` or `vX.Y.Z-pre`, and a stable tag outside `main`.
+2. Try it first as a prerelease (`vX.Y.Z-rc.1`) on a station with `CHANNEL=prerelease` or `PIN`, and run the "Release-installed station acceptance checks" in `docs/linux-printing.md` when installing, the units or the service user changed.
+3. If a migration is not expand-only (invariant 15), list it in `deploy/manual-migrations` before tagging and explain the manual step in the release notes.
 
 To bump Node, change `.node-version` (CI and the bundled runtime follow it). Keep `prisma` in `dependencies`: stations run `migrate deploy` from the release.
 
