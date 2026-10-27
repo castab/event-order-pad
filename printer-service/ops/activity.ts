@@ -2,7 +2,8 @@ import type { PrismaClient } from '../generated/prisma/client';
 
 /**
  * Changes whenever staff edit, sign in, submit, print or finish an order. Timestamps are not
- * comparable here: attempt times come from browsers and drafts have none.
+ * comparable here: attempt times come from browsers and drafts have none. The release being
+ * installed runs this before its migrations, so it may read only what older releases created.
  */
 export async function activity(database: PrismaClient): Promise<string> {
   const [row] = await database.$queryRaw<

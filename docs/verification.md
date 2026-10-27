@@ -2,6 +2,20 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Station releases after merging the database menu — 2026-10-26
+
+The release branch now includes the database menu from `main`. Its `fionas_choices` migration only adds a table and a defaulted column, so it is expand-only and is not listed in `deploy/manual-migrations`. The Release workflow now checks the tag against `package.json` and `main` before running the suite.
+
+All required checks passed:
+
+- 37 integration tests on a disposable PostgreSQL 18 container in a Linux Node 24.21 container, and volume recreation.
+- Type checks with zero errors and warnings, formatting, and actionlint 1.7.12.
+- 385 unit/HTTP tests in the Linux container. On the Windows development machine, the tailnet admin listener tests and 9 updater tests cannot run, because they need POSIX directory modes and symlinks.
+- Both builds, and 176 Chromium tests on Windows.
+- `npm run package:release -- v0.2.0` produced a 149 MB tarball. `scripts/smoke-release.mjs` applied all seven migrations to a fresh database with the bundled Prisma, including the 15 seeded menu rows, then started the packaged server and stopped it cleanly.
+
+Not yet run: the Release workflow on GitHub, `install-station.sh`, the systemd units and the timer on a real machine. No station data was changed.
+
 ## Menu choices in PostgreSQL — 2026-10-26
 
 Flavors, containers and toppings moved from code into the new `fionas_choices` table, seeded with the old menu in the same order, and are edited on the tailnet admin page’s new Menu tab. Ticket validation now checks choice names for shape only and keeps the chosen order, so stored tickets with retired names still parse. Order pads refetch the menu when the revision in their 5-second database check changes.
