@@ -74,9 +74,11 @@ if [ ! -f "$release/release.json" ]; then
   (cd "$work" && sha256sum --check --quiet SHA256SUMS) || fail "$name does not match SHA256SUMS."
   if [ "$VERIFY" = sigstore ]; then
     escaped=$(printf '%s' "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$TAG" | sed 's/[.]/\\./g')
+    # By digest: cosign refuses to read blobs over 128 MiB, and the tarball is larger.
+    digest=$(sha256sum "$work/$name" | cut -d' ' -f1)
     cosign verify-blob-attestation --bundle "$work/$name.sigstore.json" --type slsaprovenance1 \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-      --certificate-identity-regexp "^$escaped\$" "$work/$name" >/dev/null ||
+      --certificate-identity-regexp "^$escaped\$" --digest "$digest" --digestAlg sha256 >/dev/null ||
       fail "$name was not built by $REPO's release workflow at $TAG."
   fi
   rm -rf "$release.partial"

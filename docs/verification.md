@@ -2,6 +2,14 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Release provenance checked by digest — 2026-10-26
+
+The first `install-station.sh --release v0.0.1` on the station failed at verification. cosign v3.1.3 `verify-blob-attestation` refuses to read a blob larger than 128 MiB (`size of layer (148979789) exceeded the limit (134217728)`), and the release tarball is 149 MB. The installer and the updater now pass the tarball's SHA-256 with `--digest … --digestAlg sha256` instead of the file. They compute the digest from the downloaded file after it matches `SHA256SUMS`.
+
+Against the published v0.0.1 assets, on the development machine with cosign v3.1.3: the old file form failed with that error. The digest form printed `Verified OK`. It rejected a changed digest (`provided artifact digest does not match any digest in statement`) and an identity for a different tag. The updater unit tests (17) and the service type check pass. The full required sequence was not rerun.
+
+The v0.0.1 release still ships the old updater, so a station on v0.0.1 cannot verify later releases automatically. Install a release that includes this change with the installer from that release's checkout, then `order-pad-ops apply <tag>`. Not yet run: the fixed installer on the station. No station data was changed.
+
 ## Station releases after merging the database menu — 2026-10-26
 
 The release branch now includes the database menu from `main`. Its `fionas_choices` migration only adds a table and a defaulted column, so it is expand-only and is not listed in `deploy/manual-migrations`. The tag is now the release's only version: `package.json` no longer has to match it, and the Release workflow checks the tag's form and, for stable tags, `main` before running the suite.

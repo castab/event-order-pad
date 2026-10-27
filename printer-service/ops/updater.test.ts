@@ -294,6 +294,8 @@ it('verifies, stages and hands off to the new release inside the window', async 
   expect(cosign).toContain(
     '^https://github\\.com/castab/event-order-pad/\\.github/workflows/release\\.yml@refs/tags/v0\\.3\\.0$',
   );
+  // cosign cannot read a blob over 128 MiB, so the attestation is checked by digest.
+  expect(cosign.slice(-4)).toEqual(['--digest', sum, '--digestAlg', 'sha256']);
   const handoff = calls.at(-1)!;
   expect(handoff[0]).toBe(
     join(paths.root, 'releases', 'v0.3.0', 'node', 'bin', 'node'),
