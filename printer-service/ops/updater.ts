@@ -314,9 +314,10 @@ export class Updater {
         'utf8',
       ),
     );
-    const digest = createHash('sha256');
-    await pipeline(createReadStream(tarball), digest);
-    if (sums.get(tarballName(tag)) !== digest.digest('hex'))
+    const hash = createHash('sha256');
+    await pipeline(createReadStream(tarball), hash);
+    const digest = hash.digest('hex');
+    if (sums.get(tarballName(tag)) !== digest)
       throw new Error(`${tarballName(tag)} does not match SHA256SUMS.`);
     if (config.verify === 'sigstore')
       await this.host.run('cosign', [
@@ -333,7 +334,11 @@ export class Updater {
         'https://token.actions.githubusercontent.com',
         '--certificate-identity-regexp',
         `^${regexp(`https://github.com/${config.repo}/.github/workflows/release.yml@refs/tags/${tag}`)}$`,
-        tarball,
+        // By digest: cosign refuses to read blobs over 128 MiB, and the tarball is larger.
+        '--digest',
+        digest,
+        '--digestAlg',
+        'sha256',
       ]);
     const partial = `${this.release(tag)}.partial`;
     await rm(partial, { recursive: true, force: true });
