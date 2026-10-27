@@ -1,7 +1,9 @@
 import { testAuth } from '../tests/helpers/auth';
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
+import { resetMenu } from '../tests/helpers/menu-postgres';
 import { createOrderDatabase, PostgresOrderRepository } from './order-database';
 import { Orders, OrderNotFound } from './orders';
+import { PostgresMenu } from './menu-database';
 import { PostgresStationRepository } from './station-database';
 import { createApp } from './http';
 import { sampleTicket } from '../src/lib/tickets/ticket';
@@ -27,6 +29,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await database.$executeRaw`TRUNCATE workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
+  await resetMenu(database);
 });
 afterAll(async () => {
   await database.$disconnect();
@@ -220,6 +223,7 @@ it('captures with tracking off, excludes pre-cutoff tickets, and blocks prints d
       root: directory,
       trackingEnabled: false,
       station: new PostgresStationRepository(stationDatabase, cutoff),
+      menu: new PostgresMenu(stationDatabase),
       cups: { queue: 'Test', check: async () => 'Ready' },
       orders,
       printing: {

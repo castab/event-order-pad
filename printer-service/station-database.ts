@@ -2,10 +2,13 @@ import { Prisma, type PrismaClient } from './generated/prisma/client';
 import { parseTicket, type OrderTicket } from '../src/lib/tickets/ticket';
 import {
   draftTicket,
+  newChoices,
   newDraft,
   parseDraft,
   prepareDraftForPrint,
 } from '../src/lib/tickets/order';
+import { onMenu } from '../src/lib/tickets/menu';
+import { readMenu } from './menu-database';
 import {
   parseAttempt,
   parseAttemptResult,
@@ -20,6 +23,8 @@ import {
 import { parseRequest, type PrintJournal, type Request } from './printing';
 
 export class StationConflict extends Error {}
+/** A draft picked a choice that is no longer on the menu; its message names it. */
+export class OffMenu extends StationConflict {}
 export interface StationRepository {
   check(): Promise<void>;
   load(workspaceId?: string): Promise<StationSnapshot>;
@@ -50,7 +55,9 @@ export class PostgresStationRepository
       (SELECT id FROM tickets LIMIT 1) AS ticket_id,
       (SELECT id FROM print_attempts LIMIT 1) AS attempt_id,
       (SELECT attempt_id FROM print_dispatches LIMIT 1) AS dispatch_id,
-      (SELECT event_id FROM order_events LIMIT 1) AS event_id`;
+      (SELECT event_id FROM order_events LIMIT 1) AS event_id,
+      (SELECT menu_revision FROM station WHERE id = 1) AS menu_revision,
+      (SELECT id FROM fionas_choices LIMIT 1) AS choice_id`;
   }
   private async workspace(
     tx: Prisma.TransactionClient,
@@ -171,8 +178,18 @@ export class PostgresStationRepository
       let draft = current;
       let latest = station.latestTicketId;
       switch (command.operation) {
-        case 'saveDraft':
+        case 'saveDraft': {
           draft = command.draft;
+          // Choices already in the draft stay even if retired; only new picks must be current.
+          const added = newChoices(current, draft);
+          if (added.length) {
+            const menu = await readMenu(tx);
+            const gone = added.find((c) => !onMenu(menu, c.category, c.name));
+            if (gone)
+              throw new OffMenu(
+                `“${gone.name}” is no longer on the menu. Reload to get the current menu. Nothing was saved.`,
+              );
+          }
           if (
             !current.submittedTicketId &&
             (draft.reference || draft.submittedTicketId)
@@ -198,6 +215,7 @@ export class PostgresStationRepository
             }
           }
           break;
+        }
         case 'saveTicket':
           if (command.ticket.id !== latest)
             throw new StationConflict(

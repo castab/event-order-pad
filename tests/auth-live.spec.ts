@@ -7,6 +7,7 @@ import {
   MemoryOrderRepository,
   testCaptureFrom,
 } from './helpers/order-repository';
+import { MemoryMenu } from './helpers/menu';
 import { MemoryStationRepository } from './helpers/station';
 
 test('the production service serves the built sign-in page and no account pages', async ({
@@ -23,6 +24,7 @@ test('the production service serves the built sign-in page and no account pages'
     cups: { queue: 'TestQueue', check: async () => 'Ready' },
     orders: new Orders(repository, testCaptureFrom),
     station: new MemoryStationRepository(repository),
+    menu: new MemoryMenu(),
     printing: {
       print: async () => {
         throw new Error('No printing in authentication page checks');

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeEach, expect, it, vi } from 'vitest';
+import { resetMenu } from '../tests/helpers/menu-postgres';
 import { createOrderDatabase } from './order-database';
 import { PostgresAuth, digest, secret, type AuthContext } from './auth';
 import {
@@ -29,6 +30,7 @@ let auth: PostgresAuth;
 let context: AuthContext;
 beforeEach(async () => {
   await database.$executeRaw`TRUNCATE access_workspaces, auth_events, auth_rates, auth_sessions, access_codes, workspaces, tickets, print_attempts, print_dispatches, station, order_events RESTART IDENTITY CASCADE`;
+  await resetMenu(database);
   now = new Date('2026-10-16T12:00:00.000Z');
   send.mockReset();
   send.mockImplementation(verified);

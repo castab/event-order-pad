@@ -134,10 +134,14 @@ export class DatabaseTicketStore implements TicketStore {
       cache: 'no-store',
       signal: AbortSignal.timeout(15000),
     });
-    if (response.status === 409)
+    if (response.status === 409) {
+      const body = await response.json().catch(() => undefined);
       throw new StationConflict(
-        'The station changed in another tab. Reload before continuing.',
+        body?.code === 'off-menu' && typeof body.error === 'string'
+          ? body.error
+          : 'The station changed in another tab. Reload before continuing.',
       );
+    }
     if (!response.ok)
       throw new Error('Database unavailable. Restore Postgres and reload.');
     return (this.snapshot = parseStationSnapshot(await response.json()));
@@ -185,12 +189,16 @@ export class DatabaseTicketStore implements TicketStore {
     if (!saved?.result) throw new Error('Missing saved print outcome.');
     return saved;
   }
-  async check(): Promise<void> {
+  /** Resolves with the menu revision, so callers can refetch a changed menu. */
+  async check(): Promise<number | undefined> {
     const response = await this.send('/api/database', {
       cache: 'no-store',
       signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok || (await response.json()).ready !== true)
-      throw new Error('Database unavailable.');
+    const body = response.ok ? await response.json() : undefined;
+    if (body?.ready !== true) throw new Error('Database unavailable.');
+    return Number.isSafeInteger(body.menuRevision)
+      ? body.menuRevision
+      : undefined;
   }
 }

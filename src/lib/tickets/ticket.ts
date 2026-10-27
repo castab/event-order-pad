@@ -1,25 +1,10 @@
 import { assertPrintable } from './format';
+import { maxChoicesPerCategory, parseChoiceName } from './menu';
 
-export const FLAVORS = [
-  'Chocolate',
-  'Vanilla',
-  'Strawberry',
-  'Chocolate Chip',
-] as const;
-export const CONTAINERS = ['Cup', 'Cake Cone', 'Sugar Cone'] as const;
-export const TOPPINGS = [
-  'Whipped cream',
-  'Gummy Bears',
-  'Caramel Sauce',
-  'Chocolate Sauce',
-  'Sliced Almonds',
-  'Maraschino Cherries',
-  'Rainbow Sprinkles',
-  'Chocolate Sprinkles',
-] as const;
-export type Flavor = (typeof FLAVORS)[number];
-export type Container = (typeof CONTAINERS)[number];
-export type Topping = (typeof TOPPINGS)[number];
+// Menu names come from the database; tickets keep whatever name was chosen.
+export type Flavor = string;
+export type Container = string;
+export type Topping = string;
 export const maxScoopsPerServing = 5;
 export const maxServings = 30;
 export interface FlavorCount {
@@ -164,7 +149,11 @@ export function totalScoops(serving: Pick<ServingEditor, 'flavors'>): number {
   return serving.flavors.reduce((total, portion) => total + portion.count, 0);
 }
 
-/** Shared serving validation; only the editor may omit scoops or its container. */
+/**
+ * Shared serving validation; only the editor may omit scoops or its container.
+ * It checks shape, not the current menu, so stored tickets with retired names
+ * still parse, and it keeps the order the builder chose.
+ */
 export function parseServing(value: unknown, partial: true): ServingEditor;
 export function parseServing(value: unknown, partial?: false): Serving;
 export function parseServing(value: unknown, partial = false): ServingEditor {
@@ -172,46 +161,53 @@ export function parseServing(value: unknown, partial = false): ServingEditor {
   const raw = value as Record<string, unknown>;
   if (
     !Array.isArray(raw.flavors) ||
-    raw.flavors.length > FLAVORS.length ||
+    raw.flavors.length > maxScoopsPerServing ||
     (!partial && !raw.flavors.length)
   )
     throw new Error('Add at least one scoop; each serving needs 1–5 scoops.');
-  const selected = Array.from(raw.flavors, (value: unknown) => {
+  const flavors = Array.from(raw.flavors, (value: unknown) => {
     if (!value || typeof value !== 'object')
       throw new Error('Invalid flavor count.');
-    const portion = value as FlavorCount;
-    if (!FLAVORS.includes(portion.flavor)) throw new Error('Invalid flavor.');
+    const portion = value as Record<string, unknown>;
+    const flavor = parseChoiceName(portion.flavor, 'Flavor');
     if (
       !Number.isInteger(portion.count) ||
-      portion.count < 1 ||
-      portion.count > maxScoopsPerServing
+      (portion.count as number) < 1 ||
+      (portion.count as number) > maxScoopsPerServing
     )
       throw new Error('Scoop counts must be whole numbers from 1 to 5.');
-    return Object.freeze({ flavor: portion.flavor, count: portion.count });
+    return Object.freeze({ flavor, count: portion.count as number });
   });
-  if (new Set(selected.map((p) => p.flavor)).size !== selected.length)
+  if (new Set(flavors.map((p) => p.flavor)).size !== flavors.length)
     throw new Error('Each flavor can appear only once per serving.');
-  if (totalScoops({ flavors: selected }) > maxScoopsPerServing)
+  if (totalScoops({ flavors }) > maxScoopsPerServing)
     throw new Error('A serving can contain at most 5 scoops.');
-  if (
-    !CONTAINERS.includes(raw.container as Container) &&
-    !(partial && raw.container === '')
-  )
-    throw new Error('Choose a container.');
+  let container: Container | '' = '';
+  if (!(partial && raw.container === '')) {
+    try {
+      container = parseChoiceName(raw.container, 'Container');
+    } catch {
+      throw new Error('Choose a container.');
+    }
+  }
   if (
     !Array.isArray(raw.toppings) ||
-    Array.from(raw.toppings).some((t) => !TOPPINGS.includes(t)) ||
-    new Set(raw.toppings).size !== raw.toppings.length
+    raw.toppings.length > maxChoicesPerCategory
   )
     throw new Error('Invalid toppings.');
+  const toppings = Array.from(raw.toppings, (t: unknown) => {
+    try {
+      return parseChoiceName(t, 'Topping');
+    } catch {
+      throw new Error('Invalid toppings.');
+    }
+  });
+  if (new Set(toppings).size !== toppings.length)
+    throw new Error('Invalid toppings.');
   return Object.freeze({
-    flavors: Object.freeze(
-      FLAVORS.flatMap((flavor) => selected.filter((p) => p.flavor === flavor)),
-    ),
-    container: raw.container as Container | '',
-    toppings: Object.freeze(
-      TOPPINGS.filter((t) => (raw.toppings as unknown[]).includes(t)),
-    ),
+    flavors: Object.freeze(flavors),
+    container,
+    toppings: Object.freeze(toppings),
   });
 }
 
@@ -268,8 +264,8 @@ export function sampleTicket(id: string, createdAt: string): OrderTicket {
     servings: [
       {
         flavors: [
-          { flavor: 'Chocolate Chip', count: 2 },
           { flavor: 'Strawberry', count: 1 },
+          { flavor: 'Chocolate Chip', count: 2 },
         ],
         container: 'Sugar Cone',
         toppings: ['Whipped cream', 'Chocolate Sauce'],

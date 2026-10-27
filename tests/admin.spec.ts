@@ -5,6 +5,7 @@ import {
   type AccessStatus,
   type MintedCode,
 } from '../printer-service/access-admin';
+import { defaultChoices, MemoryMenu } from './helpers/menu';
 
 const capability = 'fionasicecream.com/cap/order-pad-admin';
 const granted = JSON.stringify({ [capability]: [{}] });
@@ -26,6 +27,7 @@ type Admin = {
   slips: string[];
   refuseMint: (message: string) => void;
   dropReplies: (count: number) => void;
+  menu: MemoryMenu;
 };
 // The production listener is a Unix socket behind Tailscale Serve; the browser
 // test serves the same app on loopback TCP and supplies Serve's capability header.
@@ -50,10 +52,12 @@ const test = base.extend<{ admin: Admin }>({
       },
     ];
     let next = 0;
+    const menu = new MemoryMenu();
     const server = createAdminApp({
       origin,
       capability,
       assets: 'static',
+      menu,
       access: {
         status: async () => ({ unused: [...unused], devices: [...devices] }),
         mint: async (count) => {
@@ -112,6 +116,7 @@ const test = base.extend<{ admin: Admin }>({
       revokes,
       slips,
       posts: () => posts,
+      menu,
       hold: () => {
         let release!: () => void;
         gate = new Promise((resolve) => (release = resolve));
@@ -393,4 +398,168 @@ test('refuses devices the tailnet policy has not granted', async ({
   const response = await page.goto(admin.url);
   expect(response?.status()).toBe(403);
   await expect(page.getByText('How many access codes')).toHaveCount(0);
+});
+
+const addForm = (page: Page) =>
+  page.getByRole('region', { name: 'Add a choice' });
+const names = (page: Page, list: string) =>
+  page
+    .getByRole('region', { name: list })
+    .locator('.item .name')
+    .allTextContents();
+
+test('switches between the access-code and menu pages', async ({
+  page,
+  admin,
+}) => {
+  await page.goto(admin.url);
+  const tabs = page.getByRole('navigation', { name: 'Admin pages' });
+  await expect(
+    tabs.getByRole('link', { name: 'Access codes' }),
+  ).toHaveAttribute('aria-current', 'page');
+  await tabs.getByRole('link', { name: 'Menu' }).click();
+  await expect(page).toHaveURL(admin.url + 'menu');
+  await expect(
+    page.getByRole('heading', { name: 'Menu', level: 1 }),
+  ).toBeVisible();
+  await expect(tabs.getByRole('link', { name: 'Menu' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  expect(await names(page, 'Flavors')).toEqual([...defaultChoices.flavor]);
+  expect(await names(page, 'Toppings')).toEqual([...defaultChoices.topping]);
+  await expect(page.locator('#badge')).toHaveText('15 choices');
+});
+
+test('adds, edits, reorders and removes menu choices, each once', async ({
+  page,
+  admin,
+}) => {
+  await page.goto(admin.url + 'menu');
+  const add = page.getByRole('button', { name: 'Add choice' });
+  await expect(add).toBeDisabled();
+  await page.getByLabel('Category').selectOption('topping');
+  await addForm(page).getByLabel('Name').fill('Hot Fudge');
+  await addForm(page)
+    .getByLabel(/Description/)
+    .fill('Served warm.');
+  await add.click();
+  await expect(page.getByText('Hot Fudge added.')).toBeVisible();
+  await expect(addForm(page).getByLabel('Name')).toHaveValue('');
+  expect((await names(page, 'Toppings')).at(-1)).toBe('Hot Fudge');
+  await expect(page.getByText('Served warm.')).toBeVisible();
+  expect(admin.menu.menu.revision).toBe(1);
+
+  await page.getByRole('button', { name: 'Edit Vanilla' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit choice' });
+  await dialog.getByLabel('Name').fill('French Vanilla');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('French Vanilla saved.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Move Chocolate Chip up' }).click();
+  await expect(page.getByText('Chocolate Chip moved up.')).toBeVisible();
+  expect(await names(page, 'Flavors')).toEqual([
+    'Chocolate',
+    'French Vanilla',
+    'Chocolate Chip',
+    'Strawberry',
+  ]);
+  await expect(
+    page.getByRole('button', { name: 'Move Chocolate up' }),
+  ).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Remove Strawberry' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Remove Strawberry?' });
+  await confirm.getByRole('button', { name: 'Cancel' }).click();
+  expect(await names(page, 'Flavors')).toContain('Strawberry');
+  await page.getByRole('button', { name: 'Remove Strawberry' }).click();
+  await confirm.getByRole('button', { name: 'Remove flavor' }).click();
+  await expect(page.getByText('Strawberry removed.')).toBeVisible();
+  expect(await names(page, 'Flavors')).not.toContain('Strawberry');
+  expect(admin.menu.menu.revision).toBe(4);
+  expect(admin.posts()).toBe(4);
+});
+
+test('keeps the last container and reports a menu changed elsewhere', async ({
+  page,
+  admin,
+}) => {
+  admin.menu.set({ flavor: ['Vanilla'], container: ['Cup'], topping: [] });
+  await page.goto(admin.url + 'menu');
+  await expect(page.getByRole('button', { name: 'Remove Cup' })).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Remove Vanilla' }),
+  ).toBeDisabled();
+  await expect(page.getByText('No toppings on the menu.')).toBeVisible();
+  admin.menu.set({
+    flavor: ['Vanilla', 'Mint'],
+    container: ['Cup'],
+    topping: [],
+  });
+  await addForm(page).getByLabel('Name').fill('Pistachio');
+  await page.getByRole('button', { name: 'Add choice' }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'The menu changed on another device. Nothing changed',
+  );
+  await expect(addForm(page).getByLabel('Name')).toHaveValue('Pistachio');
+  // The page reloads the menu after a refusal, so a second try succeeds.
+  expect(await names(page, 'Flavors')).toEqual(['Vanilla', 'Mint']);
+  await page.getByRole('button', { name: 'Add choice' }).click();
+  await expect(page.getByText('Pistachio added.')).toBeVisible();
+});
+
+test('refuses a browser resend of a menu change', async ({ page, admin }) => {
+  await page.goto(admin.url + 'menu');
+  await expect(page.locator('#badge')).toHaveText('15 choices');
+  admin.dropReplies(1);
+  await page.getByRole('button', { name: 'Move Vanilla down' }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'The station already received this request, so it wasn’t repeated. Check the menu before trying again.',
+  );
+  expect(admin.posts()).toBe(2);
+  await expect
+    .poll(() => names(page, 'Flavors'))
+    .toEqual(['Chocolate', 'Strawberry', 'Vanilla', 'Chocolate Chip']);
+});
+
+test('reports a lost menu reply as possibly applied and never retries', async ({
+  page,
+  admin,
+}) => {
+  await page.goto(admin.url + 'menu');
+  await expect(page.locator('#badge')).toHaveText('15 choices');
+  admin.dropReplies(Infinity);
+  await page.getByRole('button', { name: 'Move Vanilla down' }).click();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('The station didn’t answer');
+  await expect(alert).toContainText(
+    'The change may already have happened. Nothing was retried. Check the menu before trying again.',
+  );
+  const posts = admin.posts();
+  await page.waitForTimeout(500);
+  expect(admin.posts()).toBe(posts);
+  expect(admin.menu.menu.revision).toBe(1);
+});
+
+test('lays out the menu page at phone width with touch-sized controls', async ({
+  page,
+  admin,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(admin.url + 'menu');
+  await expect(page.locator('#badge')).toHaveText('15 choices');
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+  for (const target of [
+    page.getByRole('link', { name: 'Menu' }),
+    page.getByLabel('Category'),
+    addForm(page).getByLabel('Name'),
+    page.getByRole('button', { name: 'Move Vanilla up' }),
+    page.getByRole('button', { name: 'Edit Vanilla' }),
+    page.getByRole('button', { name: 'Remove Vanilla' }),
+  ])
+    expect((await target.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 });

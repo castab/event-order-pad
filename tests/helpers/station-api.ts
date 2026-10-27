@@ -1,5 +1,9 @@
 import type { BrowserContext, Page } from '@playwright/test';
-import { StationConflict } from '../../printer-service/station-database';
+import {
+  OffMenu,
+  StationConflict,
+} from '../../printer-service/station-database';
+import { menuBody } from '../../src/lib/tickets/menu';
 import { MemoryStationRepository } from './station';
 import type { OrderTicket } from '../../src/lib/tickets/ticket';
 
@@ -22,8 +26,15 @@ export async function mockStationApi(
   await surface.route('**/api/database', (route) =>
     route.fulfill({
       status: unavailable ? 503 : 200,
-      json: { ready: !unavailable },
+      json: { ready: !unavailable, menuRevision: station.menu.menu.revision },
     }),
+  );
+  await surface.route('**/api/menu', (route) =>
+    route.fulfill(
+      unavailable
+        ? { status: 503, json: {} }
+        : { json: menuBody(station.menu.menu) },
+    ),
   );
   await surface.route('**/api/station', async (route) => {
     if (unavailable) return route.fulfill({ status: 503, json: {} });
@@ -41,12 +52,16 @@ export async function mockStationApi(
     } catch (error) {
       return route.fulfill({
         status: error instanceof StationConflict ? 409 : 503,
-        json: {},
+        json:
+          error instanceof OffMenu
+            ? { error: error.message, code: 'off-menu' }
+            : {},
       });
     }
   });
   return {
     station,
+    menu: station.menu,
     fail: (value: boolean) => {
       unavailable = value;
     },
