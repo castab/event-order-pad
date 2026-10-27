@@ -2,6 +2,20 @@
 
 A dated log of automated check results and owner-reported hardware evidence, **newest first**. Each entry describes the code as it was on that date; later entries supersede earlier ones. For current behavior, read [README](../README.md). Automated checks use mocked printer commands and API responses and never prove physical output.
 
+## Station releases after merging the database menu — 2026-10-26
+
+The release branch now includes the database menu from `main`. Its `fionas_choices` migration only adds a table and a defaulted column, so it is expand-only and is not listed in `deploy/manual-migrations`. The tag is now the release's only version: `package.json` no longer has to match it, and the Release workflow checks the tag's form and, for stable tags, `main` before running the suite.
+
+All required checks passed:
+
+- 37 integration tests on a disposable PostgreSQL 18 container in a Linux Node 24.21 container, and volume recreation.
+- Type checks with zero errors and warnings, formatting, and actionlint 1.7.12.
+- 385 unit/HTTP tests in the Linux container. On the Windows development machine, the tailnet admin listener tests and 9 updater tests cannot run, because they need POSIX directory modes and symlinks.
+- Both builds, and 176 Chromium tests on Windows.
+- `npm run package:release -- v0.2.0` produced a 149 MB tarball. `scripts/smoke-release.mjs` applied all seven migrations to a fresh database with the bundled Prisma, including the 15 seeded menu rows, then started the packaged server and stopped it cleanly.
+
+Not yet run: the Release workflow on GitHub, `install-station.sh`, the systemd units and the timer on a real machine. No station data was changed.
+
 ## Menu choices in PostgreSQL — 2026-10-26
 
 Flavors, containers and toppings moved from code into the new `fionas_choices` table, seeded with the old menu in the same order, and are edited on the tailnet admin page’s new Menu tab. Ticket validation now checks choice names for shape only and keeps the chosen order, so stored tickets with retired names still parse. Order pads refetch the menu when the revision in their 5-second database check changes.
@@ -14,6 +28,23 @@ All required checks passed in order:
 - Both builds, and 176 Chromium tests, including menu changes reaching the builder, an off-menu selection that still prints, and the admin Menu tab.
 
 No station data was touched and nothing was printed. A menu change reaching real devices, and the printed names, remain owner checks.
+
+## Station releases and automatic updates — 2026-10-19
+
+Pushing a `v*` tag now runs the full Checks suite and publishes a station release. The release is a self-contained linux-x64 tarball with its Node runtime, production dependencies and migrations, plus build provenance. Each station's `order-pad-update.timer` installs new releases inside its own window, and only after `QUIET_MINUTES` of unchanged database activity with an empty CUPS queue. It backs up first, then migrates, switches and checks health, and returns to the previous release on failure. On SIGTERM the service now refuses new prints and waits for a job already sent to `lp` to record its outcome. `prisma` moved to `dependencies`, and the version is 0.2.0.
+
+All required checks passed in order:
+
+- 30 integration tests on a disposable PostgreSQL 18 container (port 55432, not the station database), including the new activity-fingerprint and applied-migration tests, and volume recreation.
+- Type checks with zero errors and warnings. Formatting is clean for every tracked file; the only warnings are in an untracked `.claude/worktrees/` copy.
+- 331 unit/HTTP tests (after merging the blank-name change from `main`), including the updater state machine (install, busy, outside the window, manual migrations, failed backup, failed migration, health-check rollback, verification and staging) and the real command runner and probe.
+- Both builds, and 159 Chromium tests.
+- `npm run package:release -- v0.2.0` produced a 149 MB tarball. `scripts/smoke-release.mjs` unpacked it, migrated a fresh database with the bundled Prisma, started the packaged server in PDF mode, got 200 from `/api/auth/config`, loaded `ops.mjs` and stopped the server cleanly.
+- cosign v3.1.3 `verify-blob-attestation` accepted a public `actions/attest` bundle (from the GitHub CLI's own v2.102.0 release) with the flags the updater uses. It rejected that bundle under a different workflow identity, and rejected a modified file.
+- actionlint 1.7.12 and shellcheck 0.10.0 reported nothing for the workflows and `deploy/install-station.sh`.
+- A read-only probe of the live station confirmed `/api/auth/config` answers 200 on loopback with `CF-Connecting-IP` and 403 without it.
+
+Not yet run: the Release workflow on GitHub, `install-station.sh`, systemd units, the `order-pad` service user and the timer on a real machine, and the move of this station to releases. No station data was changed.
 
 ## Random blank-name labels — 2026-10-19
 

@@ -19,6 +19,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "access": "node --env-file-if-exists=.env build-printer/access-cli.mjs",
+    "package:release": "node scripts/package-release.mjs",
     "db:studio": "prisma studio",
     "precheck": "npm run db:generate",
     "prebuild:printer": "npm run db:generate",
@@ -35,7 +36,6 @@
     "@types/pg": "8.20.0",
     "prettier": "^3.6.2",
     "prettier-plugin-svelte": "^3.4.0",
-    "prisma": "7.10.0",
     "svelte": "5.57.2",
     "svelte-check": "4.7.6",
     "typescript": "^6.0.0",
@@ -47,7 +47,8 @@
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
     "pdfkit": "0.20.2",
-    "pg": "8.22.0"
+    "pg": "8.22.0",
+    "prisma": "7.10.0"
   },
   "imports": {
     "#lib": "./src/lib/index.js",

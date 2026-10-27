@@ -56,11 +56,16 @@ export function parseRequest(value: unknown): Request {
 export class Printing {
   private busy = false;
   private blocked = false;
+  private closing = false;
+  private drained?: () => void;
   private readonly inflight = new Map<
     string,
     { request: Request; promise: Promise<PrintAttemptResult> }
   >();
-  private readonly waiting: { run: () => void; expire: () => void }[] = [];
+  private readonly waiting: {
+    run: () => void;
+    expire: (message?: string) => void;
+  }[] = [];
   constructor(
     private output: PrintOutput,
     private journal: PrintJournal,
@@ -88,6 +93,19 @@ export class Printing {
   async receipt(attemptId: string): Promise<PrintRecord | undefined> {
     return this.journal.get(attemptId);
   }
+  /** Refuses new prints and resolves once every submission already started has its outcome saved. */
+  close(): Promise<void> {
+    this.closing = true;
+    for (const entry of [...this.waiting])
+      entry.expire('The service is restarting. No job was submitted.');
+    return new Promise((resolve) => {
+      this.drained = resolve;
+      this.settle();
+    });
+  }
+  private settle() {
+    if (this.closing && !this.inflight.size) this.drained?.();
+  }
   print(value: Request): Promise<PrintAttemptResult> {
     const request = parseRequest(value);
     const existing = this.inflight.get(request.attemptId);
@@ -100,6 +118,11 @@ export class Printing {
               'invalid-ticket',
             ),
           );
+    if (this.closing)
+      return this.notSubmitted(
+        request,
+        'The service is restarting. No job was submitted.',
+      );
     if (this.busy && this.waiting.length >= 8)
       return this.notSubmitted(
         request,
@@ -122,18 +145,20 @@ export class Printing {
             resolve(result);
             this.busy = false;
             this.waiting.shift()?.run();
+            this.settle();
           });
       },
-      expire: () => {
+      expire: (
+        message = 'The submission queue did not clear within 30 seconds. No job was submitted.',
+      ) => {
         const index = this.waiting.indexOf(entry);
         if (index < 0) return;
+        clearTimeout(timer);
         this.waiting.splice(index, 1);
-        void this.notSubmitted(
-          request,
-          'The submission queue did not clear within 30 seconds. No job was submitted.',
-        ).then((result) => {
+        void this.notSubmitted(request, message).then((result) => {
           this.inflight.delete(request.attemptId);
           resolve(result);
+          this.settle();
         });
       },
     };

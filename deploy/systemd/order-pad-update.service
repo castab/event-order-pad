@@ -1,0 +1,10 @@
+[Unit]
+Description=Install a new Order Pad release when the station is idle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock --nonblock /run/lock/order-pad-update.lock /opt/order-pad/current/node/bin/node /opt/order-pad/current/build-printer/ops.mjs update
+# Covers the quiet wait, backup, migrations and health check.
+TimeoutStartSec=3h
